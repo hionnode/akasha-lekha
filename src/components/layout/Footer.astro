@@ -1,0 +1,44 @@
+---
+const currentYear = new Date().getFullYear();
+---
+
+<footer class="border-t border-border bg-bg-secondary mt-auto">
+  <div class="container mx-auto px-4 py-8 max-w-[1200px]">
+    <div class="flex flex-col md:flex-row justify-between items-center gap-4">
+      <div class="text-fg-muted text-sm">
+        <p>© {currentYear} works-on-my.cloud</p>
+        <p class="mt-1">Built with Astro</p>
+      </div>
+      <div class="text-fg-muted text-sm">
+        <a href="/rss.xml" class="hover:text-accent-blue transition-colors">RSS</a>
+      </div>
+      <div class="flex gap-4">
+        <a
+          href="https://github.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-fg-secondary hover:text-accent-blue transition-colors text-sm"
+        >
+          GitHub
+        </a>
+        <a
+          href="https://linkedin.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-fg-secondary hover:text-accent-blue transition-colors text-sm"
+        >
+          LinkedIn
+        </a>
+        <a
+          href="https://twitter.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-fg-secondary hover:text-accent-blue transition-colors text-sm"
+        >
+          Twitter
+        </a>
+      </div>
+    </div>
+  </div>
+</footer>
+

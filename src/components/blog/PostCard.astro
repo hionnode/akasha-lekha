@@ -1,0 +1,50 @@
+---
+import TagPill from './TagPill.astro';
+import { calculateReadingTime } from '../../utils/readingTime';
+
+interface Props {
+  title: string;
+  excerpt: string;
+  date: string;
+  tags: string[];
+  slug: string;
+  featured?: boolean;
+  content?: string;
+}
+
+const { title, excerpt, date, tags, slug, featured = false, content } = Astro.props;
+const readingTime = content ? calculateReadingTime(content) : null;
+const formattedDate = new Date(date).toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+---
+
+<article
+  class="border border-border bg-bg-secondary p-6 hover:bg-bg-tertiary hover:border-accent-blue transition-colors cursor-pointer group"
+>
+  <a href={`/blog/${slug}`} class="block">
+    {featured && (
+      <div class="mb-3">
+        <span class="text-xs font-semibold uppercase tracking-wider text-accent-yellow">
+          Featured
+        </span>
+      </div>
+    )}
+    <h3 class="text-xl font-semibold mb-2 group-hover:text-accent-blue transition-colors">
+      {title}
+    </h3>
+    <p class="text-fg-secondary mb-4 leading-relaxed">{excerpt}</p>
+    <footer class="flex flex-wrap items-center gap-3 text-sm text-fg-muted">
+      <time datetime={date}>{formattedDate}</time>
+      {readingTime && <span>• {readingTime} min read</span>}
+      <div class="flex flex-wrap gap-2">
+        {tags.map((tag) => (
+          <TagPill tag={tag} />
+        ))}
+      </div>
+    </footer>
+  </a>
+</article>
+

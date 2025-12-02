@@ -1,0 +1,36 @@
+---
+// Client-side island for copy functionality
+---
+
+<button
+  class="copy-button absolute top-2 right-2 px-3 py-1 text-xs font-semibold bg-bg-tertiary border border-border text-fg-secondary hover:bg-bg-primary hover:text-accent-green transition-colors rounded"
+  data-code={Astro.props.code}
+>
+  Copy
+</button>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const buttons = document.querySelectorAll('.copy-button');
+    buttons.forEach((button) => {
+      button.addEventListener('click', async () => {
+        const code = button.getAttribute('data-code');
+        if (code) {
+          try {
+            await navigator.clipboard.writeText(code);
+            const originalText = button.textContent;
+            button.textContent = 'Copied!';
+            button.classList.add('text-accent-green');
+            setTimeout(() => {
+              button.textContent = originalText;
+              button.classList.remove('text-accent-green');
+            }, 2000);
+          } catch (err) {
+            console.error('Failed to copy:', err);
+          }
+        }
+      });
+    });
+  });
+</script>
+

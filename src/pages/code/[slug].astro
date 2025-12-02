@@ -1,0 +1,71 @@
+---
+import { getCollection } from 'astro:content';
+import Layout from '../../layouts/Layout.astro';
+import Header from '../../components/layout/Header.astro';
+import Footer from '../../components/layout/Footer.astro';
+import Container from '../../components/layout/Container.astro';
+import SEO from '../../components/shared/SEO.astro';
+import CodeBlock from '../../components/code/CodeBlock.astro';
+import TagPill from '../../components/blog/TagPill.astro';
+import Button from '../../components/shared/Button.astro';
+import Badge from '../../components/shared/Badge.astro';
+
+export async function getStaticPaths() {
+  const scripts = await getCollection('scripts');
+  return scripts.map((script) => ({
+    params: { slug: script.slug },
+    props: { script },
+  }));
+}
+
+interface Props {
+  script: Awaited<ReturnType<typeof getCollection<'scripts'>>>[number];
+}
+
+const { script } = Astro.props;
+---
+
+<Layout title={`${script.data.title} | Code Library | works-on-my.cloud`}>
+  <SEO title={script.data.title} description={script.data.description} />
+  <div class="min-h-screen flex flex-col">
+    <Header />
+    <main class="flex-1">
+      <Container class="py-12">
+        <article class="max-w-4xl mx-auto">
+          <header class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+              <h1 class="flex-1">{script.data.title}</h1>
+              <Badge text={script.data.language.toUpperCase()} variant="accent" />
+            </div>
+            <p class="text-lg text-fg-secondary mb-6">{script.data.description}</p>
+            <div class="flex flex-wrap gap-2 mb-4">
+              {script.data.tags.map((tag) => (
+                <TagPill tag={tag} />
+              ))}
+            </div>
+            {script.data.externalRepo && (
+              <a
+                href={script.data.externalRepo}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="inline-flex items-center gap-2 text-accent-blue hover:text-accent-cyan transition-colors"
+              >
+                View on GitHub →
+              </a>
+            )}
+          </header>
+          <div class="prose prose-invert max-w-none">
+            {await script.render()}
+          </div>
+          <footer class="mt-12 pt-8 border-t border-border">
+            <Button href="/code" variant="secondary">
+              ← Back to Code Library
+            </Button>
+          </footer>
+        </article>
+      </Container>
+    </main>
+    <Footer />
+  </div>
+</Layout>
+

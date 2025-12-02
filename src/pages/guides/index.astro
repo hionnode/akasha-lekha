@@ -1,0 +1,57 @@
+---
+import { getCollection } from 'astro:content';
+import Layout from '../../layouts/Layout.astro';
+import Header from '../../components/layout/Header.astro';
+import Footer from '../../components/layout/Footer.astro';
+import Container from '../../components/layout/Container.astro';
+import GuideCard from '../../components/guides/GuideCard.astro';
+import { calculateReadingTime } from '../../utils/readingTime';
+
+const allGuides = await getCollection('guides');
+const guideIndexes = allGuides.filter((guide) => 'parts' in guide.data);
+
+const guidesWithMetadata = guideIndexes.map((guide) => {
+  const guideData = guide.data as { title: string; description: string; tags: string[]; parts: Array<{ slug: string; title: string }> };
+  const guideSlug = guide.slug.split('/')[0];
+  const parts = allGuides
+    .filter((g) => g.slug.startsWith(guideSlug) && 'part' in g.data)
+    .sort((a, b) => (a.data as { part: number }).part - (b.data as { part: number }).part);
+  
+  const totalReadTime = parts.reduce((acc, part) => acc + calculateReadingTime(part.body), 0);
+
+  return {
+    slug: guideSlug,
+    title: guideData.title,
+    description: guideData.description,
+    partCount: parts.length,
+    tags: guideData.tags,
+    readTime: totalReadTime,
+  };
+});
+---
+
+<Layout title="Guides | works-on-my.cloud" description="Multi-part deep dives into specific topics">
+  <div class="min-h-screen flex flex-col">
+    <Header />
+    <main class="flex-1">
+      <Container class="py-12">
+        <h1 class="mb-4">Guides</h1>
+        <p class="text-fg-secondary text-lg mb-8">Multi-part deep dives into specific topics</p>
+        <div class="grid md:grid-cols-2 gap-6">
+          {guidesWithMetadata.map((guide) => (
+            <GuideCard
+              title={guide.title}
+              description={guide.description}
+              partCount={guide.partCount}
+              tags={guide.tags}
+              slug={guide.slug}
+              readTime={guide.readTime}
+            />
+          ))}
+        </div>
+      </Container>
+    </main>
+    <Footer />
+  </div>
+</Layout>
+

@@ -1,0 +1,56 @@
+---
+import Button from '../shared/Button.astro';
+
+interface Props {
+  previousPart?: {
+    slug: string;
+    title: string;
+  };
+  nextPart?: {
+    slug: string;
+    title: string;
+  };
+  guideSlug: string;
+  guideTitle: string;
+}
+
+const { previousPart, nextPart, guideSlug, guideTitle } = Astro.props;
+---
+
+<nav class="border-t border-border pt-8 mt-8">
+  <div class="flex flex-col sm:flex-row justify-between gap-4">
+    <div class="flex-1">
+      {previousPart ? (
+        <div>
+          <p class="text-sm text-fg-muted mb-2">Previous</p>
+          <Button href={`/guides/${guideSlug}/${previousPart.slug}`} variant="secondary">
+            ← {previousPart.title}
+          </Button>
+        </div>
+      ) : (
+        <div>
+          <Button href={`/guides/${guideSlug}`} variant="ghost">
+            ← Back to Guide
+          </Button>
+        </div>
+      )}
+    </div>
+    <div class="flex-1 text-right">
+      {nextPart ? (
+        <div>
+          <p class="text-sm text-fg-muted mb-2">Next</p>
+          <Button href={`/guides/${guideSlug}/${nextPart.slug}`} variant="secondary">
+            {nextPart.title} →
+          </Button>
+        </div>
+      ) : (
+        <div>
+          <Button href={`/guides/${guideSlug}`} variant="ghost">
+            Back to Guide →
+          </Button>
+        </div>
+      )}
+    </div>
+  </div>
+</nav>
+

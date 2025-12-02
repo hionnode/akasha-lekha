@@ -1,0 +1,85 @@
+---
+import { getCollection } from 'astro:content';
+import Layout from '../../layouts/Layout.astro';
+import Header from '../../components/layout/Header.astro';
+import Footer from '../../components/layout/Footer.astro';
+import Container from '../../components/layout/Container.astro';
+import SEO from '../../components/shared/SEO.astro';
+import TagPill from '../../components/blog/TagPill.astro';
+import Button from '../../components/shared/Button.astro';
+import { calculateReadingTime } from '../../utils/readingTime';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog', ({ data }) => !data.draft);
+  return posts.map((post) => ({
+    params: { slug: post.slug },
+    props: { post },
+  }));
+}
+
+interface Props {
+  post: Awaited<ReturnType<typeof getCollection<'blog'>>>[number];
+}
+
+const { post } = Astro.props;
+const readingTime = calculateReadingTime(post.body);
+const formattedDate = new Date(post.data.date).toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+---
+
+<Layout title={post.data.title}>
+  <SEO
+    title={post.data.title}
+    description={post.data.excerpt}
+    type="article"
+    publishedTime={post.data.date}
+    modifiedTime={post.data.updated}
+    tags={post.data.tags}
+  />
+  <div class="min-h-screen flex flex-col">
+    <Header />
+    <main class="flex-1">
+      <Container class="py-12">
+        <article class="max-w-[65ch] mx-auto">
+          <header class="mb-8">
+            <h1 class="mb-4">{post.data.title}</h1>
+            <div class="flex flex-wrap items-center gap-4 text-sm text-fg-muted mb-6">
+              <time datetime={post.data.date}>{formattedDate}</time>
+              {post.data.updated && post.data.updated !== post.data.date && (
+                <>
+                  <span>•</span>
+                  <span>Updated: {new Date(post.data.updated).toLocaleDateString()}</span>
+                </>
+              )}
+              <span>•</span>
+              <span>{readingTime} min read</span>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              {post.data.tags.map((tag) => (
+                <TagPill tag={tag} href={`/blog?tag=${tag}`} />
+              ))}
+            </div>
+          </header>
+          <div class="prose prose-invert max-w-none">
+            {await post.render()}
+          </div>
+          <footer class="mt-12 pt-8 border-t border-border">
+            <div class="flex flex-wrap gap-2 mb-6">
+              {post.data.tags.map((tag) => (
+                <TagPill tag={tag} href={`/blog?tag=${tag}`} />
+              ))}
+            </div>
+            <Button href="/blog" variant="secondary">
+              ← Back to Blog
+            </Button>
+          </footer>
+        </article>
+      </Container>
+    </main>
+    <Footer />
+  </div>
+</Layout>
+

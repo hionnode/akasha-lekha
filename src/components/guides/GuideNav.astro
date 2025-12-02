@@ -1,0 +1,39 @@
+---
+interface Props {
+  parts: Array<{
+    slug: string;
+    title: string;
+  }>;
+  currentPart?: string;
+  guideSlug: string;
+}
+
+const { parts, currentPart, guideSlug } = Astro.props;
+---
+
+<nav class="border border-border bg-bg-secondary p-4 rounded">
+  <h4 class="text-sm font-semibold uppercase tracking-wider text-fg-muted mb-3">
+    Guide Contents
+  </h4>
+  <ol class="space-y-2">
+    {parts.map((part, index) => {
+      const isCurrent = currentPart === part.slug;
+      return (
+        <li>
+          <a
+            href={`/guides/${guideSlug}/${part.slug}`}
+            class={`block px-3 py-2 rounded text-sm transition-colors ${
+              isCurrent
+                ? 'bg-bg-tertiary text-accent-blue border border-accent-blue'
+                : 'text-fg-secondary hover:bg-bg-tertiary hover:text-fg-primary'
+            }`}
+          >
+            <span class="text-fg-muted mr-2">{index + 1}.</span>
+            {part.title}
+          </a>
+        </li>
+      );
+    })}
+  </ol>
+</nav>
+

@@ -1,0 +1,93 @@
+@import "tailwindcss";
+
+/* Tokyo Night Color Palette */
+@theme {
+  /* Backgrounds */
+  --color-bg-primary: #1a1b26;
+  --color-bg-secondary: #16161e;
+  --color-bg-tertiary: #24283b;
+
+  /* Foregrounds */
+  --color-fg-primary: #c0caf5;
+  --color-fg-secondary: #a9b1d6;
+  --color-fg-muted: #565f89;
+
+  /* Accents */
+  --color-accent-blue: #7aa2f7;
+  --color-accent-cyan: #7dcfff;
+  --color-accent-green: #9ece6a;
+  --color-accent-yellow: #e0af68;
+  --color-accent-orange: #ff9e64;
+  --color-accent-red: #f7768e;
+  --color-accent-purple: #bb9af7;
+  --color-accent-magenta: #c0a7e0;
+
+  /* Borders & Hover */
+  --color-border: #292e42;
+  --color-hover: #2f3549;
+}
+
+/* CSS Custom Properties for easier use */
+:root {
+  --bg-primary: #1a1b26;
+  --bg-secondary: #16161e;
+  --bg-tertiary: #24283b;
+  --fg-primary: #c0caf5;
+  --fg-secondary: #a9b1d6;
+  --fg-muted: #565f89;
+  --accent-blue: #7aa2f7;
+  --accent-cyan: #7dcfff;
+  --accent-green: #9ece6a;
+  --accent-yellow: #e0af68;
+  --accent-orange: #ff9e64;
+  --accent-red: #f7768e;
+  --accent-purple: #bb9af7;
+  --accent-magenta: #c0a7e0;
+  --border: #292e42;
+  --hover: #2f3549;
+}
+
+/* Base Styles */
+@layer base {
+  html {
+    @apply bg-bg-primary text-fg-primary;
+    font-family: 'Inconsolata', monospace;
+  }
+
+  body {
+    @apply antialiased;
+  }
+
+  /* Typography */
+  h1 {
+    @apply text-[2.5rem] font-bold leading-[1.2] tracking-[-0.02em];
+  }
+
+  h2 {
+    @apply text-[2rem] font-semibold leading-[1.2] tracking-[-0.02em];
+  }
+
+  h3 {
+    @apply text-[1.5rem] font-semibold leading-[1.2] tracking-[-0.02em];
+  }
+
+  h4 {
+    @apply text-[1.25rem] font-semibold leading-[1.2] tracking-[-0.02em];
+  }
+
+  h5 {
+    @apply text-base font-semibold leading-[1.2] tracking-[-0.02em];
+  }
+
+  p {
+    @apply text-base leading-[1.6];
+  }
+
+  code {
+    @apply text-sm;
+  }
+
+  pre {
+    @apply text-sm leading-[1.5];
+  }
+}

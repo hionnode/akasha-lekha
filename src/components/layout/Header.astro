@@ -1,0 +1,34 @@
+---
+const navItems = [
+  { href: '/blog', label: 'Blog' },
+  { href: '/guides', label: 'Guides' },
+  { href: '/code', label: 'Code Library' },
+  { href: '/monitoring', label: 'Monitoring', badge: 'Coming Soon' },
+];
+---
+
+<header class="border-b border-border sticky top-0 bg-bg-primary/80 backdrop-blur-sm z-50">
+  <nav class="container mx-auto px-4 py-4 flex justify-between items-center max-w-[1200px]">
+    <a href="/" class="text-xl font-bold text-fg-primary hover:text-accent-blue transition-colors">
+      works-on-my.cloud
+    </a>
+    <ul class="flex gap-6 items-center">
+      {navItems.map((item) => (
+        <li>
+          <a
+            href={item.href}
+            class="text-fg-secondary hover:text-accent-blue transition-colors text-sm font-semibold"
+          >
+            {item.label}
+            {item.badge && (
+              <span class="ml-2 text-xs text-fg-muted uppercase tracking-wider">
+                {item.badge}
+              </span>
+            )}
+          </a>
+        </li>
+      ))}
+    </ul>
+  </nav>
+</header>
+

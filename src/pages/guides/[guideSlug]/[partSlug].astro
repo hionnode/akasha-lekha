@@ -1,0 +1,128 @@
+---
+import { getCollection } from 'astro:content';
+import Layout from '../../../layouts/Layout.astro';
+import Header from '../../../components/layout/Header.astro';
+import Footer from '../../../components/layout/Footer.astro';
+import Container from '../../../components/layout/Container.astro';
+import SEO from '../../../components/shared/SEO.astro';
+import GuideNav from '../../../components/guides/GuideNav.astro';
+import PartNav from '../../../components/guides/PartNav.astro';
+import { calculateReadingTime } from '../../../utils/readingTime';
+
+export async function getStaticPaths() {
+  const guides = await getCollection('guides');
+  const parts = guides.filter((guide) => 'part' in guide.data);
+
+  return parts.map((part) => {
+    const slugParts = part.slug.split('/');
+    const guideSlug = slugParts[0];
+    const partSlug = slugParts[1];
+
+    // Get guide index and all parts
+    const guideIndex = guides.find(
+      (g) => g.slug === guideSlug && 'parts' in g.data
+    );
+    const allParts = guides
+      .filter((g) => g.slug.startsWith(guideSlug) && 'part' in g.data)
+      .sort((a, b) => (a.data as { part: number }).part - (b.data as { part: number }).part);
+
+    const currentIndex = allParts.findIndex((p) => p.slug === part.slug);
+    const previousPart = currentIndex > 0 ? {
+      slug: allParts[currentIndex - 1].slug.split('/').pop()!,
+      title: (allParts[currentIndex - 1].data as { title: string }).title,
+    } : undefined;
+    const nextPart = currentIndex < allParts.length - 1 ? {
+      slug: allParts[currentIndex + 1].slug.split('/').pop()!,
+      title: (allParts[currentIndex + 1].data as { title: string }).title,
+    } : undefined;
+
+    return {
+      params: { guideSlug: guideSlug, partSlug: partSlug },
+      props: { part, guideIndex, allParts, previousPart, nextPart },
+    };
+  });
+}
+
+interface Props {
+  part: Awaited<ReturnType<typeof getCollection<'guides'>>>[number];
+  guideIndex?: Awaited<ReturnType<typeof getCollection<'guides'>>>[number];
+  allParts: Awaited<ReturnType<typeof getCollection<'guides'>>>[number][];
+  previousPart?: { slug: string; title: string };
+  nextPart?: { slug: string; title: string };
+}
+
+const { part, guideIndex, allParts, previousPart, nextPart } = Astro.props;
+const partData = part.data as { title: string; date: string; guide: string };
+const guideTitle = guideIndex ? (guideIndex.data as { title: string }).title : partData.guide;
+const guideSlug = part.slug.split('/')[0];
+const readingTime = calculateReadingTime(part.body);
+const formattedDate = new Date(partData.date).toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+
+const navParts = allParts.map((p) => ({
+  slug: p.slug.split('/').pop()!,
+  title: (p.data as { title: string }).title,
+}));
+---
+
+<Layout title={`${partData.title} | ${guideTitle} | works-on-my.cloud`}>
+  <SEO
+    title={partData.title}
+    description={`Part of ${guideTitle}`}
+    type="article"
+    publishedTime={partData.date}
+    tags={(part.data as { tags: string[] }).tags}
+  />
+  <div class="min-h-screen flex flex-col">
+    <Header />
+    <main class="flex-1">
+      <Container class="py-12">
+        <div class="max-w-4xl mx-auto">
+          <nav class="mb-6 text-sm text-fg-muted">
+            <a href="/guides" class="hover:text-accent-blue">Guides</a>
+            <span class="mx-2">/</span>
+            <a href={`/guides/${guideSlug}`} class="hover:text-accent-blue">{guideTitle}</a>
+            <span class="mx-2">/</span>
+            <span>{partData.title}</span>
+          </nav>
+
+          <div class="grid md:grid-cols-3 gap-8">
+            <div class="md:col-span-2">
+              <article>
+                <header class="mb-8">
+                  <h1 class="mb-4">{partData.title}</h1>
+                  <div class="flex flex-wrap items-center gap-4 text-sm text-fg-muted">
+                    <time datetime={partData.date}>{formattedDate}</time>
+                    <span>•</span>
+                    <span>{readingTime} min read</span>
+                  </div>
+                </header>
+                <div class="prose prose-invert max-w-none">
+                  {await part.render()}
+                </div>
+                <PartNav
+                  previousPart={previousPart}
+                  nextPart={nextPart}
+                  guideSlug={guideSlug}
+                  guideTitle={guideTitle}
+                />
+              </article>
+            </div>
+            <div>
+              <GuideNav
+                parts={navParts}
+                currentPart={part.slug.split('/').pop()}
+                guideSlug={guideSlug}
+              />
+            </div>
+          </div>
+        </div>
+      </Container>
+    </main>
+    <Footer />
+  </div>
+</Layout>
+
