@@ -51,10 +51,34 @@ The project uses:
 
 ## Deployment
 
-Configured for Cloudflare Pages:
-- Build command: `pnpm build`
-- Output directory: `dist`
-- Node version: 18.x or 20.x
+### Cloudflare Pages
+
+This project is configured for Cloudflare Pages deployment:
+
+**Build Settings (in Cloudflare Pages dashboard):**
+- **Framework preset:** Astro (or "None" if Astro preset not available)
+- **Build command:** `pnpm build`
+- **Build output directory:** `dist`
+- **Root directory:** (leave empty)
+- **Node version:** 18.x, 20.x, or 22.x
+- **Package manager:** pnpm
+
+**⚠️ CRITICAL: Do NOT set a deploy command!**
+
+Cloudflare Pages will automatically deploy the `dist` folder after the build completes. If you see errors about `wrangler deploy`, it means a deploy command is configured - **remove it** from your Cloudflare Pages settings.
+
+**Environment Variables:** None required initially
+
+The build output (`dist/`) contains all static files ready for deployment.
+
+### Troubleshooting Deployment
+
+If you see this error:
+```
+✘ [ERROR] Missing entry-point to Worker script or to assets directory
+```
+
+**Solution:** Go to your Cloudflare Pages project settings → Builds & deployments → Remove any "Deploy command" that might be set. Leave it empty.
 
 ## Documentation
 
