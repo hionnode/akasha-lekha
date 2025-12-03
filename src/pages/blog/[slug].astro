@@ -7,21 +7,41 @@ import Container from '../../components/layout/Container.astro';
 import SEO from '../../components/shared/SEO.astro';
 import TagPill from '../../components/blog/TagPill.astro';
 import Button from '../../components/shared/Button.astro';
+import PostCard from '../../components/blog/PostCard.astro';
+import TableOfContents from '../../components/shared/TableOfContents.astro';
+import ShareButtons from '../../components/shared/ShareButtons.astro';
 import { calculateReadingTime } from '../../utils/readingTime';
 
 export async function getStaticPaths() {
   const posts = await getCollection('blog', ({ data }) => !data.draft);
   return posts.map((post) => ({
     params: { slug: post.slug },
-    props: { post },
+    props: { post, allPosts: posts },
   }));
 }
 
+type BlogPost = Awaited<ReturnType<typeof getCollection<'blog'>>>[number];
+
 interface Props {
-  post: Awaited<ReturnType<typeof getCollection<'blog'>>>[number];
+  post: BlogPost;
+  allPosts: BlogPost[];
 }
 
-const { post } = Astro.props;
+const { post, allPosts } = Astro.props;
+
+// Find related posts based on shared tags
+const currentTags = post.data.tags;
+const relatedPosts: BlogPost[] = allPosts
+  .filter((p) => p.slug !== post.slug && !p.data.draft)
+  .map((p) => {
+    const sharedTags = p.data.tags.filter((tag: string) => currentTags.includes(tag));
+    return { post: p, sharedCount: sharedTags.length };
+  })
+  .filter((item) => item.sharedCount > 0)
+  .sort((a, b) => b.sharedCount - a.sharedCount)
+  .slice(0, 4)
+  .map((item) => item.post);
+const { Content } = await post.render();
 const readingTime = calculateReadingTime(post.body);
 const formattedDate = new Date(post.data.date).toLocaleDateString('en-US', {
   year: 'numeric',
@@ -41,9 +61,13 @@ const formattedDate = new Date(post.data.date).toLocaleDateString('en-US', {
   />
   <div class="min-h-screen flex flex-col">
     <Header />
-    <main class="flex-1">
+    <!-- Reading Progress Bar -->
+    <div id="reading-progress" class="fixed top-0 left-0 right-0 h-1 bg-bg-tertiary z-40">
+      <div id="reading-progress-bar" class="h-full bg-gradient-to-r from-accent-blue via-accent-cyan to-accent-blue transition-all duration-150" style="width: 0%"></div>
+    </div>
+    <main id="main-content" class="flex-1">
       <Container class="py-12">
-        <article class="max-w-[65ch] mx-auto">
+        <article class="max-w-[65ch] mx-auto" id="article-content">
           <header class="mb-8">
             <h1 class="mb-4">{post.data.title}</h1>
             <div class="flex flex-wrap items-center gap-4 text-sm text-fg-muted mb-6">
@@ -62,16 +86,33 @@ const formattedDate = new Date(post.data.date).toLocaleDateString('en-US', {
                 <TagPill tag={tag} href={`/blog?tag=${tag}`} />
               ))}
             </div>
-          </header>
-          <div class="prose prose-invert max-w-none">
-            {await post.render()}
-          </div>
-          <footer class="mt-12 pt-8 border-t border-border">
-            <div class="flex flex-wrap gap-2 mb-6">
-              {post.data.tags.map((tag) => (
-                <TagPill tag={tag} href={`/blog?tag=${tag}`} />
-              ))}
+            <div class="mt-4">
+              <ShareButtons title={post.data.title} url={Astro.url.href} />
             </div>
+          </header>
+          <TableOfContents content={post.body} />
+          <div class="prose prose-invert max-w-none">
+            <Content />
+          </div>
+          {relatedPosts.length > 0 && (
+            <section class="mt-12 pt-8 border-t border-border">
+              <h2 class="text-2xl font-semibold mb-6">Related Posts</h2>
+              <div class="space-y-4">
+                {relatedPosts.map((relatedPost) => (
+                  <PostCard
+                    title={relatedPost.data.title}
+                    excerpt={relatedPost.data.excerpt}
+                    date={relatedPost.data.date}
+                    tags={relatedPost.data.tags}
+                    slug={relatedPost.slug}
+                    featured={relatedPost.data.featured}
+                    content={relatedPost.body}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+          <footer class="mt-12 pt-8 border-t border-border">
             <Button href="/blog" variant="secondary">
               ← Back to Blog
             </Button>
@@ -82,4 +123,54 @@ const formattedDate = new Date(post.data.date).toLocaleDateString('en-US', {
     <Footer />
   </div>
 </Layout>
+
+<script>
+  function updateReadingProgress() {
+    const article = document.getElementById('article-content');
+    const progressBar = document.getElementById('reading-progress-bar');
+    
+    if (!article || !progressBar) return;
+
+    const articleTop = article.offsetTop;
+    const articleHeight = article.offsetHeight;
+    const windowHeight = window.innerHeight;
+    const scrollTop = window.scrollY || document.documentElement.scrollTop;
+    
+    // Calculate how much of the article has been scrolled past
+    const scrolled = Math.max(0, scrollTop - articleTop + windowHeight);
+    const total = articleHeight + windowHeight;
+    const progress = Math.min(100, (scrolled / total) * 100);
+    
+    progressBar.style.width = `${progress}%`;
+  }
+
+  // Throttle scroll events for performance
+  let ticking = false;
+  function onScroll() {
+    if (!ticking) {
+      window.requestAnimationFrame(() => {
+        updateReadingProgress();
+        ticking = false;
+      });
+      ticking = true;
+    }
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      updateReadingProgress();
+      window.addEventListener('scroll', onScroll, { passive: true });
+    });
+  } else {
+    updateReadingProgress();
+    window.addEventListener('scroll', onScroll, { passive: true });
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', () => {
+    updateReadingProgress();
+    window.addEventListener('scroll', onScroll, { passive: true });
+  });
+</script>
 

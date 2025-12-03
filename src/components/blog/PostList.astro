@@ -18,17 +18,25 @@ interface Props {
 const { posts } = Astro.props;
 ---
 
-<div class="space-y-6">
+<div id="post-list-container" class="space-y-6">
   {posts.map((post) => (
-    <PostCard
-      title={post.data.title}
-      excerpt={post.data.excerpt}
-      date={post.data.date}
-      tags={post.data.tags}
-      slug={post.slug}
-      featured={post.data.featured}
-      content={post.body}
-    />
+    <div
+      data-post-card
+      data-title={post.data.title}
+      data-excerpt={post.data.excerpt}
+      data-tags={JSON.stringify(post.data.tags)}
+      data-date={post.data.date}
+      data-featured={post.data.featured || false}
+    >
+      <PostCard
+        title={post.data.title}
+        excerpt={post.data.excerpt}
+        date={post.data.date}
+        tags={post.data.tags}
+        slug={post.slug}
+        featured={post.data.featured}
+        content={post.body}
+      />
+    </div>
   ))}
 </div>
-

@@ -1,0 +1,162 @@
+---
+interface Props {
+  data: string;
+}
+
+const { data } = Astro.props;
+const tuiData = JSON.parse(data);
+
+// Get all unique tags with counts, sorted by count
+const tags = Object.entries(tuiData.allTags || {})
+  .sort((a, b) => (b[1] as number) - (a[1] as number))
+  .map(([tag, count]) => ({ tag, count: count as number }));
+---
+
+<div id="content-type-nav" class="p-4 h-full flex flex-col">
+  <!-- Content Types Section -->
+  <div class="mb-6">
+    <div class="text-xs uppercase tracking-wider text-fg-muted mb-3 px-2 font-semibold">
+      Content Types
+    </div>
+    <div class="space-y-0.5">
+      <button
+        data-type="all"
+        class="content-type-btn w-full text-left px-3 py-2 rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue font-mono text-sm"
+      >
+        [all]
+      </button>
+      <button
+        data-type="blog"
+        class="content-type-btn w-full text-left px-3 py-2 rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue font-mono text-sm"
+      >
+        [blog]
+      </button>
+      <button
+        data-type="guides"
+        class="content-type-btn w-full text-left px-3 py-2 rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue font-mono text-sm"
+      >
+        [guides]
+      </button>
+      <button
+        data-type="code"
+        class="content-type-btn w-full text-left px-3 py-2 rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue font-mono text-sm"
+      >
+        [code]
+      </button>
+    </div>
+  </div>
+
+  <!-- Tags Section -->
+  <div class="mb-6 flex-1 flex flex-col min-h-0">
+    <div class="text-xs uppercase tracking-wider text-fg-muted mb-3 px-2 flex items-center justify-between font-semibold">
+      <span>Tags</span>
+      <button
+        id="toggle-tags"
+        class="text-fg-muted hover:text-fg-primary text-xs font-mono transition-colors"
+      >
+        [expand]
+      </button>
+    </div>
+    <div id="tags-list" class="space-y-0.5 overflow-y-auto flex-1">
+      {tags.map(({ tag, count }) => (
+        <button
+          data-tag={tag}
+          class="tag-btn w-full text-left px-3 py-1.5 rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue flex items-center justify-between font-mono text-sm hover:bg-bg-tertiary"
+        >
+          <span class="text-fg-secondary">{tag}</span>
+          <span class="text-xs text-fg-muted ml-2">{count}</span>
+        </button>
+      ))}
+    </div>
+  </div>
+</div>
+
+<script>
+  const tagsList = document.getElementById('tags-list');
+  const toggleTags = document.getElementById('toggle-tags');
+  let tagsExpanded = true;
+
+  // Toggle tags expansion
+  toggleTags?.addEventListener('click', () => {
+    tagsExpanded = !tagsExpanded;
+    if (tagsList) {
+      if (tagsExpanded) {
+        tagsList.classList.remove('hidden');
+        tagsList.style.maxHeight = '';
+      } else {
+        tagsList.style.maxHeight = '0';
+        tagsList.style.overflow = 'hidden';
+      }
+    }
+    if (toggleTags) {
+      toggleTags.textContent = tagsExpanded ? '[collapse]' : '[expand]';
+    }
+  });
+
+  // Content type selection
+  const contentTypeButtons = document.querySelectorAll('.content-type-btn');
+  contentTypeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const type = (btn as HTMLElement).dataset.type;
+      if (type) {
+        contentTypeButtons.forEach((b) => {
+          b.classList.remove('bg-accent-blue/20', 'text-accent-blue', 'font-semibold');
+          b.classList.add('text-fg-secondary', 'hover:bg-bg-tertiary');
+        });
+        btn.classList.add('bg-accent-blue/20', 'text-accent-blue', 'font-semibold');
+        btn.classList.remove('text-fg-secondary', 'hover:bg-bg-tertiary');
+        window.dispatchEvent(new CustomEvent('content-type-change', { detail: { type } }));
+      }
+    });
+  });
+
+  // Tag selection
+  const tagButtons = document.querySelectorAll('.tag-btn');
+  tagButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tag = (btn as HTMLElement).dataset.tag;
+      if (tag) {
+        const isActive = btn.classList.contains('bg-accent-blue/20');
+        const tagSpan = btn.querySelector('span:first-child');
+        
+        if (isActive) {
+          btn.classList.remove('bg-accent-blue/20', 'text-accent-blue', 'font-semibold');
+          if (tagSpan) {
+            tagSpan.classList.remove('text-accent-blue');
+            tagSpan.classList.add('text-fg-secondary');
+          }
+        } else {
+          btn.classList.add('bg-accent-blue/20', 'text-accent-blue', 'font-semibold');
+          if (tagSpan) {
+            tagSpan.classList.remove('text-fg-secondary');
+            tagSpan.classList.add('text-accent-blue');
+          }
+        }
+        window.dispatchEvent(new CustomEvent('tag-toggle', { 
+          detail: { tag, active: !isActive } 
+        }));
+      }
+    });
+  });
+
+  // Set initial active content type
+  if (contentTypeButtons[0]) {
+    contentTypeButtons[0].classList.add('bg-accent-blue/20', 'text-accent-blue', 'font-semibold');
+    contentTypeButtons[0].classList.remove('text-fg-secondary', 'hover:bg-bg-tertiary');
+  }
+</script>
+
+<style>
+  .content-type-btn,
+  .tag-btn {
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .content-type-btn {
+    color: var(--color-fg-secondary);
+  }
+
+  .tag-btn span:first-child {
+    color: var(--color-fg-secondary);
+  }
+</style>

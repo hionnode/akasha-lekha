@@ -1,0 +1,110 @@
+---
+interface Props {
+  data: string;
+}
+
+const { data } = Astro.props;
+---
+
+<div id="content-viewer" class="p-6">
+  <div id="viewer-content" class="text-fg-secondary">
+    <div class="text-center py-12 text-fg-muted">
+      <div class="text-lg mb-2">Select an item to view</div>
+      <div class="text-sm">Navigate with keyboard or click on items</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  interface ContentItem {
+    type: 'blog' | 'guides' | 'code';
+    slug: string;
+    title: string;
+    description: string;
+    tags: string[];
+    date?: string;
+    language?: string;
+    readingTime?: number;
+    featured?: boolean;
+  }
+
+  const { data: dataStr } = Astro.props;
+  const viewerContent = document.getElementById('viewer-content');
+
+  function formatDate(dateString?: string): string {
+    if (!dateString) return '';
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+  }
+
+  function renderContent(item: ContentItem | null) {
+    if (!viewerContent) return;
+
+    if (!item) {
+      viewerContent.innerHTML = `
+        <div class="text-center py-12 text-fg-muted">
+          <div class="text-lg mb-2">Select an item to view</div>
+          <div class="text-sm">Navigate with keyboard or click on items</div>
+        </div>
+      `;
+      return;
+    }
+
+    const metadata = [];
+    if (item.date) metadata.push(formatDate(item.date));
+    if (item.readingTime) metadata.push(`${item.readingTime} min read`);
+    if (item.language) metadata.push(item.language.toUpperCase());
+
+    const tagsHtml = item.tags
+      .map(tag => `<span class="px-2 py-1 bg-accent-blue/20 text-accent-blue rounded text-xs">${tag}</span>`)
+      .join('');
+
+    const typePaths: Record<string, string> = {
+      blog: '/blog',
+      guides: '/guides',
+      code: '/code',
+    };
+
+    const path = typePaths[item.type] || '';
+    const fullPath = item.type === 'guides' 
+      ? `${path}/${item.slug.split('/')[0]}` 
+      : `${path}/${item.slug}`;
+
+    viewerContent.innerHTML = `
+      <div class="mb-6">
+        ${item.featured ? '<div class="text-xs font-semibold uppercase tracking-wider text-accent-yellow mb-2">Featured</div>' : ''}
+        <h2 class="text-2xl font-bold mb-3 text-fg-primary">${item.title}</h2>
+        ${metadata.length > 0 ? `<div class="text-sm text-fg-muted mb-3">${metadata.join(' • ')}</div>` : ''}
+        ${tagsHtml ? `<div class="flex flex-wrap gap-2 mb-4">${tagsHtml}</div>` : ''}
+      </div>
+      <div class="prose prose-invert max-w-none mb-6">
+        <p class="text-fg-secondary leading-relaxed">${item.description}</p>
+      </div>
+      <div class="pt-4 border-t border-border">
+        <a
+          href="${fullPath}"
+          class="inline-flex items-center gap-2 text-accent-blue hover:text-accent-cyan transition-colors font-semibold"
+        >
+          Read full article →
+        </a>
+      </div>
+    `;
+  }
+
+  // Listen for content selection
+  window.addEventListener('content-select', ((e: CustomEvent) => {
+    const { item } = e.detail;
+    renderContent(item);
+  }) as EventListener);
+</script>
+
+<style>
+  #content-viewer {
+    font-family: 'Inconsolata', monospace;
+  }
+</style>
+

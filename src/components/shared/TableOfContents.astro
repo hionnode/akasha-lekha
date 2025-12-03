@@ -1,0 +1,96 @@
+---
+interface Props {
+  content: string;
+}
+
+const { content } = Astro.props;
+---
+
+<div id="table-of-contents" class="mb-8 p-6 bg-bg-secondary border border-border rounded-lg">
+  <h2 class="text-lg font-semibold mb-4">Table of Contents</h2>
+  <nav id="toc-list" class="space-y-2">
+    <!-- TOC will be populated by JavaScript -->
+  </nav>
+</div>
+
+<script>
+  function generateTOC() {
+    const tocList = document.getElementById('toc-list');
+    const article = document.getElementById('article-content');
+    
+    if (!tocList || !article) return;
+
+    // Find all h2 and h3 headings in the article
+    const headings = article.querySelectorAll('h2, h3');
+    
+    if (headings.length === 0) {
+      // Hide TOC if no headings found
+      const tocContainer = document.getElementById('table-of-contents');
+      if (tocContainer) {
+        tocContainer.style.display = 'none';
+      }
+      return;
+    }
+
+    tocList.innerHTML = '';
+    let tocHTML = '';
+
+    headings.forEach((heading, index) => {
+      const id = heading.id || `heading-${index}`;
+      const level = heading.tagName.toLowerCase();
+      const text = heading.textContent || '';
+      
+      // Set ID on heading if it doesn't have one
+      if (!heading.id) {
+        heading.id = id;
+      }
+
+      // Create anchor link
+      const indent = level === 'h3' ? 'ml-4' : '';
+      tocHTML += `
+        <a
+          href="#${id}"
+          class="block text-sm text-fg-secondary hover:text-accent-blue transition-colors ${indent}"
+          data-toc-item
+        >
+          ${text}
+        </a>
+      `;
+    });
+
+    tocList.innerHTML = tocHTML;
+
+    // Smooth scroll behavior
+    const tocLinks = tocList.querySelectorAll('a[data-toc-item]');
+    tocLinks.forEach((link) => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const targetId = (link as HTMLAnchorElement).getAttribute('href')?.substring(1);
+        if (targetId) {
+          const target = document.getElementById(targetId);
+          if (target) {
+            const headerOffset = 80; // Account for fixed header
+            const elementPosition = target.getBoundingClientRect().top;
+            const offsetPosition = elementPosition + window.pageYOffset - headerOffset;
+
+            window.scrollTo({
+              top: offsetPosition,
+              behavior: 'smooth',
+            });
+          }
+        }
+      });
+    });
+  }
+
+  // Initialize TOC
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', generateTOC);
+  } else {
+    generateTOC();
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', generateTOC);
+</script>
+

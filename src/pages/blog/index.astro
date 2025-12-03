@@ -6,6 +6,7 @@ import Footer from '../../components/layout/Footer.astro';
 import Container from '../../components/layout/Container.astro';
 import PostList from '../../components/blog/PostList.astro';
 import FilterBar from '../../components/blog/FilterBar.astro';
+import SkeletonList from '../../components/shared/SkeletonList.astro';
 
 const allPosts = await getCollection('blog', ({ data }) => !data.draft);
 const posts = allPosts.sort(
@@ -16,14 +17,78 @@ const posts = allPosts.sort(
 <Layout title="Blog | works-on-my.cloud" description="Technical articles about cloud infrastructure, DevOps, security, and observability">
   <div class="min-h-screen flex flex-col">
     <Header />
-    <main class="flex-1">
+    <main id="main-content" class="flex-1">
       <Container class="py-12">
         <h1 class="mb-8">Blog</h1>
         <FilterBar />
-        <PostList posts={posts} />
+        <!-- Loading skeleton -->
+        <div id="blog-skeleton" class="hidden">
+          <SkeletonList count={5} cardLines={3} />
+        </div>
+        <!-- Actual content -->
+        <div id="blog-content">
+          <PostList posts={posts} />
+        </div>
+        <div id="empty-state" class="hidden text-center py-12">
+          <p class="text-fg-secondary text-lg mb-4">No posts found matching your filters.</p>
+          <button
+            id="clear-filters-empty"
+            class="text-accent-blue hover:text-accent-cyan transition-colors underline"
+          >
+            Clear all filters
+          </button>
+        </div>
       </Container>
     </main>
     <Footer />
   </div>
 </Layout>
+
+<script>
+  function showContent() {
+    const skeleton = document.getElementById('blog-skeleton');
+    const content = document.getElementById('blog-content');
+    
+    if (skeleton && content) {
+      // Hide skeleton, show content
+      skeleton.classList.add('hidden');
+      content.classList.remove('hidden');
+    }
+  }
+
+  // Show skeleton initially, then fade to content
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      const skeleton = document.getElementById('blog-skeleton');
+      const content = document.getElementById('blog-content');
+      
+      if (skeleton && content) {
+        // Show skeleton initially
+        skeleton.classList.remove('hidden');
+        content.classList.add('hidden');
+        
+        // Show content after a short delay (simulates loading)
+        setTimeout(showContent, 300);
+      }
+    });
+  } else {
+    // Page already loaded, show content immediately
+    showContent();
+  }
+
+  // Handle Astro View Transitions
+  document.addEventListener('astro:page-load', () => {
+    const skeleton = document.getElementById('blog-skeleton');
+    const content = document.getElementById('blog-content');
+    
+    if (skeleton && content) {
+      // Show skeleton during transition
+      skeleton.classList.remove('hidden');
+      content.classList.add('hidden');
+      
+      // Show content after short delay
+      setTimeout(showContent, 200);
+    }
+  });
+</script>
 

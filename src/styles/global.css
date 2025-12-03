@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 /* Tokyo Night Color Palette */
 @theme {
@@ -89,5 +90,68 @@
 
   pre {
     @apply text-sm leading-[1.5];
+  }
+
+  /* Focus visible states for accessibility */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-accent-blue ring-offset-2 ring-offset-bg-primary;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    @apply ring-2 ring-accent-blue ring-offset-2 ring-offset-bg-primary;
+  }
+
+  /* Print styles */
+  @media print {
+    nav,
+    header,
+    footer,
+    #reading-progress,
+    #table-of-contents,
+    button,
+    .no-print {
+      display: none !important;
+    }
+
+    body {
+      @apply bg-white text-black;
+    }
+
+    a {
+      @apply text-blue-600;
+    }
+
+    a[href^="http"]:after {
+      content: " (" attr(href) ")";
+      @apply text-xs text-gray-500;
+    }
+
+    article {
+      @apply max-w-none;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      @apply text-black;
+      page-break-after: avoid;
+    }
+
+    p, li {
+      @apply text-black;
+    }
+
+    code {
+      @apply bg-gray-100 text-black;
+      page-break-inside: avoid;
+    }
+
+    pre {
+      @apply bg-gray-100 text-black;
+      page-break-inside: avoid;
+      white-space: pre-wrap;
+    }
   }
 }

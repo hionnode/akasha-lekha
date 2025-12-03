@@ -52,6 +52,7 @@ interface Props {
 }
 
 const { part, guideIndex, allParts, previousPart, nextPart } = Astro.props;
+const { Content } = await part.render();
 const partData = part.data as { title: string; date: string; guide: string };
 const guideTitle = guideIndex ? (guideIndex.data as { title: string }).title : partData.guide;
 const guideSlug = part.slug.split('/')[0];
@@ -78,7 +79,11 @@ const navParts = allParts.map((p) => ({
   />
   <div class="min-h-screen flex flex-col">
     <Header />
-    <main class="flex-1">
+    <!-- Reading Progress Bar -->
+    <div id="reading-progress" class="fixed top-0 left-0 right-0 h-1 bg-bg-tertiary z-40">
+      <div id="reading-progress-bar" class="h-full bg-gradient-to-r from-accent-blue via-accent-cyan to-accent-blue transition-all duration-150" style="width: 0%"></div>
+    </div>
+    <main id="main-content" class="flex-1">
       <Container class="py-12">
         <div class="max-w-4xl mx-auto">
           <nav class="mb-6 text-sm text-fg-muted">
@@ -89,9 +94,9 @@ const navParts = allParts.map((p) => ({
             <span>{partData.title}</span>
           </nav>
 
-          <div class="grid md:grid-cols-3 gap-8">
-            <div class="md:col-span-2">
-              <article>
+          <div class="flex flex-col md:grid md:grid-cols-3 gap-8">
+            <div class="order-2 md:order-1 md:col-span-2">
+              <article id="article-content">
                 <header class="mb-8">
                   <h1 class="mb-4">{partData.title}</h1>
                   <div class="flex flex-wrap items-center gap-4 text-sm text-fg-muted">
@@ -101,7 +106,7 @@ const navParts = allParts.map((p) => ({
                   </div>
                 </header>
                 <div class="prose prose-invert max-w-none">
-                  {await part.render()}
+                  <Content />
                 </div>
                 <PartNav
                   previousPart={previousPart}
@@ -111,7 +116,7 @@ const navParts = allParts.map((p) => ({
                 />
               </article>
             </div>
-            <div>
+            <div class="order-1 md:order-2">
               <GuideNav
                 parts={navParts}
                 currentPart={part.slug.split('/').pop()}
@@ -125,4 +130,54 @@ const navParts = allParts.map((p) => ({
     <Footer />
   </div>
 </Layout>
+
+<script>
+  function updateReadingProgress() {
+    const article = document.getElementById('article-content');
+    const progressBar = document.getElementById('reading-progress-bar');
+    
+    if (!article || !progressBar) return;
+
+    const articleTop = article.offsetTop;
+    const articleHeight = article.offsetHeight;
+    const windowHeight = window.innerHeight;
+    const scrollTop = window.scrollY || document.documentElement.scrollTop;
+    
+    // Calculate how much of the article has been scrolled past
+    const scrolled = Math.max(0, scrollTop - articleTop + windowHeight);
+    const total = articleHeight + windowHeight;
+    const progress = Math.min(100, (scrolled / total) * 100);
+    
+    progressBar.style.width = `${progress}%`;
+  }
+
+  // Throttle scroll events for performance
+  let ticking = false;
+  function onScroll() {
+    if (!ticking) {
+      window.requestAnimationFrame(() => {
+        updateReadingProgress();
+        ticking = false;
+      });
+      ticking = true;
+    }
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      updateReadingProgress();
+      window.addEventListener('scroll', onScroll, { passive: true });
+    });
+  } else {
+    updateReadingProgress();
+    window.addEventListener('scroll', onScroll, { passive: true });
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', () => {
+    updateReadingProgress();
+    window.addEventListener('scroll', onScroll, { passive: true });
+  });
+</script>
 

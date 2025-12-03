@@ -3,16 +3,82 @@ interface Props {
   tag: string;
   href?: string;
   class?: string;
+  'data-tag-pill'?: boolean;
+  'data-tag'?: string;
 }
 
-const { tag, href, class: className = '' } = Astro.props;
+const { tag, href, class: className = '', 'data-tag-pill': isTagPill, 'data-tag': dataTag } = Astro.props;
 const Tag = href ? 'a' : 'span';
 ---
 
 <Tag
   href={href}
-  class={`inline-block px-2 py-1 text-xs font-semibold uppercase tracking-wider text-fg-muted border border-border bg-bg-secondary hover:bg-bg-tertiary hover:text-accent-blue hover:border-accent-blue transition-colors ${className}`}
+  data-tag-pill={isTagPill ? '' : undefined}
+  data-tag={dataTag || tag}
+  class={`inline-block px-2 py-1 text-xs font-semibold uppercase tracking-wider text-fg-muted border border-border bg-bg-secondary hover:bg-bg-tertiary hover:text-accent-blue hover:border-accent-blue transition-colors cursor-pointer ${className}`}
 >
   {tag}
 </Tag>
 
+<script>
+  // Make tags clickable to filter
+  function initTagPills() {
+    const tagPills = document.querySelectorAll('[data-tag-pill]');
+    tagPills.forEach((pill) => {
+      const tag = (pill as HTMLElement).dataset.tag;
+      if (tag) {
+        pill.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          // Try to trigger filter by simulating click on filter button
+          const filterBtn = document.querySelector(
+            `[data-tag="${tag}"].tag-filter-btn`
+          ) as HTMLElement;
+          
+          if (filterBtn) {
+            // FilterBar is loaded, use it
+            filterBtn.click();
+            // Scroll to filter bar
+            setTimeout(() => {
+              const filterBar = document.querySelector('.bg-bg-secondary.border');
+              if (filterBar) {
+                filterBar.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }
+            }, 100);
+          } else {
+            // Fallback: Navigate to blog page with tag filter
+            // Check if we're on blog page
+            if (window.location.pathname.startsWith('/blog')) {
+              // Try again after a short delay in case FilterBar is still loading
+              setTimeout(() => {
+                const retryBtn = document.querySelector(
+                  `[data-tag="${tag}"].tag-filter-btn`
+                ) as HTMLElement;
+                if (retryBtn) {
+                  retryBtn.click();
+                } else {
+                  // Navigate to blog with tag query param
+                  window.location.href = `/blog?tag=${encodeURIComponent(tag)}`;
+                }
+              }, 500);
+            } else {
+              // Not on blog page, navigate to blog with tag
+              window.location.href = `/blog?tag=${encodeURIComponent(tag)}`;
+            }
+          }
+        });
+      }
+    });
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initTagPills);
+  } else {
+    initTagPills();
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', initTagPills);
+</script>

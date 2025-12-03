@@ -1,0 +1,376 @@
+---
+import { getCollection } from 'astro:content';
+
+// Get all unique languages and tags from scripts
+const allScripts = await getCollection('scripts');
+const allLanguages = Array.from(
+  new Set(allScripts.map((script) => script.data.language))
+).sort();
+
+const allTags = Array.from(
+  new Set(allScripts.flatMap((script) => script.data.tags || []))
+).sort();
+
+const languageCounts: Record<string, number> = {};
+allScripts.forEach((script) => {
+  const lang = script.data.language;
+  languageCounts[lang] = (languageCounts[lang] || 0) + 1;
+});
+
+const tagCounts: Record<string, number> = {};
+allScripts.forEach((script) => {
+  script.data.tags?.forEach((tag) => {
+    tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+  });
+});
+---
+
+<div class="mb-8 p-6 bg-bg-secondary border border-border rounded-lg">
+  <!-- Search Bar -->
+  <div class="mb-6">
+    <label for="code-search" class="block text-sm font-semibold text-fg-secondary mb-2">
+      Search
+    </label>
+    <input
+      type="text"
+      id="code-search"
+      placeholder="Search scripts by title, description, or tags..."
+      class="w-full px-4 py-2 bg-bg-primary border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent-blue focus:border-accent-blue text-fg-primary font-mono text-sm"
+    />
+  </div>
+
+  <!-- Language Filter -->
+  <div class="mb-6">
+    <label for="code-language" class="block text-sm font-semibold text-fg-secondary mb-2">
+      Filter by Language
+    </label>
+    <select
+      id="code-language"
+      class="w-full px-4 py-2 bg-bg-primary border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent-blue focus:border-accent-blue text-fg-primary font-mono text-sm"
+    >
+      <option value="">All Languages</option>
+      {allLanguages.map((lang) => (
+        <option value={lang}>
+          {lang} ({languageCounts[lang]})
+        </option>
+      ))}
+    </select>
+  </div>
+
+  <!-- Tag Filter -->
+  <div>
+    <label class="block text-sm font-semibold text-fg-secondary mb-3">
+      Filter by Tags
+    </label>
+    <div id="code-tag-filter-container" class="flex flex-wrap gap-2">
+      {allTags.map((tag) => (
+        <button
+          data-tag={tag}
+          class="code-tag-filter-btn px-3 py-1.5 text-xs font-semibold uppercase tracking-wider border border-border bg-bg-primary text-fg-muted hover:bg-bg-tertiary hover:text-accent-blue hover:border-accent-blue transition-colors rounded"
+        >
+          {tag}
+          <span class="ml-2 text-fg-muted">({tagCounts[tag]})</span>
+        </button>
+      ))}
+    </div>
+    <div id="code-active-filters" class="mt-4 flex flex-wrap gap-2 items-center">
+      <span class="text-xs text-fg-muted">Active filters:</span>
+      <div id="code-active-filters-list" class="flex flex-wrap gap-2">
+        <!-- Active filters will be populated here -->
+      </div>
+      <button
+        id="code-clear-filters"
+        class="text-xs text-accent-blue hover:text-accent-cyan transition-colors hidden"
+      >
+        Clear all
+      </button>
+    </div>
+  </div>
+
+  <!-- Results Count -->
+  <div id="code-results-count" class="mt-4 text-sm text-fg-muted">
+    Showing all scripts
+  </div>
+</div>
+
+<script>
+  const searchInput = document.getElementById('code-search') as HTMLInputElement | null;
+  const languageSelect = document.getElementById('code-language') as HTMLSelectElement | null;
+  const tagButtons = document.querySelectorAll('.code-tag-filter-btn');
+  const activeFiltersList = document.getElementById('code-active-filters-list');
+  const clearFiltersBtn = document.getElementById('code-clear-filters');
+  const resultsCount = document.getElementById('code-results-count');
+  const emptyState = document.getElementById('code-empty-state');
+  const clearFiltersEmptyBtn = document.getElementById('code-clear-filters-empty');
+
+  let activeTags = new Set<string>();
+  let searchQuery = '';
+  let selectedLanguage = '';
+  interface ScriptData {
+    element: HTMLElement;
+    title: string;
+    description: string;
+    tags: string[];
+    language: string;
+  }
+  let scriptsData: ScriptData[] = [];
+
+  function updateActiveFiltersDisplay() {
+    if (!activeFiltersList || !clearFiltersBtn) return;
+
+    activeFiltersList.innerHTML = '';
+    
+    const hasFilters = activeTags.size > 0 || searchQuery.trim().length > 0 || selectedLanguage.length > 0;
+    
+    if (!hasFilters) {
+      clearFiltersBtn.classList.add('hidden');
+      return;
+    }
+
+    clearFiltersBtn.classList.remove('hidden');
+
+    // Show search query as a badge if present
+    if (searchQuery.trim().length > 0) {
+      const searchEl = document.createElement('button');
+      searchEl.className =
+        'px-2 py-1 text-xs font-semibold uppercase tracking-wider border border-accent-blue bg-accent-blue/20 text-accent-blue hover:bg-accent-blue/30 transition-colors rounded flex items-center gap-1';
+      searchEl.innerHTML = `
+        Search: "${searchQuery}"
+        <span class="text-accent-blue">×</span>
+      `;
+      searchEl.addEventListener('click', () => {
+        searchQuery = '';
+        if (searchInput) searchInput.value = '';
+        updateActiveFiltersDisplay();
+        filterAndSort();
+      });
+      activeFiltersList.appendChild(searchEl);
+    }
+
+    // Show language filter if present
+    if (selectedLanguage.length > 0) {
+      const langEl = document.createElement('button');
+      langEl.className =
+        'px-2 py-1 text-xs font-semibold uppercase tracking-wider border border-accent-blue bg-accent-blue/20 text-accent-blue hover:bg-accent-blue/30 transition-colors rounded flex items-center gap-1';
+      langEl.innerHTML = `
+        Language: ${selectedLanguage}
+        <span class="text-accent-blue">×</span>
+      `;
+      langEl.addEventListener('click', () => {
+        selectedLanguage = '';
+        if (languageSelect) languageSelect.value = '';
+        updateActiveFiltersDisplay();
+        filterAndSort();
+      });
+      activeFiltersList.appendChild(langEl);
+    }
+
+    // Show tag filters
+    activeTags.forEach((tag) => {
+      const tagEl = document.createElement('button');
+      tagEl.className =
+        'px-2 py-1 text-xs font-semibold uppercase tracking-wider border border-accent-blue bg-accent-blue/20 text-accent-blue hover:bg-accent-blue/30 transition-colors rounded flex items-center gap-1';
+      tagEl.innerHTML = `
+        ${tag}
+        <span class="text-accent-blue">×</span>
+      `;
+      tagEl.addEventListener('click', () => {
+        activeTags.delete(tag);
+        updateTagButtons();
+        updateActiveFiltersDisplay();
+        filterAndSort();
+      });
+      activeFiltersList.appendChild(tagEl);
+    });
+  }
+
+  function updateTagButtons() {
+    tagButtons.forEach((btn) => {
+      const tag = (btn as HTMLElement).dataset.tag;
+      if (tag && activeTags.has(tag)) {
+        btn.classList.add('bg-accent-blue/20', 'border-accent-blue', 'text-accent-blue');
+        btn.classList.remove('bg-bg-primary', 'text-fg-muted');
+      } else {
+        btn.classList.remove('bg-accent-blue/20', 'border-accent-blue', 'text-accent-blue');
+        btn.classList.add('bg-bg-primary', 'text-fg-muted');
+      }
+    });
+  }
+
+  function filterAndSort() {
+    const query = searchQuery.toLowerCase().trim();
+    let filtered = scriptsData.filter((script) => {
+      // Search filter
+      if (query) {
+        const matchesSearch =
+          script.title.toLowerCase().includes(query) ||
+          script.description.toLowerCase().includes(query) ||
+          script.tags.some((tag: string) => tag.toLowerCase().includes(query));
+        if (!matchesSearch) return false;
+      }
+
+      // Language filter
+      if (selectedLanguage) {
+        if (script.language.toLowerCase() !== selectedLanguage.toLowerCase()) {
+          return false;
+        }
+      }
+
+      // Tag filter (AND logic - must have all selected tags)
+      if (activeTags.size > 0) {
+        const hasAllTags = Array.from(activeTags).every((selectedTag: string) =>
+          script.tags.some((tag: string) => tag.toLowerCase() === selectedTag.toLowerCase())
+        );
+        if (!hasAllTags) return false;
+      }
+
+      return true;
+    });
+
+    // Get the container
+    const container = document.getElementById('code-list-container');
+    if (!container) return;
+
+    // Hide all scripts
+    scriptsData.forEach((script) => {
+      script.element.style.display = 'none';
+    });
+
+    // Show filtered scripts
+    filtered.forEach((script) => {
+      script.element.style.display = '';
+      container.appendChild(script.element);
+    });
+
+    // Update results count
+    if (resultsCount) {
+      const total = scriptsData.length;
+      const showing = filtered.length;
+      if (showing === total) {
+        resultsCount.textContent = `Showing all ${total} scripts`;
+      } else {
+        resultsCount.textContent = `Showing ${showing} of ${total} scripts`;
+      }
+    }
+
+    // Show/hide empty state
+    if (emptyState) {
+      const hasScripts = scriptsData.length > 0;
+      const hasFilteredResults = filtered.length > 0;
+      const hasActiveFilters = activeTags.size > 0 || searchQuery.trim().length > 0 || selectedLanguage.length > 0;
+      
+      if (hasScripts && hasActiveFilters && !hasFilteredResults) {
+        emptyState.classList.remove('hidden');
+      } else {
+        emptyState.classList.add('hidden');
+      }
+    }
+  }
+
+  // Search input with debouncing
+  let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      const value = (e.target as HTMLInputElement).value;
+      
+      if (searchTimeout) {
+        clearTimeout(searchTimeout);
+      }
+      
+      searchTimeout = setTimeout(() => {
+        searchQuery = value;
+        updateActiveFiltersDisplay();
+        filterAndSort();
+      }, 300);
+    });
+  }
+
+  // Language select
+  if (languageSelect) {
+    languageSelect.addEventListener('change', (e) => {
+      const target = e.target as HTMLSelectElement;
+      if (target) {
+        selectedLanguage = target.value;
+        updateActiveFiltersDisplay();
+        filterAndSort();
+      }
+    });
+  }
+
+  // Tag buttons
+  tagButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tag = (btn as HTMLElement).dataset.tag;
+      if (tag) {
+        if (activeTags.has(tag)) {
+          activeTags.delete(tag);
+        } else {
+          activeTags.add(tag);
+        }
+        updateTagButtons();
+        updateActiveFiltersDisplay();
+        filterAndSort();
+      }
+    });
+  });
+
+  // Clear filters
+  function clearAllFilters() {
+    activeTags.clear();
+    searchQuery = '';
+    selectedLanguage = '';
+    if (searchInput) searchInput.value = '';
+    if (languageSelect) languageSelect.value = '';
+    if (searchTimeout) {
+      clearTimeout(searchTimeout);
+      searchTimeout = null;
+    }
+    updateTagButtons();
+    updateActiveFiltersDisplay();
+    filterAndSort();
+  }
+
+  if (clearFiltersBtn) {
+    clearFiltersBtn.addEventListener('click', clearAllFilters);
+  }
+
+  if (clearFiltersEmptyBtn) {
+    clearFiltersEmptyBtn.addEventListener('click', clearAllFilters);
+  }
+
+  // Initialize
+  function initialize() {
+    const scriptCards = document.querySelectorAll('#code-list-container > [data-script-card]');
+    scriptsData = [];
+    
+    scriptCards.forEach((card) => {
+      const element = card as HTMLElement;
+      if (element.dataset.title && element.dataset.language) {
+        scriptsData.push({
+          element,
+          title: element.dataset.title || '',
+          description: element.dataset.description || '',
+          tags: JSON.parse(element.dataset.tags || '[]'),
+          language: element.dataset.language || '',
+        });
+      }
+    });
+    
+    updateTagButtons();
+    updateActiveFiltersDisplay();
+    filterAndSort();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      setTimeout(initialize, 200);
+    });
+  } else {
+    setTimeout(initialize, 200);
+  }
+
+  document.addEventListener('astro:page-load', () => {
+    setTimeout(initialize, 200);
+  });
+</script>
+

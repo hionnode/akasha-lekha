@@ -1,0 +1,340 @@
+---
+import FastfetchOutput from './FastfetchOutput.astro';
+import { terminalCommands } from '../../utils/terminalCommands';
+---
+
+<div id="terminal-wrapper" class="terminal-wrapper fixed inset-0 flex items-center justify-center z-40 transition-all duration-1000 ease-out">
+  <!-- Skip Animation Button -->
+  <button
+    id="skip-animation-btn"
+    class="absolute top-4 right-4 px-4 py-2 bg-bg-secondary/90 border border-border text-fg-secondary hover:text-accent-blue hover:border-accent-blue transition-colors rounded text-sm font-semibold z-50 focus:outline-none focus:ring-2 focus:ring-accent-blue focus:ring-offset-2 focus:ring-offset-bg-primary"
+    aria-label="Skip animation"
+  >
+    Skip animation
+  </button>
+  <div id="terminal-window" class="terminal-window bg-bg-secondary border border-border rounded-lg shadow-2xl overflow-hidden transition-all duration-1000 ease-out">
+    <!-- Terminal Header Bar -->
+    <div class="bg-bg-tertiary px-4 py-3 flex items-center gap-2 border-b border-border">
+      <div class="flex gap-2">
+        <div class="w-3 h-3 rounded-full bg-accent-red"></div>
+        <div class="w-3 h-3 rounded-full bg-accent-yellow"></div>
+        <div class="w-3 h-3 rounded-full bg-accent-green"></div>
+      </div>
+      <div class="flex-1 text-center text-xs text-fg-muted font-mono">
+        user@works-on-my-cloud ~
+      </div>
+      <div class="w-12"></div>
+    </div>
+
+    <!-- Terminal Content -->
+    <div id="terminal-content" class="terminal-content p-6 font-mono text-sm overflow-hidden flex flex-col">
+      <div id="terminal-output" class="flex-1 overflow-y-auto">
+        <!-- Output will be populated by script -->
+      </div>
+      <div id="terminal-prompt" class="flex items-center gap-2 mt-4 flex-shrink-0">
+        <span class="text-accent-green">user@works-on-my.cloud</span>
+        <span class="text-fg-muted">~</span>
+        <span class="text-accent-blue">%</span>
+        <span id="typing-cursor" class="inline-block w-2 h-5 bg-accent-cyan animate-pulse"> </span>
+      </div>
+      <div id="fastfetch-container" class="hidden flex-1 flex items-center justify-center">
+        <FastfetchOutput client:load />
+      </div>
+    </div>
+  </div>
+</div>
+
+<script define:vars={{ commands: terminalCommands }}>
+  const terminalCommands = commands;
+
+  function initTerminal() {
+    const wrapper = document.getElementById('terminal-wrapper');
+    const window = document.getElementById('terminal-window');
+    const output = document.getElementById('terminal-output');
+    const prompt = document.getElementById('terminal-prompt');
+    const cursor = document.getElementById('typing-cursor');
+    const fastfetchContainer = document.getElementById('fastfetch-container');
+    const terminalContent = document.getElementById('terminal-content');
+
+    if (!output || !prompt || !cursor || !window || !wrapper) {
+      console.error('Terminal elements not found');
+      return;
+    }
+
+    // Randomly select 3-5 commands (excluding first welcome and last welcome)
+    const selectableCommands = terminalCommands.slice(1, -1);
+    const numCommands = Math.floor(Math.random() * 3) + 3; // 3-5 commands
+    const selectedCommands = [];
+    const usedIndices = new Set();
+    
+    while (selectedCommands.length < numCommands && selectedCommands.length < selectableCommands.length) {
+      const randomIndex = Math.floor(Math.random() * selectableCommands.length);
+      if (!usedIndices.has(randomIndex)) {
+        usedIndices.add(randomIndex);
+        selectedCommands.push(selectableCommands[randomIndex]);
+      }
+    }
+
+    // Add welcome at start and end
+    const commandsToRun = [
+      terminalCommands[0], // Welcome
+      ...selectedCommands,
+      terminalCommands[terminalCommands.length - 1], // Final welcome
+    ];
+
+    let currentCommandIndex = 0;
+    let isTyping = false;
+
+    function createLine(content, className = '') {
+      const line = document.createElement('div');
+      line.className = className;
+      line.textContent = content;
+      return line;
+    }
+
+    function clearScreen() {
+      output.innerHTML = '';
+    }
+
+    function showOutput(command) {
+      const outputLines = Array.isArray(command.output) ? command.output : [command.output];
+      outputLines.forEach((line) => {
+        output.appendChild(createLine(line, 'text-fg-secondary leading-relaxed'));
+      });
+      // Scroll to bottom
+      if (terminalContent) {
+        setTimeout(() => {
+          terminalContent.scrollTop = terminalContent.scrollHeight;
+        }, 50);
+      }
+    }
+
+    function typeCommand(command, onComplete) {
+      if (isTyping) return;
+      isTyping = true;
+
+      // Show prompt
+      const promptLine = createLine('', 'flex items-center gap-2 mb-2');
+      promptLine.innerHTML = `
+        <span class="text-accent-green">user@works-on-my.cloud</span>
+        <span class="text-fg-muted">~</span>
+        <span class="text-accent-blue">%</span>
+        <span class="command-text text-fg-primary"></span>
+        <span class="typing-cursor inline-block w-2 h-5 bg-accent-cyan animate-pulse"> </span>
+      `;
+      output.appendChild(promptLine);
+      const commandText = promptLine.querySelector('.command-text');
+
+      let charIndex = 0;
+      const commandChars = command.command.split('');
+
+      function typeNextChar() {
+        if (charIndex < commandChars.length && commandText) {
+          commandText.textContent += commandChars[charIndex];
+          charIndex++;
+          setTimeout(typeNextChar, command.typeSpeed);
+        } else {
+          // Remove cursor from command line
+          const cursorEl = promptLine.querySelector('.typing-cursor');
+          if (cursorEl) cursorEl.remove();
+
+          // Show output after delay
+          setTimeout(() => {
+            showOutput(command);
+            isTyping = false;
+            onComplete();
+          }, command.outputDelay);
+        }
+      }
+
+      setTimeout(() => {
+        typeNextChar();
+      }, command.delayBefore);
+    }
+
+    function showClearCommand(onComplete) {
+      const promptLine = createLine('', 'flex items-center gap-2 mb-2');
+      promptLine.innerHTML = `
+        <span class="text-accent-green">user@works-on-my.cloud</span>
+        <span class="text-fg-muted">~</span>
+        <span class="text-accent-blue">%</span>
+        <span class="text-fg-primary">clear</span>
+      `;
+      output.appendChild(promptLine);
+      
+      setTimeout(() => {
+        clearScreen();
+        onComplete();
+      }, 500);
+    }
+
+    function shrinkTerminal() {
+      // Remove fixed positioning and shrink
+      wrapper.classList.remove('fixed', 'inset-0');
+      wrapper.classList.add('relative', 'mb-12');
+      window.classList.add('max-w-4xl', 'mx-auto');
+      window.style.width = '100%';
+      window.style.maxWidth = '56rem';
+      terminalContent.style.minHeight = 'auto';
+      terminalContent.style.height = 'auto';
+      
+      // Hide skip button
+      const skipBtn = document.getElementById('skip-animation-btn');
+      if (skipBtn) {
+        skipBtn.style.display = 'none';
+      }
+      
+      // Show content below terminal
+      const contentBelow = document.getElementById('content-below-terminal');
+      if (contentBelow) {
+        setTimeout(() => {
+          contentBelow.classList.remove('hidden', 'opacity-0');
+          contentBelow.classList.add('opacity-100');
+        }, 300);
+      }
+    }
+
+    function skipAnimation() {
+      // Immediately show fastfetch and shrink
+      if (fastfetchContainer) {
+        fastfetchContainer.classList.remove('hidden');
+        if (output) output.style.display = 'none';
+        if (prompt) prompt.style.display = 'none';
+      }
+      shrinkTerminal();
+    }
+
+    // Skip button handler
+    const skipBtn = document.getElementById('skip-animation-btn');
+    if (skipBtn) {
+      skipBtn.addEventListener('click', skipAnimation);
+      skipBtn.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          skipAnimation();
+        }
+      });
+    }
+
+    function startTyping() {
+      if (currentCommandIndex >= commandsToRun.length) {
+        // All commands done, show clear
+        showClearCommand(() => {
+          // Show fastfetch after clear
+          setTimeout(() => {
+            if (fastfetchContainer) {
+              fastfetchContainer.classList.remove('hidden');
+              output.style.display = 'none';
+              prompt.style.display = 'none';
+              
+              // Wait for fastfetch to render, then shrink
+              setTimeout(() => {
+                shrinkTerminal();
+              }, 500);
+            }
+          }, 300);
+        });
+        return;
+      }
+
+      const command = commandsToRun[currentCommandIndex];
+      typeCommand(command, () => {
+        currentCommandIndex++;
+        setTimeout(() => {
+          startTyping();
+        }, 600);
+      });
+    }
+
+    // Set initial viewport size
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+    const size = Math.min(vh * 0.85, vw * 0.85, 800);
+    
+    window.style.width = `${size}px`;
+    window.style.height = `${size}px`;
+    terminalContent.style.height = `${size - 60}px`; // Subtract header height
+
+    // Start typing
+    setTimeout(startTyping, 800);
+  }
+
+  // Track if terminal has already been initialized
+  let terminalInitialized = false;
+
+  // Initialize on page load - only on homepage and only once
+  function initTerminalOnce() {
+    // Only run on homepage
+    if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
+      return;
+    }
+    
+    // Only initialize once
+    if (terminalInitialized) {
+      return;
+    }
+    
+    terminalInitialized = true;
+    initTerminal();
+  }
+
+  // Initialize when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initTerminalOnce);
+  } else {
+    setTimeout(initTerminalOnce, 200);
+  }
+
+  // Don't re-initialize on navigation - terminal should only show on homepage initial load
+  // If user navigates away and comes back, they've already seen it
+</script>
+
+<style>
+  .terminal-wrapper {
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .terminal-window {
+    font-family: 'Inconsolata', monospace;
+    backdrop-filter: blur(10px);
+  }
+
+  .terminal-content {
+    background: var(--bg-secondary);
+  }
+
+  .terminal-content::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .terminal-content::-webkit-scrollbar-track {
+    background: var(--bg-tertiary);
+  }
+
+  .terminal-content::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+  }
+
+  .terminal-content::-webkit-scrollbar-thumb:hover {
+    background: var(--fg-muted);
+  }
+
+  @keyframes pulse {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.3;
+    }
+  }
+
+  .animate-pulse {
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  #terminal-wrapper.fixed {
+    background: rgba(26, 27, 38, 0.95);
+    backdrop-filter: blur(8px);
+  }
+</style>

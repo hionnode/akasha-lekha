@@ -1,0 +1,85 @@
+---
+---
+
+<div id="status-bar" class="h-8 border-b border-border bg-bg-tertiary px-4 flex items-center gap-4 text-xs">
+  <div class="flex items-center gap-2">
+    <span class="text-fg-muted">Mode:</span>
+    <span id="mode-indicator" class="text-accent-blue font-semibold">arrows</span>
+  </div>
+  
+  <div class="flex-1"></div>
+  
+  <div id="search-indicator" class="hidden flex items-center gap-2">
+    <span class="text-fg-muted">Search:</span>
+    <span id="search-query" class="text-accent-cyan">_</span>
+  </div>
+  
+  <div id="tags-indicator" class="hidden flex items-center gap-2">
+    <span class="text-fg-muted">Tags:</span>
+    <div id="active-tags" class="flex gap-1"></div>
+  </div>
+  
+  <div class="flex items-center gap-2">
+    <span class="text-fg-muted">Type:</span>
+    <span id="content-type-indicator" class="text-accent-green">all</span>
+  </div>
+  
+  <div class="flex items-center gap-2">
+    <span class="text-fg-muted">Items:</span>
+    <span id="item-count" class="text-fg-primary font-semibold">0</span>
+  </div>
+</div>
+
+<script>
+  // Status bar will be updated by TUIController
+  export function updateStatusBar(state: {
+    mode: 'vim' | 'arrows';
+    searchQuery: string;
+    activeTags: string[];
+    contentType: string;
+    itemCount: number;
+  }) {
+    const modeIndicator = document.getElementById('mode-indicator');
+    const searchIndicator = document.getElementById('search-indicator');
+    const searchQuery = document.getElementById('search-query');
+    const tagsIndicator = document.getElementById('tags-indicator');
+    const activeTags = document.getElementById('active-tags');
+    const contentTypeIndicator = document.getElementById('content-type-indicator');
+    const itemCount = document.getElementById('item-count');
+
+    if (modeIndicator) {
+      modeIndicator.textContent = state.mode;
+      modeIndicator.className = state.mode === 'vim' ? 'text-accent-cyan font-semibold' : 'text-accent-blue font-semibold';
+    }
+
+    if (state.searchQuery) {
+      searchIndicator?.classList.remove('hidden');
+      if (searchQuery) searchQuery.textContent = state.searchQuery;
+    } else {
+      searchIndicator?.classList.add('hidden');
+    }
+
+    if (state.activeTags.length > 0) {
+      tagsIndicator?.classList.remove('hidden');
+      if (activeTags) {
+        activeTags.innerHTML = state.activeTags
+          .map(tag => `<span class="px-1.5 py-0.5 bg-accent-blue/20 text-accent-blue rounded text-xs">${tag}</span>`)
+          .join('');
+      }
+    } else {
+      tagsIndicator?.classList.add('hidden');
+    }
+
+    if (contentTypeIndicator) {
+      contentTypeIndicator.textContent = state.contentType;
+    }
+
+    if (itemCount) {
+      itemCount.textContent = state.itemCount.toString();
+    }
+  }
+
+  // Make function available globally
+  (window as any).updateStatusBar = updateStatusBar;
+</script>
+

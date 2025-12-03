@@ -23,28 +23,122 @@ const formattedDate = new Date(date).toLocaleDateString('en-US', {
 
 <article
   class="border border-border bg-bg-secondary p-6 hover:bg-bg-tertiary hover:border-accent-blue transition-colors cursor-pointer group"
+  data-post-card
+  data-post-slug={slug}
 >
-  <a href={`/blog/${slug}`} class="block">
-    {featured && (
-      <div class="mb-3">
-        <span class="text-xs font-semibold uppercase tracking-wider text-accent-yellow">
-          Featured
-        </span>
-      </div>
-    )}
-    <h3 class="text-xl font-semibold mb-2 group-hover:text-accent-blue transition-colors">
-      {title}
-    </h3>
-    <p class="text-fg-secondary mb-4 leading-relaxed">{excerpt}</p>
-    <footer class="flex flex-wrap items-center gap-3 text-sm text-fg-muted">
-      <time datetime={date}>{formattedDate}</time>
-      {readingTime && <span>• {readingTime} min read</span>}
-      <div class="flex flex-wrap gap-2">
-        {tags.map((tag) => (
-          <TagPill tag={tag} />
-        ))}
-      </div>
-    </footer>
+  {featured && (
+    <div class="mb-3">
+      <span class="text-xs font-semibold uppercase tracking-wider text-accent-yellow">
+        Featured
+      </span>
+    </div>
+  )}
+  <a href={`/blog/${slug}`} class="block group-hover:text-accent-blue transition-colors">
+    <h3 class="text-xl font-semibold mb-2">{title}</h3>
   </a>
+  <p class="text-fg-secondary mb-4 leading-relaxed">{excerpt}</p>
+  <footer class="flex flex-wrap items-center gap-3 text-sm text-fg-muted">
+    <time datetime={date}>{formattedDate}</time>
+    {readingTime && <span>• {readingTime} min read</span>}
+    <div class="flex flex-wrap gap-2" data-tag-container>
+      {tags.map((tag) => (
+        <TagPill tag={tag} data-tag-pill data-tag={tag} />
+      ))}
+    </div>
+  </footer>
 </article>
+
+<script>
+  // Make entire card clickable, but exclude tag clicks
+  document.addEventListener('DOMContentLoaded', () => {
+    const cards = document.querySelectorAll('[data-post-card]');
+    
+    cards.forEach((card) => {
+      const slug = (card as HTMLElement).dataset.postSlug;
+      const tagContainer = card.querySelector('[data-tag-container]');
+      
+      if (!slug) return;
+
+      card.addEventListener('click', (e) => {
+        // Don't navigate if clicking on tags or tag container
+        const target = e.target as HTMLElement;
+        if (
+          target.closest('[data-tag-container]') ||
+          target.closest('[data-tag-pill]') ||
+          target.closest('a')
+        ) {
+          return;
+        }
+        
+        // Navigate to post
+        window.location.href = `/blog/${slug}`;
+      });
+
+      // Make card keyboard accessible
+      card.setAttribute('tabindex', '0');
+      card.setAttribute('role', 'button');
+      card.setAttribute('aria-label', `Read article: ${card.querySelector('h3')?.textContent || 'Post'}`);
+      
+      card.addEventListener('keydown', (e: Event) => {
+        const keyEvent = e as KeyboardEvent;
+        if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+          keyEvent.preventDefault();
+          const target = keyEvent.target as HTMLElement;
+          if (
+            target.closest('[data-tag-container]') ||
+            target.closest('[data-tag-pill]') ||
+            target.closest('a')
+          ) {
+            return;
+          }
+          window.location.href = `/blog/${slug}`;
+        }
+      });
+    });
+  });
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', () => {
+    const cards = document.querySelectorAll('[data-post-card]');
+    
+    cards.forEach((card) => {
+      const slug = (card as HTMLElement).dataset.postSlug;
+      const tagContainer = card.querySelector('[data-tag-container]');
+      
+      if (!slug) return;
+
+      card.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (
+          target.closest('[data-tag-container]') ||
+          target.closest('[data-tag-pill]') ||
+          target.closest('a')
+        ) {
+          return;
+        }
+        window.location.href = `/blog/${slug}`;
+      });
+
+      card.setAttribute('tabindex', '0');
+      card.setAttribute('role', 'button');
+      card.setAttribute('aria-label', `Read article: ${card.querySelector('h3')?.textContent || 'Post'}`);
+      
+      card.addEventListener('keydown', (e: Event) => {
+        const keyEvent = e as KeyboardEvent;
+        if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
+          keyEvent.preventDefault();
+          const target = keyEvent.target as HTMLElement;
+          if (
+            target.closest('[data-tag-container]') ||
+            target.closest('[data-tag-pill]') ||
+            target.closest('a')
+          ) {
+            return;
+          }
+          window.location.href = `/blog/${slug}`;
+        }
+      });
+    });
+  });
+</script>
 

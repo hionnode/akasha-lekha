@@ -1,0 +1,24 @@
+---
+interface Props {
+  data: string;
+}
+
+const { data } = Astro.props;
+---
+
+<script>
+  import { initializeTUI } from './TUIController';
+  
+  // Get data from the data attribute
+  const script = document.currentScript;
+  const dataStr = script?.getAttribute('data-tui-init');
+  
+  if (dataStr) {
+    initializeTUI(dataStr);
+  }
+</script>
+
+<script data-tui-init={data} is:inline>
+  // Data passed via attribute
+</script>
+

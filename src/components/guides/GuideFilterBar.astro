@@ -1,15 +1,17 @@
 ---
 import { getCollection } from 'astro:content';
 
-// Get all unique tags from posts
-const allPosts = await getCollection('blog', ({ data }) => !data.draft);
+// Get all unique tags from guides
+const allGuides = await getCollection('guides');
+const guideIndexes = allGuides.filter((guide) => 'parts' in guide.data);
+
 const allTags = Array.from(
-  new Set(allPosts.flatMap((post) => post.data.tags || []))
+  new Set(guideIndexes.flatMap((guide) => (guide.data as { tags: string[] }).tags || []))
 ).sort();
 
 const tagCounts: Record<string, number> = {};
-allPosts.forEach((post) => {
-  post.data.tags?.forEach((tag) => {
+guideIndexes.forEach((guide) => {
+  (guide.data as { tags: string[] }).tags?.forEach((tag) => {
     tagCounts[tag] = (tagCounts[tag] || 0) + 1;
   });
 });
@@ -18,31 +20,15 @@ allPosts.forEach((post) => {
 <div class="mb-6 p-6 bg-bg-secondary border border-border rounded-lg">
   <!-- Search Bar -->
   <div class="mb-6">
-    <label for="blog-search" class="block text-sm font-semibold text-fg-secondary mb-2">
+    <label for="guide-search" class="block text-sm font-semibold text-fg-secondary mb-2">
       Search
     </label>
     <input
       type="text"
-      id="blog-search"
-      placeholder="Search posts by title, excerpt, or tags..."
+      id="guide-search"
+      placeholder="Search guides by title or description..."
       class="w-full px-4 py-2 bg-bg-primary border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent-blue focus:border-accent-blue text-fg-primary font-mono text-sm"
     />
-  </div>
-
-  <!-- Sort Options -->
-  <div class="mb-6">
-    <label for="blog-sort" class="block text-sm font-semibold text-fg-secondary mb-2">
-      Sort by
-    </label>
-    <select
-      id="blog-sort"
-      class="w-full px-4 py-2 bg-bg-primary border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent-blue focus:border-accent-blue text-fg-primary font-mono text-sm"
-    >
-      <option value="date-desc">Newest First</option>
-      <option value="date-asc">Oldest First</option>
-      <option value="title-asc">Title (A-Z)</option>
-      <option value="title-desc">Title (Z-A)</option>
-    </select>
   </div>
 
   <!-- Tag Filter -->
@@ -50,24 +36,24 @@ allPosts.forEach((post) => {
     <label class="block text-sm font-semibold text-fg-secondary mb-3">
       Filter by Tags
     </label>
-    <div id="tag-filter-container" class="flex flex-wrap gap-2">
+    <div id="guide-tag-filter-container" class="flex flex-wrap gap-2">
       {allTags.map((tag) => (
         <button
           data-tag={tag}
-          class="tag-filter-btn px-3 py-1.5 text-xs font-semibold uppercase tracking-wider border border-border bg-bg-primary text-fg-muted hover:bg-bg-tertiary hover:text-accent-blue hover:border-accent-blue transition-colors rounded"
+          class="guide-tag-filter-btn px-3 py-1.5 text-xs font-semibold uppercase tracking-wider border border-border bg-bg-primary text-fg-muted hover:bg-bg-tertiary hover:text-accent-blue hover:border-accent-blue transition-colors rounded"
         >
           {tag}
           <span class="ml-2 text-fg-muted">({tagCounts[tag]})</span>
         </button>
       ))}
     </div>
-    <div id="active-tags" class="mt-4 flex flex-wrap gap-2 items-center">
+    <div id="guide-active-filters" class="mt-4 flex flex-wrap gap-2 items-center">
       <span class="text-xs text-fg-muted">Active filters:</span>
-      <div id="active-tags-list" class="flex flex-wrap gap-2">
-        <!-- Active tags will be populated here -->
+      <div id="guide-active-filters-list" class="flex flex-wrap gap-2">
+        <!-- Active filters will be populated here -->
       </div>
       <button
-        id="clear-filters"
+        id="guide-clear-filters"
         class="text-xs text-accent-blue hover:text-accent-cyan transition-colors hidden"
       >
         Clear all
@@ -76,38 +62,35 @@ allPosts.forEach((post) => {
   </div>
 
   <!-- Results Count -->
-  <div id="results-count" class="mt-4 text-sm text-fg-muted">
-    Showing all posts
+  <div id="guide-results-count" class="mt-4 text-sm text-fg-muted">
+    Showing all guides
   </div>
 </div>
 
 <script>
-  const searchInput = document.getElementById('blog-search');
-  const sortSelect = document.getElementById('blog-sort');
-  const tagButtons = document.querySelectorAll('.tag-filter-btn');
-  const activeTagsList = document.getElementById('active-tags-list');
-  const clearFiltersBtn = document.getElementById('clear-filters');
-  const resultsCount = document.getElementById('results-count');
-  const emptyState = document.getElementById('empty-state');
-  const clearFiltersEmptyBtn = document.getElementById('clear-filters-empty');
+  const searchInput = document.getElementById('guide-search') as HTMLInputElement | null;
+  const tagButtons = document.querySelectorAll('.guide-tag-filter-btn');
+  const activeFiltersList = document.getElementById('guide-active-filters-list');
+  const clearFiltersBtn = document.getElementById('guide-clear-filters');
+  const resultsCount = document.getElementById('guide-results-count');
+  const emptyState = document.getElementById('guide-empty-state');
 
   let activeTags = new Set<string>();
   let searchQuery = '';
-  let sortBy = 'date-desc';
-  interface PostData {
+  interface GuideData {
     element: HTMLElement;
     title: string;
-    excerpt: string;
+    description: string;
     tags: string[];
-    date: string;
-    featured: boolean;
+    partCount: number;
+    readTime: number;
   }
-  let postsData: PostData[] = [];
+  let guidesData: GuideData[] = [];
 
-  function updateActiveTagsDisplay() {
-    if (!activeTagsList || !clearFiltersBtn) return;
+  function updateActiveFiltersDisplay() {
+    if (!activeFiltersList || !clearFiltersBtn) return;
 
-    activeTagsList.innerHTML = '';
+    activeFiltersList.innerHTML = '';
     
     const hasFilters = activeTags.size > 0 || searchQuery.trim().length > 0;
     
@@ -130,10 +113,10 @@ allPosts.forEach((post) => {
       searchEl.addEventListener('click', () => {
         searchQuery = '';
         if (searchInput) (searchInput as HTMLInputElement).value = '';
-        updateActiveTagsDisplay();
+        updateActiveFiltersDisplay();
         filterAndSort();
       });
-      activeTagsList.appendChild(searchEl);
+      activeFiltersList.appendChild(searchEl);
     }
 
     // Show tag filters
@@ -145,17 +128,15 @@ allPosts.forEach((post) => {
         ${tag}
         <span class="text-accent-blue">×</span>
       `;
-      const tagValue = tag as string;
       tagEl.addEventListener('click', () => {
-        activeTags.delete(tagValue);
+        activeTags.delete(tag);
         updateTagButtons();
-        updateActiveTagsDisplay();
+        updateActiveFiltersDisplay();
         filterAndSort();
       });
-      activeTagsList.appendChild(tagEl);
+      activeFiltersList.appendChild(tagEl);
     });
   }
-
 
   function updateTagButtons() {
     tagButtons.forEach((btn) => {
@@ -172,20 +153,20 @@ allPosts.forEach((post) => {
 
   function filterAndSort() {
     const query = searchQuery.toLowerCase().trim();
-    let filtered = postsData.filter((post) => {
+    let filtered = guidesData.filter((guide) => {
       // Search filter
       if (query) {
         const matchesSearch =
-          post.title.toLowerCase().includes(query) ||
-          post.excerpt.toLowerCase().includes(query) ||
-          post.tags.some((tag: string) => tag.toLowerCase().includes(query));
+          guide.title.toLowerCase().includes(query) ||
+          guide.description.toLowerCase().includes(query) ||
+          guide.tags.some((tag: string) => tag.toLowerCase().includes(query));
         if (!matchesSearch) return false;
       }
 
       // Tag filter (AND logic - must have all selected tags)
       if (activeTags.size > 0) {
         const hasAllTags = Array.from(activeTags).every((selectedTag: string) =>
-          post.tags.some((postTag: string) => postTag.toLowerCase() === selectedTag.toLowerCase())
+          guide.tags.some((tag: string) => tag.toLowerCase() === selectedTag.toLowerCase())
         );
         if (!hasAllTags) return false;
       }
@@ -193,62 +174,39 @@ allPosts.forEach((post) => {
       return true;
     });
 
-    // Sort
-    filtered.sort((a, b) => {
-      switch (sortBy) {
-        case 'date-desc':
-          return new Date(b.date).getTime() - new Date(a.date).getTime();
-        case 'date-asc':
-          return new Date(a.date).getTime() - new Date(b.date).getTime();
-        case 'title-asc':
-          return a.title.localeCompare(b.title);
-        case 'title-desc':
-          return b.title.localeCompare(a.title);
-        default:
-          return 0;
-      }
-    });
-
     // Get the container
-    const container = document.getElementById('post-list-container');
+    const container = document.getElementById('guide-list-container');
     if (!container) return;
 
-    // Reorder and show/hide posts
-    const visibleSet = new Set(filtered.map((p) => p.element));
-    
-    // First, hide all posts
-    postsData.forEach((post) => {
-      post.element.style.display = 'none';
+    // Hide all guides
+    guidesData.forEach((guide) => {
+      guide.element.style.display = 'none';
     });
 
-    // Then, show and reorder filtered posts
-    filtered.forEach((post) => {
-      post.element.style.display = '';
-      container.appendChild(post.element);
+    // Show filtered guides
+    filtered.forEach((guide) => {
+      guide.element.style.display = '';
+      container.appendChild(guide.element);
     });
 
     // Update results count
     if (resultsCount) {
-      const total = postsData.length;
+      const total = guidesData.length;
       const showing = filtered.length;
       if (showing === total) {
-        resultsCount.textContent = `Showing all ${total} posts`;
+        resultsCount.textContent = `Showing all ${total} guides`;
       } else {
-        resultsCount.textContent = `Showing ${showing} of ${total} posts`;
+        resultsCount.textContent = `Showing ${showing} of ${total} guides`;
       }
     }
 
-    // Show/hide empty state - only show if there are posts but none match filters
+    // Show/hide empty state
     if (emptyState) {
-      const hasPosts = postsData.length > 0;
+      const hasGuides = guidesData.length > 0;
       const hasFilteredResults = filtered.length > 0;
       const hasActiveFilters = activeTags.size > 0 || searchQuery.trim().length > 0;
       
-      // Only show empty state if:
-      // 1. We have posts loaded
-      // 2. We have active filters
-      // 3. No posts match the filters
-      if (hasPosts && hasActiveFilters && !hasFilteredResults) {
+      if (hasGuides && hasActiveFilters && !hasFilteredResults) {
         emptyState.classList.remove('hidden');
       } else {
         emptyState.classList.add('hidden');
@@ -262,28 +220,15 @@ allPosts.forEach((post) => {
     searchInput.addEventListener('input', (e) => {
       const value = (e.target as HTMLInputElement).value;
       
-      // Clear previous timeout
       if (searchTimeout) {
         clearTimeout(searchTimeout);
       }
       
-      // Set new timeout for debouncing (300ms)
       searchTimeout = setTimeout(() => {
         searchQuery = value;
-        updateActiveTagsDisplay();
+        updateActiveFiltersDisplay();
         filterAndSort();
       }, 300);
-    });
-  }
-
-  // Sort select
-  if (sortSelect) {
-    sortSelect.addEventListener('change', (e) => {
-      const target = e.target as HTMLSelectElement;
-      if (target) {
-        sortBy = target.value;
-        filterAndSort();
-      }
     });
   }
 
@@ -298,7 +243,7 @@ allPosts.forEach((post) => {
           activeTags.add(tag);
         }
         updateTagButtons();
-        updateActiveTagsDisplay();
+        updateActiveFiltersDisplay();
         filterAndSort();
       }
     });
@@ -309,14 +254,12 @@ allPosts.forEach((post) => {
     activeTags.clear();
     searchQuery = '';
     if (searchInput) (searchInput as HTMLInputElement).value = '';
-    if (sortSelect) (sortSelect as HTMLSelectElement).value = 'date-desc';
-    sortBy = 'date-desc';
     if (searchTimeout) {
       clearTimeout(searchTimeout);
       searchTimeout = null;
     }
     updateTagButtons();
-    updateActiveTagsDisplay();
+    updateActiveFiltersDisplay();
     filterAndSort();
   }
 
@@ -324,39 +267,35 @@ allPosts.forEach((post) => {
     clearFiltersBtn.addEventListener('click', clearAllFilters);
   }
 
+  const clearFiltersEmptyBtn = document.getElementById('guide-clear-filters-empty');
   if (clearFiltersEmptyBtn) {
     clearFiltersEmptyBtn.addEventListener('click', clearAllFilters);
   }
 
-  // Initialize after a short delay to ensure post cards are rendered
+  // Initialize
   function initialize() {
-    // Get all posts data from the page - select wrapper divs that have data attributes
-    const postCards = document.querySelectorAll('#post-list-container > [data-post-card]');
-    postsData = [];
+    const guideCards = document.querySelectorAll('#guide-list-container > [data-guide-card]');
+    guidesData = [];
     
-    postCards.forEach((card) => {
+    guideCards.forEach((card) => {
       const element = card as HTMLElement;
-      // Only process elements that have the required data attributes
       if (element.dataset.title && element.dataset.tags) {
-        postsData.push({
+        guidesData.push({
           element,
           title: element.dataset.title || '',
-          excerpt: element.dataset.excerpt || '',
+          description: element.dataset.description || '',
           tags: JSON.parse(element.dataset.tags || '[]'),
-          date: element.dataset.date || '',
-          featured: element.dataset.featured === 'true',
+          partCount: parseInt(element.dataset.partCount || '0'),
+          readTime: parseInt(element.dataset.readTime || '0'),
         });
       }
     });
     
     updateTagButtons();
-    updateActiveTagsDisplay();
-    
-    // Run initial filter to set correct state
+    updateActiveFiltersDisplay();
     filterAndSort();
   }
 
-  // Initialize when DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
       setTimeout(initialize, 200);
@@ -365,7 +304,6 @@ allPosts.forEach((post) => {
     setTimeout(initialize, 200);
   }
 
-  // Re-initialize on navigation (Astro View Transitions)
   document.addEventListener('astro:page-load', () => {
     setTimeout(initialize, 200);
   });
@@ -390,3 +328,4 @@ allPosts.forEach((post) => {
     }
   });
 </script>
+

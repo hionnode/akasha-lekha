@@ -5,6 +5,8 @@ import Header from '../../components/layout/Header.astro';
 import Footer from '../../components/layout/Footer.astro';
 import Container from '../../components/layout/Container.astro';
 import GuideCard from '../../components/guides/GuideCard.astro';
+import GuideFilterBar from '../../components/guides/GuideFilterBar.astro';
+import SkeletonList from '../../components/shared/SkeletonList.astro';
 import { calculateReadingTime } from '../../utils/readingTime';
 
 const allGuides = await getCollection('guides');
@@ -33,25 +35,108 @@ const guidesWithMetadata = guideIndexes.map((guide) => {
 <Layout title="Guides | works-on-my.cloud" description="Multi-part deep dives into specific topics">
   <div class="min-h-screen flex flex-col">
     <Header />
-    <main class="flex-1">
+    <main id="main-content" class="flex-1">
       <Container class="py-12">
         <h1 class="mb-4">Guides</h1>
         <p class="text-fg-secondary text-lg mb-8">Multi-part deep dives into specific topics</p>
-        <div class="grid md:grid-cols-2 gap-6">
-          {guidesWithMetadata.map((guide) => (
-            <GuideCard
-              title={guide.title}
-              description={guide.description}
-              partCount={guide.partCount}
-              tags={guide.tags}
-              slug={guide.slug}
-              readTime={guide.readTime}
-            />
-          ))}
+        <GuideFilterBar />
+        <!-- Loading skeleton -->
+        <div id="guides-skeleton" class="hidden">
+          <div class="grid md:grid-cols-2 gap-6">
+            {Array.from({ length: 4 }).map(() => (
+              <div class="border border-border bg-bg-secondary p-6 animate-pulse">
+                <div class="h-6 bg-bg-tertiary rounded w-3/4 mb-4"></div>
+                <div class="space-y-2 mb-4">
+                  <div class="h-4 bg-bg-tertiary rounded w-full"></div>
+                  <div class="h-4 bg-bg-tertiary rounded w-5/6"></div>
+                </div>
+                <div class="flex items-center gap-3 flex-wrap">
+                  <div class="h-4 bg-bg-tertiary rounded w-20"></div>
+                  <div class="h-4 bg-bg-tertiary rounded w-16"></div>
+                  <div class="flex gap-2">
+                    {Array.from({ length: 2 }).map(() => (
+                      <div class="h-6 bg-bg-tertiary rounded w-16"></div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <!-- Actual content -->
+        <div id="guides-content">
+          <div id="guide-list-container" class="grid md:grid-cols-2 gap-6">
+            {guidesWithMetadata.map((guide) => (
+              <div
+                data-guide-card
+                data-title={guide.title}
+                data-description={guide.description}
+                data-tags={JSON.stringify(guide.tags)}
+                data-part-count={guide.partCount}
+                data-read-time={guide.readTime}
+              >
+                <GuideCard
+                  title={guide.title}
+                  description={guide.description}
+                  partCount={guide.partCount}
+                  tags={guide.tags}
+                  slug={guide.slug}
+                  readTime={guide.readTime}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div id="guide-empty-state" class="hidden text-center py-12 mt-6">
+          <p class="text-fg-secondary text-lg mb-4">No guides found matching your filters.</p>
+          <button
+            id="guide-clear-filters-empty"
+            class="text-accent-blue hover:text-accent-cyan transition-colors underline"
+          >
+            Clear all filters
+          </button>
         </div>
       </Container>
     </main>
     <Footer />
   </div>
 </Layout>
+
+<script>
+  function showContent() {
+    const skeleton = document.getElementById('guides-skeleton');
+    const content = document.getElementById('guides-content');
+    
+    if (skeleton && content) {
+      skeleton.classList.add('hidden');
+      content.classList.remove('hidden');
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      const skeleton = document.getElementById('guides-skeleton');
+      const content = document.getElementById('guides-content');
+      
+      if (skeleton && content) {
+        skeleton.classList.remove('hidden');
+        content.classList.add('hidden');
+        setTimeout(showContent, 300);
+      }
+    });
+  } else {
+    showContent();
+  }
+
+  document.addEventListener('astro:page-load', () => {
+    const skeleton = document.getElementById('guides-skeleton');
+    const content = document.getElementById('guides-content');
+    
+    if (skeleton && content) {
+      skeleton.classList.remove('hidden');
+      content.classList.add('hidden');
+      setTimeout(showContent, 200);
+    }
+  });
+</script>
 

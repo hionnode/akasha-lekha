@@ -1,0 +1,115 @@
+---
+interface Props {
+  data: string;
+}
+
+const { data } = Astro.props;
+---
+
+<div id="content-list" class="p-4">
+  <div id="list-items" class="space-y-2">
+    <!-- Items will be populated by script -->
+  </div>
+  <div id="empty-state" class="hidden text-center py-12 text-fg-muted">
+    <div class="text-lg mb-2">No items found</div>
+    <div class="text-sm">Try adjusting your filters or search query</div>
+  </div>
+</div>
+
+<script>
+  interface ContentItem {
+    type: 'blog' | 'guides' | 'code';
+    slug: string;
+    title: string;
+    description: string;
+    tags: string[];
+    date?: string;
+    language?: string;
+    readingTime?: number;
+    featured?: boolean;
+  }
+
+  const { data: dataStr } = Astro.props;
+  const listItems = document.getElementById('list-items');
+  const emptyState = document.getElementById('empty-state');
+
+  function renderList(items: ContentItem[], selectedIndex: number) {
+    if (!listItems || !emptyState) return;
+
+    if (items.length === 0) {
+      listItems.innerHTML = '';
+      emptyState.classList.remove('hidden');
+      return;
+    }
+
+    emptyState.classList.add('hidden');
+    listItems.innerHTML = items
+      .map((item, index) => {
+        const isSelected = index === selectedIndex;
+        const prefix = isSelected ? '>' : ' ';
+        const selectedClass = isSelected
+          ? 'bg-accent-blue/20 border-accent-blue'
+          : 'border-transparent';
+
+        const metadata = [];
+        if (item.date) metadata.push(item.date);
+        if (item.readingTime) metadata.push(`${item.readingTime} min read`);
+        if (item.language) metadata.push(item.language.toUpperCase());
+
+        const tagsStr = item.tags.slice(0, 3).join(' | ');
+
+        return `
+          <div
+            data-index="${index}"
+            class="list-item border-l-2 ${selectedClass} px-3 py-2 cursor-pointer hover:bg-bg-tertiary transition-colors"
+          >
+            <div class="flex items-start gap-2 mb-1">
+              <span class="text-accent-cyan font-bold">${prefix}</span>
+              <div class="flex-1">
+                <div class="font-semibold ${isSelected ? 'text-accent-blue' : 'text-fg-primary'}">
+                  ${item.title}
+                </div>
+                ${item.description ? `<div class="text-sm text-fg-secondary mt-1 line-clamp-2">${item.description}</div>` : ''}
+              </div>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-fg-muted ml-4">
+              ${tagsStr ? `<span>${tagsStr}</span>` : ''}
+              ${metadata.length > 0 ? `<span>•</span><span>${metadata.join(' • ')}</span>` : ''}
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    // Scroll selected item into view
+    const selectedItem = listItems.querySelector(`[data-index="${selectedIndex}"]`);
+    if (selectedItem) {
+      selectedItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+
+  // Listen for list updates
+  window.addEventListener('content-list-update', ((e: CustomEvent) => {
+    const { items, selectedIndex } = e.detail;
+    renderList(items, selectedIndex);
+  }) as EventListener);
+
+  // Handle item clicks
+  listItems?.addEventListener('click', (e) => {
+    const item = (e.target as HTMLElement).closest('.list-item');
+    if (item) {
+      const index = parseInt(item.getAttribute('data-index') || '0');
+      window.dispatchEvent(new CustomEvent('list-item-select', { detail: { index } }));
+    }
+  });
+
+  // Initial empty state
+  renderList([], 0);
+</script>
+
+<style>
+  .list-item {
+    font-family: 'Inconsolata', monospace;
+  }
+</style>
+
