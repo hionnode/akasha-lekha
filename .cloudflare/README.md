@@ -38,3 +38,4 @@ npx wrangler pages deploy dist --project-name=akasha-lekha
 
 However, for continuous deployment, use Cloudflare Pages with Git integration (recommended).
 
+
