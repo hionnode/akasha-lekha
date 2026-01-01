@@ -6,7 +6,7 @@ import Footer from '../components/layout/Footer.astro';
 import Container from '../components/layout/Container.astro';
 import PostList from '../components/blog/PostList.astro';
 import TerminalHero from '../components/landing/TerminalHero.astro';
-import SkeletonList from '../components/shared/SkeletonList.astro';
+import VimShortcuts from '../components/shared/VimShortcuts.astro';
 
 const allPosts = await getCollection('blog', ({ data }) => !data.draft);
 const featuredPosts = allPosts
@@ -36,32 +36,19 @@ const latestPosts = allPosts
           {featuredPosts.length > 0 && (
             <section class="mb-12">
               <h2 class="mb-6 text-2xl font-semibold">Featured</h2>
-              <!-- Loading skeleton -->
-              <div id="featured-skeleton" class="hidden">
-                <SkeletonList count={3} cardLines={2} />
-              </div>
-              <!-- Actual content -->
-              <div id="featured-content">
-                <PostList posts={featuredPosts} />
-              </div>
+              <PostList posts={featuredPosts} />
             </section>
           )}
 
           <section>
             <h2 class="mb-6 text-2xl font-semibold">Latest</h2>
-            <!-- Loading skeleton -->
-            <div id="latest-skeleton" class="hidden">
-              <SkeletonList count={5} cardLines={2} />
-            </div>
-            <!-- Actual content -->
-            <div id="latest-content">
-              <PostList posts={latestPosts} />
-            </div>
+            <PostList posts={latestPosts} />
           </section>
         </div>
       </Container>
     </main>
     <Footer />
+    <VimShortcuts />
   </div>
 </Layout>
 

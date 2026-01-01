@@ -1,0 +1,65 @@
+---
+// This component enhances all code blocks on the page with copy buttons
+---
+
+<script>
+  function enhanceCodeBlocks() {
+    const codeBlocks = document.querySelectorAll('.prose pre');
+    
+    codeBlocks.forEach((pre) => {
+      // Skip if already enhanced
+      if (pre.parentElement?.classList.contains('code-block-wrapper')) {
+        return;
+      }
+
+      // Create wrapper
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-block-wrapper';
+      
+      // Wrap the pre element
+      pre.parentNode?.insertBefore(wrapper, pre);
+      wrapper.appendChild(pre);
+
+      // Create copy button
+      const button = document.createElement('button');
+      button.className = 'copy-button';
+      button.textContent = 'Copy';
+      button.setAttribute('aria-label', 'Copy code to clipboard');
+      
+      // Get code content
+      const code = pre.querySelector('code');
+      const codeText = code?.textContent || '';
+
+      // Add click handler
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(codeText);
+          button.textContent = 'Copied!';
+          button.classList.add('copied');
+          
+          setTimeout(() => {
+            button.textContent = 'Copy';
+            button.classList.remove('copied');
+          }, 2000);
+        } catch (err) {
+          console.error('Failed to copy:', err);
+          button.textContent = 'Failed';
+          setTimeout(() => {
+            button.textContent = 'Copy';
+          }, 2000);
+        }
+      });
+
+      wrapper.appendChild(button);
+    });
+  }
+
+  // Run on page load
+  document.addEventListener('astro:page-load', enhanceCodeBlocks);
+  
+  // Also run immediately in case astro:page-load already fired
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    enhanceCodeBlocks();
+  }
+</script>
+

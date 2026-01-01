@@ -11,53 +11,12 @@ const blog = defineCollection({
     tags: z.array(z.string()),
     featured: z.boolean().default(false),
     draft: z.boolean().default(false),
-  }),
-});
-
-// Guide index schema
-const guideIndex = z.object({
-  title: z.string(),
-  description: z.string(),
-  tags: z.array(z.string()),
-  featured: z.boolean().default(false),
-  parts: z.array(
-    z.object({
-      slug: z.string(),
-      title: z.string(),
-    })
-  ),
-});
-
-// Guide part schema
-const guidePart = z.object({
-  title: z.string(),
-  guide: z.string(),
-  part: z.number(),
-  date: z.string(),
-  tags: z.array(z.string()),
-});
-
-// Guides collection (can be index or part)
-const guides = defineCollection({
-  type: 'content',
-  schema: z.union([guideIndex, guidePart]),
-});
-
-// Scripts collection schema
-const scripts = defineCollection({
-  type: 'content',
-  schema: z.object({
-    title: z.string(),
-    description: z.string(),
-    language: z.string(),
-    tags: z.array(z.string()),
-    externalRepo: z.string().url().optional(),
+    series: z.string().optional(),
+    seriesPart: z.number().optional(),
+    seriesTotal: z.number().optional(),
   }),
 });
 
 export const collections = {
   blog,
-  guides,
-  scripts,
 };
-
