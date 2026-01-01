@@ -10,6 +10,8 @@ interface Props {
       date: string;
       tags: string[];
       featured?: boolean;
+      series?: string;
+      seriesPart?: number;
     };
     body: string;
   }>;
@@ -36,6 +38,8 @@ const { posts } = Astro.props;
         slug={post.slug}
         featured={post.data.featured}
         content={post.body}
+        series={post.data.series}
+        seriesPart={post.data.seriesPart}
       />
     </div>
   ))}

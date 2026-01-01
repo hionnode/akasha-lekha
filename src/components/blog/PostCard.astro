@@ -1,7 +1,4 @@
 ---
-import TagPill from './TagPill.astro';
-import { calculateReadingTime } from '../../utils/readingTime';
-
 interface Props {
   title: string;
   excerpt: string;
@@ -9,136 +6,61 @@ interface Props {
   tags: string[];
   slug: string;
   featured?: boolean;
-  content?: string;
+  content: string;
+  series?: string;
+  seriesPart?: number;
 }
 
-const { title, excerpt, date, tags, slug, featured = false, content } = Astro.props;
-const readingTime = content ? calculateReadingTime(content) : null;
+const { title, excerpt, date, tags, slug, featured = false, content, series, seriesPart } = Astro.props;
+
+import { calculateReadingTime } from '../../utils/readingTime';
+import TagPill from './TagPill.astro';
+
+const readingTime = calculateReadingTime(content);
 const formattedDate = new Date(date).toLocaleDateString('en-US', {
-  year: 'numeric',
-  month: 'long',
+  month: 'short',
   day: 'numeric',
+  year: 'numeric',
 });
 ---
 
-<article
-  class="border border-border bg-bg-secondary p-6 hover:bg-bg-tertiary hover:border-accent-blue transition-colors cursor-pointer group"
+<a
+  href={`/blog/${slug}`}
+  class="block border border-border bg-bg-secondary hover:border-accent-blue transition-all duration-200 rounded p-6 hover:shadow-lg hover:shadow-accent-blue/10 hover:-translate-y-1 group"
   data-post-card
   data-post-slug={slug}
 >
-  {featured && (
-    <div class="mb-3">
-      <span class="text-xs font-semibold uppercase tracking-wider text-accent-yellow">
-        Featured
+  <div class="flex items-center gap-3 mb-2 flex-wrap">
+    {featured && (
+      <span class="text-xs font-semibold uppercase tracking-wider text-accent-cyan">Featured</span>
+    )}
+    {series && (
+      <span class="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-accent-purple bg-accent-purple/10 px-2 py-1 rounded">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path>
+        </svg>
+        Series {seriesPart && `• Part ${seriesPart}`}
       </span>
-    </div>
-  )}
-  <a href={`/blog/${slug}`} class="block group-hover:text-accent-blue transition-colors">
-    <h3 class="text-xl font-semibold mb-2">{title}</h3>
-  </a>
-  <p class="text-fg-secondary mb-4 leading-relaxed">{excerpt}</p>
-  <footer class="flex flex-wrap items-center gap-3 text-sm text-fg-muted">
+    )}
+  </div>
+  
+  <h3 class="text-xl font-semibold mb-3 text-fg-primary group-hover:text-accent-blue transition-colors">
+    {title}
+  </h3>
+  
+  <p class="text-fg-secondary mb-4 line-clamp-2">
+    {excerpt}
+  </p>
+  
+  <footer class="flex flex-wrap items-center gap-4 text-sm text-fg-muted">
     <time datetime={date}>{formattedDate}</time>
-    {readingTime && <span>• {readingTime} min read</span>}
-    <div class="flex flex-wrap gap-2" data-tag-container>
-      {tags.map((tag) => (
-        <TagPill tag={tag} data-tag-pill data-tag={tag} />
-      ))}
-    </div>
+    <span>•</span>
+    <span>{readingTime} min read</span>
+    {tags.slice(0, 3).map((tag) => (
+      <>
+        <span>•</span>
+        <span class="uppercase tracking-wider text-xs text-accent-blue">{tag}</span>
+      </>
+    ))}
   </footer>
-</article>
-
-<script>
-  // Make entire card clickable, but exclude tag clicks
-  document.addEventListener('DOMContentLoaded', () => {
-    const cards = document.querySelectorAll('[data-post-card]');
-    
-    cards.forEach((card) => {
-      const slug = (card as HTMLElement).dataset.postSlug;
-      const tagContainer = card.querySelector('[data-tag-container]');
-      
-      if (!slug) return;
-
-      card.addEventListener('click', (e) => {
-        // Don't navigate if clicking on tags or tag container
-        const target = e.target as HTMLElement;
-        if (
-          target.closest('[data-tag-container]') ||
-          target.closest('[data-tag-pill]') ||
-          target.closest('a')
-        ) {
-          return;
-        }
-        
-        // Navigate to post
-        window.location.href = `/blog/${slug}`;
-      });
-
-      // Make card keyboard accessible
-      card.setAttribute('tabindex', '0');
-      card.setAttribute('role', 'button');
-      card.setAttribute('aria-label', `Read article: ${card.querySelector('h3')?.textContent || 'Post'}`);
-      
-      card.addEventListener('keydown', (e: Event) => {
-        const keyEvent = e as KeyboardEvent;
-        if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
-          keyEvent.preventDefault();
-          const target = keyEvent.target as HTMLElement;
-          if (
-            target.closest('[data-tag-container]') ||
-            target.closest('[data-tag-pill]') ||
-            target.closest('a')
-          ) {
-            return;
-          }
-          window.location.href = `/blog/${slug}`;
-        }
-      });
-    });
-  });
-
-  // Re-initialize on navigation (Astro View Transitions)
-  document.addEventListener('astro:page-load', () => {
-    const cards = document.querySelectorAll('[data-post-card]');
-    
-    cards.forEach((card) => {
-      const slug = (card as HTMLElement).dataset.postSlug;
-      const tagContainer = card.querySelector('[data-tag-container]');
-      
-      if (!slug) return;
-
-      card.addEventListener('click', (e) => {
-        const target = e.target as HTMLElement;
-        if (
-          target.closest('[data-tag-container]') ||
-          target.closest('[data-tag-pill]') ||
-          target.closest('a')
-        ) {
-          return;
-        }
-        window.location.href = `/blog/${slug}`;
-      });
-
-      card.setAttribute('tabindex', '0');
-      card.setAttribute('role', 'button');
-      card.setAttribute('aria-label', `Read article: ${card.querySelector('h3')?.textContent || 'Post'}`);
-      
-      card.addEventListener('keydown', (e: Event) => {
-        const keyEvent = e as KeyboardEvent;
-        if (keyEvent.key === 'Enter' || keyEvent.key === ' ') {
-          keyEvent.preventDefault();
-          const target = keyEvent.target as HTMLElement;
-          if (
-            target.closest('[data-tag-container]') ||
-            target.closest('[data-tag-pill]') ||
-            target.closest('a')
-          ) {
-            return;
-          }
-          window.location.href = `/blog/${slug}`;
-        }
-      });
-    });
-  });
-</script>
-
+</a>

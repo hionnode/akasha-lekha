@@ -6,7 +6,7 @@ import Footer from '../../components/layout/Footer.astro';
 import Container from '../../components/layout/Container.astro';
 import PostList from '../../components/blog/PostList.astro';
 import FilterBar from '../../components/blog/FilterBar.astro';
-import SkeletonList from '../../components/shared/SkeletonList.astro';
+import VimShortcuts from '../../components/shared/VimShortcuts.astro';
 
 const allPosts = await getCollection('blog', ({ data }) => !data.draft);
 const posts = allPosts.sort(
@@ -21,19 +21,14 @@ const posts = allPosts.sort(
       <Container class="py-12">
         <h1 class="mb-8">Blog</h1>
         <FilterBar />
-        <!-- Loading skeleton -->
-        <div id="blog-skeleton" class="hidden">
-          <SkeletonList count={5} cardLines={3} />
-        </div>
-        <!-- Actual content -->
         <div id="blog-content">
           <PostList posts={posts} />
         </div>
         <div id="empty-state" class="hidden text-center py-12">
-          <p class="text-fg-secondary text-lg mb-4">No posts found matching your filters.</p>
+          <p class="text-fg-secondary text-lg mb-4">🔍 No posts found matching your filters.</p>
           <button
             id="clear-filters-empty"
-            class="text-accent-blue hover:text-accent-cyan transition-colors underline"
+            class="px-4 py-2 text-accent-blue hover:text-accent-cyan hover:bg-accent-blue/10 transition-colors underline rounded"
           >
             Clear all filters
           </button>
@@ -41,54 +36,17 @@ const posts = allPosts.sort(
       </Container>
     </main>
     <Footer />
+    <VimShortcuts />
   </div>
 </Layout>
 
 <script>
-  function showContent() {
-    const skeleton = document.getElementById('blog-skeleton');
-    const content = document.getElementById('blog-content');
-    
-    if (skeleton && content) {
-      // Hide skeleton, show content
-      skeleton.classList.add('hidden');
-      content.classList.remove('hidden');
-    }
-  }
-
-  // Show skeleton initially, then fade to content
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-      const skeleton = document.getElementById('blog-skeleton');
-      const content = document.getElementById('blog-content');
-      
-      if (skeleton && content) {
-        // Show skeleton initially
-        skeleton.classList.remove('hidden');
-        content.classList.add('hidden');
-        
-        // Show content after a short delay (simulates loading)
-        setTimeout(showContent, 300);
-      }
-    });
-  } else {
-    // Page already loaded, show content immediately
-    showContent();
-  }
-
-  // Handle Astro View Transitions
+  // No longer needed - content renders immediately on static site
   document.addEventListener('astro:page-load', () => {
-    const skeleton = document.getElementById('blog-skeleton');
+    // Ensure content is visible
     const content = document.getElementById('blog-content');
-    
-    if (skeleton && content) {
-      // Show skeleton during transition
-      skeleton.classList.remove('hidden');
-      content.classList.add('hidden');
-      
-      // Show content after short delay
-      setTimeout(showContent, 200);
+    if (content) {
+      content.classList.remove('hidden');
     }
   });
 </script>
-

@@ -92,3 +92,4 @@ Never hardcode secrets. Use secret management tools:
 
 Security should be built into your container workflow from the start. Regular scanning, least privilege, and proper secret management are essential.
 
+
