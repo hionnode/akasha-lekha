@@ -1,34 +1,70 @@
 ---
-// This component enhances all code blocks on the page with copy buttons
+// This component enhances all code blocks on the page with copy buttons, file headers, and terminal styling
 ---
 
 <script>
   function enhanceCodeBlocks() {
     const codeBlocks = document.querySelectorAll('.prose pre');
-    
+
     codeBlocks.forEach((pre) => {
       // Skip if already enhanced
       if (pre.parentElement?.classList.contains('code-block-wrapper')) {
         return;
       }
 
+      // Get code element
+      const code = pre.querySelector('code');
+      const codeText = code?.textContent || '';
+
+      // Check for data attributes added by remark plugins
+      const title = code?.getAttribute('data-title');
+      const isTerminal = code?.getAttribute('data-terminal') === 'true';
+
       // Create wrapper
       const wrapper = document.createElement('div');
       wrapper.className = 'code-block-wrapper';
-      
+
       // Wrap the pre element
       pre.parentNode?.insertBefore(wrapper, pre);
       wrapper.appendChild(pre);
+
+      // Add terminal header if terminal flag is present
+      if (isTerminal) {
+        const terminalHeader = document.createElement('div');
+        terminalHeader.className = 'terminal-window';
+        terminalHeader.innerHTML = `
+          <div class="terminal-controls">
+            <div class="terminal-dot"></div>
+            <div class="terminal-dot"></div>
+            <div class="terminal-dot"></div>
+          </div>
+          <span class="terminal-label">Terminal</span>
+        `;
+        wrapper.insertBefore(terminalHeader, pre);
+      }
+      // Add file header if title attribute is present
+      else if (title) {
+        const header = document.createElement('div');
+        header.className = 'code-block-header';
+        header.innerHTML = `
+          <span class="file-path">
+            <span class="file-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                <polyline points="14 2 14 8 20 8"/>
+              </svg>
+            </span>
+            ${title}
+          </span>
+        `;
+        wrapper.insertBefore(header, pre);
+      }
 
       // Create copy button
       const button = document.createElement('button');
       button.className = 'copy-button';
       button.textContent = 'Copy';
       button.setAttribute('aria-label', 'Copy code to clipboard');
-      
-      // Get code content
-      const code = pre.querySelector('code');
-      const codeText = code?.textContent || '';
 
       // Add click handler
       button.addEventListener('click', async () => {
@@ -36,7 +72,7 @@
           await navigator.clipboard.writeText(codeText);
           button.textContent = 'Copied!';
           button.classList.add('copied');
-          
+
           setTimeout(() => {
             button.textContent = 'Copy';
             button.classList.remove('copied');
@@ -56,10 +92,9 @@
 
   // Run on page load
   document.addEventListener('astro:page-load', enhanceCodeBlocks);
-  
+
   // Also run immediately in case astro:page-load already fired
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     enhanceCodeBlocks();
   }
 </script>
-

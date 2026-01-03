@@ -9,24 +9,22 @@ const { lines = 3 } = Astro.props;
 <div class="border border-border bg-bg-secondary p-6 animate-pulse">
   <!-- Title skeleton -->
   <div class="h-6 bg-bg-tertiary rounded w-3/4 mb-4"></div>
-  
+
   <!-- Content lines skeleton -->
   <div class="space-y-2 mb-4">
-    {Array.from({ length: lines }).map(() => (
-      <div class="h-4 bg-bg-tertiary rounded" style="width: 100%"></div>
-    ))}
+    {
+      Array.from({ length: lines }).map(() => (
+        <div class="h-4 bg-bg-tertiary rounded" style="width: 100%" />
+      ))
+    }
   </div>
-  
+
   <!-- Footer skeleton -->
   <div class="flex items-center gap-3">
     <div class="h-4 bg-bg-tertiary rounded w-24"></div>
     <div class="h-4 bg-bg-tertiary rounded w-16"></div>
     <div class="flex gap-2">
-      {Array.from({ length: 3 }).map(() => (
-        <div class="h-6 bg-bg-tertiary rounded w-16"></div>
-      ))}
+      {Array.from({ length: 3 }).map(() => <div class="h-6 bg-bg-tertiary rounded w-16" />)}
     </div>
   </div>
 </div>
-
-

@@ -1,0 +1,275 @@
+---
+import { getCollection } from 'astro:content';
+import Layout from '../../layouts/Layout.astro';
+import Header from '../../components/layout/Header.astro';
+import Footer from '../../components/layout/Footer.astro';
+import SEO from '../../components/shared/SEO.astro';
+import TagPill from '../../components/blog/TagPill.astro';
+import Button from '../../components/shared/Button.astro';
+import PostCard from '../../components/blog/PostCard.astro';
+import TOCMinimap from '../../components/shared/TOCMinimap.astro';
+import ShareButtons from '../../components/shared/ShareButtons.astro';
+import SeriesSidebar from '../../components/layout/SeriesSidebar.astro';
+import BlogSidebar from '../../components/layout/BlogSidebar.astro';
+import MobileSidebarDrawers from '../../components/layout/MobileSidebarDrawers.astro';
+import VimShortcuts from '../../components/shared/VimShortcuts.astro';
+import CodeBlockEnhancer from '../../components/shared/CodeBlockEnhancer.astro';
+import PostMetadata from '../../components/blog/PostMetadata.astro';
+import { calculateReadingTime } from '../../utils/readingTime';
+import { getRelatedPostsByTags } from '../../utils/tagNavigation';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog', ({ data }) => !data.draft);
+  return posts.map((post) => ({
+    params: { slug: post.slug },
+    props: { post, allPosts: posts },
+  }));
+}
+
+type BlogPost = Awaited<ReturnType<typeof getCollection<'blog'>>>[number];
+
+interface Props {
+  post: BlogPost;
+  allPosts: BlogPost[];
+}
+
+const { post, allPosts } = Astro.props;
+
+// Auto-calculate series total if this is a series post
+let seriesTotal = post.data.seriesTotal;
+if (post.data.series && !seriesTotal) {
+  // Count all posts in this series
+  seriesTotal = allPosts.filter(
+    (p) => !p.data.draft && p.data.series === post.data.series && p.data.seriesPart
+  ).length;
+}
+
+// Find related posts - prioritize series posts, then tag matches
+let relatedPosts: BlogPost[] = [];
+
+if (post.data.series) {
+  // Get other posts from same series
+  relatedPosts = allPosts
+    .filter((p) => p.slug !== post.slug && !p.data.draft && p.data.series === post.data.series)
+    .sort((a, b) => (a.data.seriesPart || 0) - (b.data.seriesPart || 0));
+}
+
+// If not enough related posts, fill with tag-based recommendations
+if (relatedPosts.length < 4) {
+  const tagRelated = getRelatedPostsByTags(
+    allPosts,
+    post.slug,
+    post.data.tags,
+    4 - relatedPosts.length
+  );
+  relatedPosts = [
+    ...relatedPosts,
+    ...tagRelated.map((rp) => {
+      const fullPost = allPosts.find((p) => p.slug === rp.slug);
+      return fullPost!;
+    }),
+  ];
+}
+
+const { Content } = await post.render();
+const readingTime = calculateReadingTime(post.body);
+const formattedDate = new Date(post.data.date).toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+
+// Determine if this is a series post
+const isSeries = post.data.series && post.data.seriesPart && seriesTotal;
+---
+
+<Layout title={post.data.title}>
+  <SEO
+    title={post.data.title}
+    description={post.data.excerpt}
+    type="article"
+    publishedTime={post.data.date}
+    modifiedTime={post.data.updated}
+    tags={post.data.tags}
+  />
+  <div class="min-h-screen flex flex-col">
+    <Header />
+    <!-- Reading Progress Bar -->
+    <div id="reading-progress" class="fixed top-0 left-0 right-0 h-[3px] bg-bg-tertiary z-40">
+      <div
+        id="reading-progress-bar"
+        class="h-full bg-gradient-to-r from-accent-blue via-accent-cyan to-accent-blue transition-all duration-150 shadow-lg shadow-accent-blue/50"
+        style="width: 0%"
+      >
+      </div>
+    </div>
+    <main id="main-content" class="flex-1 py-12">
+      <!-- Three-column grid layout -->
+      <div class="blog-grid-layout">
+        <!-- Left Sidebar: Series or Tag Navigation -->
+        <div class="blog-grid-left">
+          {
+            isSeries ? (
+              <SeriesSidebar
+                series={post.data.series!}
+                currentPart={post.data.seriesPart!}
+                seriesTotal={seriesTotal!}
+                currentSlug={post.slug}
+                currentTags={post.data.tags}
+                allPosts={allPosts}
+              />
+            ) : (
+              <BlogSidebar allPosts={allPosts} />
+            )
+          }
+        </div>
+
+        <!-- Center: Article Content -->
+        <div class="blog-grid-center">
+          <article id="article-content">
+            <header class="mb-8">
+              {
+                isSeries && (
+                  <div class="mb-4">
+                    <span class="text-sm font-semibold uppercase tracking-wider text-accent-purple flex items-center gap-2">
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        class="lucide lucide-book-text"
+                      >
+                        <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
+                        <path d="M8 7h6" />
+                        <path d="M8 11h8" />
+                        <path d="M8 15h8" />
+                      </svg>
+                      Series: {post.data.series} • Part {post.data.seriesPart} of {seriesTotal}
+                    </span>
+                  </div>
+                )
+              }
+              <h1 class="mb-4">{post.data.title}</h1>
+              <div class="flex flex-wrap items-center gap-4 text-sm text-fg-muted mb-6">
+                <time datetime={post.data.date}>{formattedDate}</time>
+                {
+                  post.data.updated && post.data.updated !== post.data.date && (
+                    <>
+                      <span>•</span>
+                      <span>Updated: {new Date(post.data.updated).toLocaleDateString()}</span>
+                    </>
+                  )
+                }
+                <span>•</span>
+                <span>{readingTime} min read</span>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                {post.data.tags.map((tag) => <TagPill tag={tag} href={`/blog?tag=${tag}`} />)}
+              </div>
+              <div class="mt-4">
+                <ShareButtons title={post.data.title} url={Astro.url.href} />
+              </div>
+            </header>
+
+            <div class="prose prose-invert max-w-none">
+              <Content />
+            </div>
+
+            {
+              relatedPosts.length > 0 && (
+                <section class="mt-12 pt-8 border-t border-border">
+                  <h2 class="text-2xl font-semibold mb-6">Related Posts</h2>
+                  <div class="space-y-4">
+                    {relatedPosts.map((relatedPost) => (
+                      <PostCard
+                        title={relatedPost.data.title}
+                        excerpt={relatedPost.data.excerpt}
+                        date={relatedPost.data.date}
+                        tags={relatedPost.data.tags}
+                        slug={relatedPost.slug}
+                        featured={relatedPost.data.featured}
+                        content={relatedPost.body}
+                        series={relatedPost.data.series}
+                        seriesPart={relatedPost.data.seriesPart}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )
+            }
+
+            <PostMetadata date={post.data.date} updated={post.data.updated} slug={post.slug} />
+
+            <footer class="mt-12 pt-8 border-t border-border">
+              <Button href="/blog" variant="secondary"> ← Back to Blog </Button>
+            </footer>
+          </article>
+        </div>
+
+        <!-- Right Sidebar: TOC Minimap -->
+        <div class="blog-grid-right">
+          <TOCMinimap content={post.body} />
+        </div>
+      </div>
+    </main>
+    <Footer />
+    <VimShortcuts />
+    <MobileSidebarDrawers />
+    <CodeBlockEnhancer />
+  </div>
+</Layout>
+
+<script>
+  function updateReadingProgress() {
+    const article = document.getElementById('article-content');
+    const progressBar = document.getElementById('reading-progress-bar');
+
+    if (!article || !progressBar) return;
+
+    const articleTop = article.offsetTop;
+    const articleHeight = article.offsetHeight;
+    const windowHeight = window.innerHeight;
+    const scrollTop = window.scrollY || document.documentElement.scrollTop;
+
+    // Calculate how much of the article has been scrolled past
+    const scrolled = Math.max(0, scrollTop - articleTop + windowHeight);
+    const total = articleHeight + windowHeight;
+    const progress = Math.min(100, (scrolled / total) * 100);
+
+    progressBar.style.width = `${progress}%`;
+  }
+
+  // Throttle scroll events for performance
+  let ticking = false;
+  function onScroll() {
+    if (!ticking) {
+      window.requestAnimationFrame(() => {
+        updateReadingProgress();
+        ticking = false;
+      });
+      ticking = true;
+    }
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      updateReadingProgress();
+      window.addEventListener('scroll', onScroll, { passive: true });
+    });
+  } else {
+    updateReadingProgress();
+    window.addEventListener('scroll', onScroll, { passive: true });
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', () => {
+    updateReadingProgress();
+    window.addEventListener('scroll', onScroll, { passive: true });
+  });
+</script>

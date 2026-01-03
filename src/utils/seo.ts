@@ -29,10 +29,11 @@ export function generateSEO(props: SEOProps) {
   const siteUrl = 'https://works-on-my.cloud';
   const fullTitle = `${title} | ${siteName}`;
   const fullImage = image.startsWith('http') ? image : `${siteUrl}${image}`;
-
+  const authorName = `${author}`;
   return {
     title: fullTitle,
     description: description || '',
+    author: authorName,
     openGraph: {
       title: fullTitle,
       description: description || '',
@@ -54,4 +55,3 @@ export function generateSEO(props: SEOProps) {
     },
   };
 }
-

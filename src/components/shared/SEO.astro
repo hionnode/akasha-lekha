@@ -23,15 +23,18 @@ const seo = generateSEO({ title, description, image, type, publishedTime, modifi
 <meta property="og:url" content={seo.openGraph.url} />
 <meta property="og:image" content={seo.openGraph.images[0].url} />
 <meta property="og:site_name" content={seo.openGraph.siteName} />
-{seo.openGraph.publishedTime && (
-  <meta property="article:published_time" content={seo.openGraph.publishedTime} />
-)}
-{seo.openGraph.modifiedTime && (
-  <meta property="article:modified_time" content={seo.openGraph.modifiedTime} />
-)}
+{
+  seo.openGraph.publishedTime && (
+    <meta property="article:published_time" content={seo.openGraph.publishedTime} />
+  )
+}
+{
+  seo.openGraph.modifiedTime && (
+    <meta property="article:modified_time" content={seo.openGraph.modifiedTime} />
+  )
+}
 {tags && tags.length > 0 && tags.map((tag) => <meta property="article:tag" content={tag} />)}
 <meta name="twitter:card" content={seo.twitter.card} />
 <meta name="twitter:title" content={seo.twitter.title} />
 <meta name="twitter:description" content={seo.twitter.description} />
 <meta name="twitter:image" content={seo.twitter.images[0]} />
-

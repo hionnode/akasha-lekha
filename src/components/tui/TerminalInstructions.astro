@@ -1,4 +1,5 @@
 ---
+
 ---
 
 <div id="terminal-instructions" class="h-full px-4 flex items-center gap-6 text-xs text-fg-muted">
@@ -32,9 +33,7 @@
   function updateInstructions(mode: 'vim' | 'arrows') {
     const navKeys = document.getElementById('nav-keys');
     if (navKeys) {
-      navKeys.textContent = mode === 'vim' 
-        ? 'hjkl navigate' 
-        : '↑↓ navigate';
+      navKeys.textContent = mode === 'vim' ? 'hjkl navigate' : '↑↓ navigate';
     }
   }
 
@@ -54,4 +53,3 @@
     font-size: 0.75rem;
   }
 </style>
-

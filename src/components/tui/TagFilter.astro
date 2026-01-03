@@ -25,9 +25,7 @@ const { data } = Astro.props;
         Press <kbd class="px-2 py-1 bg-bg-tertiary border border-border rounded">Esc</kbd> to close,
         <kbd class="px-2 py-1 bg-bg-tertiary border border-border rounded">Enter</kbd> to apply
       </div>
-      <div id="selected-tags-count" class="text-sm text-accent-blue">
-        0 tags selected
-      </div>
+      <div id="selected-tags-count" class="text-sm text-accent-blue">0 tags selected</div>
     </div>
   </div>
 </div>
@@ -36,7 +34,7 @@ const { data } = Astro.props;
   const tagFilterOverlay = document.getElementById('tag-filter-overlay');
   const tagFilterList = document.getElementById('tag-filter-list');
   const selectedTagsCount = document.getElementById('selected-tags-count');
-  let selectedTags = new Set<string>();
+  const selectedTags = new Set<string>();
   let tagData: Array<[string, number]> = [];
 
   // Initialize tag data from props
@@ -44,8 +42,9 @@ const { data } = Astro.props;
   if (dataStr) {
     try {
       const data = JSON.parse(dataStr);
-      tagData = Object.entries(data.allTags || {})
-        .sort((a, b) => (b[1] as number) - (a[1] as number)) as Array<[string, number]>;
+      tagData = Object.entries(data.allTags || {}).sort(
+        (a, b) => (b[1] as number) - (a[1] as number)
+      ) as Array<[string, number]>;
     } catch (e) {
       console.error('Failed to parse tag data', e);
     }
@@ -77,8 +76,8 @@ const { data } = Astro.props;
     if (!tagFilterList) return;
 
     // Use tagData or fallback to window.tuiTagData
-    const tags = tagData.length > 0 ? tagData : ((window as any).tuiTagData || [])
-    
+    const tags = tagData.length > 0 ? tagData : (window as any).tuiTagData || [];
+
     tagFilterList.innerHTML = tags
       .map(([tag, count]: [string, number]) => {
         const isSelected = selectedTags.has(tag);
@@ -86,7 +85,9 @@ const { data } = Astro.props;
           <button
             data-tag="${tag}"
             class="tag-filter-btn w-full text-left px-3 py-2 rounded mb-2 hover:bg-bg-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue flex items-center justify-between ${
-              isSelected ? 'bg-accent-blue/20 border border-accent-blue' : 'border border-transparent'
+              isSelected
+                ? 'bg-accent-blue/20 border border-accent-blue'
+                : 'border border-transparent'
             }"
           >
             <span class="text-sm">${tag}</span>
@@ -150,4 +151,3 @@ const { data } = Astro.props;
     font-family: 'Inconsolata', monospace;
   }
 </style>
-

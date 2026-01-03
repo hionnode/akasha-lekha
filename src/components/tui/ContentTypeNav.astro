@@ -48,7 +48,9 @@ const tags = Object.entries(tuiData.allTags || {})
 
   <!-- Tags Section -->
   <div class="mb-6 flex-1 flex flex-col min-h-0">
-    <div class="text-xs uppercase tracking-wider text-fg-muted mb-3 px-2 flex items-center justify-between font-semibold">
+    <div
+      class="text-xs uppercase tracking-wider text-fg-muted mb-3 px-2 flex items-center justify-between font-semibold"
+    >
       <span>Tags</span>
       <button
         id="toggle-tags"
@@ -58,15 +60,17 @@ const tags = Object.entries(tuiData.allTags || {})
       </button>
     </div>
     <div id="tags-list" class="space-y-0.5 overflow-y-auto flex-1">
-      {tags.map(({ tag, count }) => (
-        <button
-          data-tag={tag}
-          class="tag-btn w-full text-left px-3 py-1.5 rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue flex items-center justify-between font-mono text-sm hover:bg-bg-tertiary"
-        >
-          <span class="text-fg-secondary">{tag}</span>
-          <span class="text-xs text-fg-muted ml-2">{count}</span>
-        </button>
-      ))}
+      {
+        tags.map(({ tag, count }) => (
+          <button
+            data-tag={tag}
+            class="tag-btn w-full text-left px-3 py-1.5 rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue flex items-center justify-between font-mono text-sm hover:bg-bg-tertiary"
+          >
+            <span class="text-fg-secondary">{tag}</span>
+            <span class="text-xs text-fg-muted ml-2">{count}</span>
+          </button>
+        ))
+      }
     </div>
   </div>
 </div>
@@ -118,7 +122,7 @@ const tags = Object.entries(tuiData.allTags || {})
       if (tag) {
         const isActive = btn.classList.contains('bg-accent-blue/20');
         const tagSpan = btn.querySelector('span:first-child');
-        
+
         if (isActive) {
           btn.classList.remove('bg-accent-blue/20', 'text-accent-blue', 'font-semibold');
           if (tagSpan) {
@@ -132,9 +136,11 @@ const tags = Object.entries(tuiData.allTags || {})
             tagSpan.classList.add('text-accent-blue');
           }
         }
-        window.dispatchEvent(new CustomEvent('tag-toggle', { 
-          detail: { tag, active: !isActive } 
-        }));
+        window.dispatchEvent(
+          new CustomEvent('tag-toggle', {
+            detail: { tag, active: !isActive },
+          })
+        );
       }
     });
   });

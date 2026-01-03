@@ -33,12 +33,14 @@ const latestPosts = allPosts
         </section>
 
         <div id="content-below-terminal" class="hidden opacity-0 transition-opacity duration-1000">
-          {featuredPosts.length > 0 && (
-            <section class="mb-12">
-              <h2 class="mb-6 text-2xl font-semibold">Featured</h2>
-              <PostList posts={featuredPosts} />
-            </section>
-          )}
+          {
+            featuredPosts.length > 0 && (
+              <section class="mb-12">
+                <h2 class="mb-6 text-2xl font-semibold">Featured</h2>
+                <PostList posts={featuredPosts} />
+              </section>
+            )
+          }
 
           <section>
             <h2 class="mb-6 text-2xl font-semibold">Latest</h2>
@@ -58,25 +60,25 @@ const latestPosts = allPosts
     const featuredContent = document.getElementById('featured-content');
     const latestSkeleton = document.getElementById('latest-skeleton');
     const latestContent = document.getElementById('latest-content');
-    
+
     // Show skeletons initially
     if (featuredSkeleton && featuredContent) {
       featuredSkeleton.classList.remove('hidden');
       featuredContent.classList.add('hidden');
     }
-    
+
     if (latestSkeleton && latestContent) {
       latestSkeleton.classList.remove('hidden');
       latestContent.classList.add('hidden');
     }
-    
+
     // Fade to content after short delay
     setTimeout(() => {
       if (featuredSkeleton && featuredContent) {
         featuredSkeleton.classList.add('hidden');
         featuredContent.classList.remove('hidden');
       }
-      
+
       if (latestSkeleton && latestContent) {
         latestSkeleton.classList.add('hidden');
         latestContent.classList.remove('hidden');
@@ -102,7 +104,7 @@ const latestPosts = allPosts
           }
         });
       });
-      
+
       if (contentBelow) {
         observer.observe(contentBelow, { attributes: true });
       }
