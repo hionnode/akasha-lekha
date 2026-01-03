@@ -7,9 +7,13 @@ import remarkCodeMeta from './src/utils/remarkCodeMeta.ts';
 import rehypeSlug from 'rehype-slug';
 import rehypeAutolinkHeadings from 'rehype-autolink-headings';
 
+import cloudflare from '@astrojs/cloudflare';
+
 // https://astro.build/config
 export default defineConfig({
-  output: 'static', // Static site generation
+  // Static site generation
+  output: 'static',
+
   markdown: {
     shikiConfig: {
       theme: 'tokyo-night',
@@ -30,7 +34,10 @@ export default defineConfig({
       }],
     ],
   },
+
   vite: {
     plugins: [tailwindcss()],
   },
+
+  adapter: cloudflare(),
 });
