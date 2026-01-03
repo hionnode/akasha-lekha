@@ -1,4 +1,5 @@
 ---
+
 ---
 
 <div
@@ -6,30 +7,43 @@
   class="fixed inset-0 bg-bg-primary z-[9999] flex items-center justify-center transition-opacity duration-700 ease-out"
 >
   <!-- Animated background gradient -->
-  <div class="absolute inset-0 bg-gradient-to-br from-bg-primary via-bg-secondary to-bg-tertiary opacity-50"></div>
-  
+  <div
+    class="absolute inset-0 bg-gradient-to-br from-bg-primary via-bg-secondary to-bg-tertiary opacity-50"
+  >
+  </div>
+
   <!-- Main content -->
   <div class="relative z-10 text-center px-4">
     <!-- Large penguin ASCII art with animation -->
     <div class="mb-8">
-      <pre class="text-accent-cyan text-2xl sm:text-3xl md:text-4xl leading-[1.2] font-mono loader-penguin whitespace-pre" id="penguin-art">
+      <pre
+        class="text-accent-cyan text-2xl sm:text-3xl md:text-4xl leading-[1.2] font-mono loader-penguin whitespace-pre"
+        id="penguin-art">
       </pre>
     </div>
-    
+
     <!-- Loading text with typing animation -->
     <div class="space-y-3">
-      <div class="text-fg-primary text-xl sm:text-2xl font-semibold font-mono loader-text" id="loading-text">
-        <span class="inline-block">L</span><span class="inline-block">o</span><span class="inline-block">a</span><span class="inline-block">d</span><span class="inline-block">i</span><span class="inline-block">n</span><span class="inline-block">g</span><span class="inline-block loader-dots">...</span>
+      <div
+        class="text-fg-primary text-xl sm:text-2xl font-semibold font-mono loader-text"
+        id="loading-text"
+      >
+        <span class="inline-block">L</span><span class="inline-block">o</span><span
+          class="inline-block">a</span
+        ><span class="inline-block">d</span><span class="inline-block">i</span><span
+          class="inline-block">n</span
+        ><span class="inline-block">g</span><span class="inline-block loader-dots">...</span>
       </div>
-      <div class="text-fg-muted text-sm sm:text-base font-mono">
-        works-on-my.cloud
-      </div>
+      <div class="text-fg-muted text-sm sm:text-base font-mono">works-on-my.cloud</div>
     </div>
-    
+
     <!-- Progress indicator -->
     <div class="mt-8 w-64 mx-auto">
       <div class="h-1 bg-bg-tertiary rounded-full overflow-hidden">
-        <div class="h-full bg-gradient-to-r from-accent-blue via-accent-cyan to-accent-blue loader-progress"></div>
+        <div
+          class="h-full bg-gradient-to-r from-accent-blue via-accent-cyan to-accent-blue loader-progress"
+        >
+        </div>
       </div>
     </div>
   </div>
@@ -65,7 +79,7 @@
   function animateLoadingText() {
     const textElement = document.getElementById('loading-text');
     if (!textElement) return;
-    
+
     const spans = textElement.querySelectorAll('span:not(.loader-dots)');
     spans.forEach((span, index) => {
       setTimeout(() => {
@@ -156,7 +170,9 @@
   .loader-text span:not(.loader-dots) {
     opacity: 0;
     transform: translateY(-10px);
-    transition: opacity 0.3s ease, transform 0.3s ease;
+    transition:
+      opacity 0.3s ease,
+      transform 0.3s ease;
   }
 
   .loader-dots {
@@ -176,7 +192,8 @@
   }
 
   @keyframes penguinFloat {
-    0%, 100% {
+    0%,
+    100% {
       transform: translateY(0px);
     }
     50% {
@@ -185,7 +202,8 @@
   }
 
   @keyframes dotsPulse {
-    0%, 100% {
+    0%,
+    100% {
       opacity: 1;
     }
     50% {
@@ -194,13 +212,15 @@
   }
 
   @keyframes dotsBlink {
-    0%, 20% {
+    0%,
+    20% {
       content: '.';
     }
     40% {
       content: '..';
     }
-    60%, 100% {
+    60%,
+    100% {
       content: '...';
     }
   }
@@ -228,4 +248,3 @@
     }
   }
 </style>
-

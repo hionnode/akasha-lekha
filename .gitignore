@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+.pnpm-store/
 .pnp
 .pnp.js
 
@@ -112,6 +113,9 @@ yarn.lock
 
 # Local development
 .local/
+
+# Documentation (AI-generated docs)
+docs/
 
 # Keep pnpm-lock.yaml (don't ignore it)
 !pnpm-lock.yaml

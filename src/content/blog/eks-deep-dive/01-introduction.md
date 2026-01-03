@@ -7,7 +7,6 @@ featured: true
 draft: false
 series: "eks-deep-dive"
 seriesPart: 1
-seriesTotal: 5
 ---
 
 ## Welcome to the EKS Deep Dive Series
@@ -15,6 +14,10 @@ seriesTotal: 5
 Amazon Elastic Kubernetes Service (EKS) is AWS's managed Kubernetes service that simplifies running Kubernetes on AWS without needing to install, operate, and maintain your own Kubernetes control plane. This comprehensive series will take you from EKS fundamentals to production-grade deployments.
 
 ## What You'll Learn in This Series
+
+:::tip
+This is a hands-on series! Each part includes practical examples and commands you can run in your own AWS account. Make sure you have the AWS CLI and kubectl installed before starting.
+:::
 
 Over the next several posts, we'll cover:
 
@@ -37,6 +40,10 @@ Running self-managed Kubernetes involves:
 - **Operational Overhead**: Monitoring, alerting, incident response
 
 ### What EKS Provides
+
+:::note
+EKS follows Kubernetes upstream with minimal changes, ensuring compatibility with standard Kubernetes tools and practices.
+:::
 
 Amazon EKS takes care of:
 
@@ -266,7 +273,7 @@ AWS provides managed add-ons:
 
 ### Core Add-ons
 
-```yaml
+```yaml title="core-addons.yaml"
 # 1. VPC CNI - Pod Networking
 Purpose: Assigns VPC IP addresses to pods
 Why: Native AWS networking integration
@@ -388,7 +395,41 @@ Support Timeline:
 1.26 → 1.27 → 1.28
 ```
 
-## Prerequisites for EKS
+## Prerequisites
+
+Before diving into EKS, ensure you have:
+
+:::warning
+Running EKS clusters incurs costs! The control plane costs $0.10/hour (~$73/month) plus worker node costs. Remember to clean up resources after testing.
+:::
+
+<details>
+<summary>View detailed prerequisites</summary>
+
+### AWS Account Requirements
+- Active AWS account with billing enabled
+- IAM user/role with appropriate permissions (AdministratorAccess recommended for learning)
+- AWS CLI v2.x or later installed and configured
+
+### Local Tools
+```bash title="install-tools.sh" terminal
+# Install kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+
+# Verify installation
+kubectl version --client
+```
+
+### Knowledge Prerequisites
+- Basic Kubernetes concepts (Pods, Deployments, Services)
+- Understanding of AWS networking (VPC, Subnets, Security Groups)
+- Familiarity with the command line
+
+</details>
+
+--- for EKS
 
 ### AWS Account Requirements
 

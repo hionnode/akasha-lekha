@@ -3,7 +3,7 @@ interface Props {
   data: string;
 }
 
-const { data } = Astro.props;
+// const { data } = Astro.props;
 ---
 
 <div id="content-list" class="p-4">
@@ -29,7 +29,7 @@ const { data } = Astro.props;
     featured?: boolean;
   }
 
-  const { data: dataStr } = Astro.props;
+  // const { data: dataStr } = Astro.props;
   const listItems = document.getElementById('list-items');
   const emptyState = document.getElementById('empty-state');
 
@@ -112,5 +112,3 @@ const { data } = Astro.props;
     font-family: 'Inconsolata', monospace;
   }
 </style>
-
-

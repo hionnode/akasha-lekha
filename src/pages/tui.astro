@@ -46,18 +46,18 @@ import LoadingAnimation from '../components/tui/LoadingAnimation.astro';
     document.addEventListener('click', (e) => {
       const target = e.target as HTMLElement;
       const link = target.closest('a');
-      
+
       if (link && link.href && !link.target && !link.hasAttribute('download')) {
         const href = link.getAttribute('href');
         const currentOrigin = window.location.origin;
-        
+
         // Only intercept internal links
         if (href && (href.startsWith('/') || href.startsWith(currentOrigin))) {
           // Show loading screen
           if (loadingScreen && content) {
             loadingScreen.classList.remove('hidden');
             content.classList.add('hidden');
-            
+
             // Hide after navigation (browser will handle the navigation)
             setTimeout(() => {
               // This will run after page loads

@@ -7,7 +7,13 @@ interface Props {
   'data-tag'?: string;
 }
 
-const { tag, href, class: className = '', 'data-tag-pill': isTagPill, 'data-tag': dataTag } = Astro.props;
+const {
+  tag,
+  href,
+  class: className = '',
+  'data-tag-pill': isTagPill,
+  'data-tag': dataTag,
+} = Astro.props;
 const Tag = href ? 'a' : 'span';
 ---
 
@@ -30,12 +36,12 @@ const Tag = href ? 'a' : 'span';
         pill.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          
+
           // Try to trigger filter by simulating click on filter button
           const filterBtn = document.querySelector(
             `[data-tag="${tag}"].tag-filter-btn`
           ) as HTMLElement;
-          
+
           if (filterBtn) {
             // FilterBar is loaded, use it
             filterBtn.click();

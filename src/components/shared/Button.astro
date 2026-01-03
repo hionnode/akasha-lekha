@@ -18,10 +18,6 @@ const variantClasses = {
 const Tag = href ? 'a' : 'button';
 ---
 
-<Tag
-  href={href}
-  class={`${baseClasses} ${variantClasses[variant]} ${className}`}
->
+<Tag href={href} class={`${baseClasses} ${variantClasses[variant]} ${className}`}>
   <slot />
 </Tag>
-

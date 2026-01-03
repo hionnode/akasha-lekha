@@ -1,7 +1,5 @@
 ---
-const navItems = [
-  { href: '/blog', label: 'Blog' },
-];
+const navItems = [{ href: '/blog', label: 'Blog' }];
 
 const currentPath = Astro.url.pathname;
 ---
@@ -11,26 +9,29 @@ const currentPath = Astro.url.pathname;
     <a href="/" class="text-xl font-bold text-fg-primary hover:text-accent-blue transition-colors">
       works-on-my.cloud
     </a>
-    
+
     <!-- Desktop Navigation -->
     <ul class="hidden md:flex gap-6 items-center">
-      {navItems.map((item) => {
-        const isActive = currentPath === item.href || (item.href !== '/' && currentPath.startsWith(item.href));
-        return (
-          <li>
-            <a
-              href={item.href}
-              class={`text-sm font-semibold transition-colors ${
-                isActive
-                  ? 'text-accent-blue border-b-2 border-accent-blue pb-1'
-                  : 'text-fg-secondary hover:text-accent-blue'
-              }`}
-            >
-              {item.label}
-            </a>
-          </li>
-        );
-      })}
+      {
+        navItems.map((item) => {
+          const isActive =
+            currentPath === item.href || (item.href !== '/' && currentPath.startsWith(item.href));
+          return (
+            <li>
+              <a
+                href={item.href}
+                class={`text-sm font-semibold transition-colors ${
+                  isActive
+                    ? 'text-accent-blue border-b-2 border-accent-blue pb-1'
+                    : 'text-fg-secondary hover:text-accent-blue'
+                }`}
+              >
+                {item.label}
+              </a>
+            </li>
+          );
+        })
+      }
     </ul>
 
     <!-- Mobile Hamburger Button -->
@@ -48,7 +49,11 @@ const currentPath = Astro.url.pathname;
         viewBox="0 0 24 24"
         xmlns="http://www.w3.org/2000/svg"
       >
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+        <path
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="2"
+          d="M4 6h16M4 12h16M4 18h16"></path>
       </svg>
       <svg
         id="close-icon"
@@ -58,7 +63,11 @@ const currentPath = Astro.url.pathname;
         viewBox="0 0 24 24"
         xmlns="http://www.w3.org/2000/svg"
       >
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        <path
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="2"
+          d="M6 18L18 6M6 6l12 12"></path>
       </svg>
     </button>
   </nav>
@@ -71,24 +80,27 @@ const currentPath = Astro.url.pathname;
   >
     <div class="container mx-auto px-4 py-8 max-w-[1200px]">
       <ul class="flex flex-col gap-4">
-        {navItems.map((item) => {
-          const isActive = currentPath === item.href || (item.href !== '/' && currentPath.startsWith(item.href));
-          return (
-            <li>
-              <a
-                href={item.href}
-                class={`text-lg font-semibold transition-colors block py-2 ${
-                  isActive
-                    ? 'text-accent-blue border-l-4 border-accent-blue pl-4'
-                    : 'text-fg-secondary hover:text-accent-blue'
-                }`}
-                onclick="document.getElementById('mobile-menu-button')?.click()"
-              >
-                {item.label}
-              </a>
-            </li>
-          );
-        })}
+        {
+          navItems.map((item) => {
+            const isActive =
+              currentPath === item.href || (item.href !== '/' && currentPath.startsWith(item.href));
+            return (
+              <li>
+                <a
+                  href={item.href}
+                  class={`text-lg font-semibold transition-colors block py-2 ${
+                    isActive
+                      ? 'text-accent-blue border-l-4 border-accent-blue pl-4'
+                      : 'text-fg-secondary hover:text-accent-blue'
+                  }`}
+                  onclick="document.getElementById('mobile-menu-button')?.click()"
+                >
+                  {item.label}
+                </a>
+              </li>
+            );
+          })
+        }
       </ul>
     </div>
   </div>
@@ -105,7 +117,7 @@ const currentPath = Astro.url.pathname;
 
     function toggleMenu() {
       const isOpen = menu!.classList.contains('translate-x-0');
-      
+
       if (isOpen) {
         // Close menu
         menu!.classList.remove('translate-x-0');
@@ -161,4 +173,3 @@ const currentPath = Astro.url.pathname;
   // Re-initialize on navigation (Astro View Transitions)
   document.addEventListener('astro:page-load', initMobileMenu);
 </script>
-

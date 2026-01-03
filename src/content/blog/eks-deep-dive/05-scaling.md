@@ -7,7 +7,6 @@ featured: true
 draft: false
 series: "eks-deep-dive"
 seriesPart: 5
-seriesTotal: 5
 ---
 
 ## Introduction

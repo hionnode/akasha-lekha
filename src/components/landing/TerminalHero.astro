@@ -3,7 +3,10 @@ import FastfetchOutput from './FastfetchOutput.astro';
 import { terminalCommands } from '../../utils/terminalCommands';
 ---
 
-<div id="terminal-wrapper" class="terminal-wrapper fixed inset-0 flex items-center justify-center z-40 transition-all duration-1000 ease-out">
+<div
+  id="terminal-wrapper"
+  class="terminal-wrapper fixed inset-0 flex items-center justify-center z-40 transition-all duration-1000 ease-out"
+>
   <!-- Skip Animation Button -->
   <button
     id="skip-animation-btn"
@@ -12,7 +15,10 @@ import { terminalCommands } from '../../utils/terminalCommands';
   >
     Skip animation
   </button>
-  <div id="terminal-window" class="terminal-window bg-bg-secondary border border-border rounded-lg shadow-2xl overflow-hidden transition-all duration-1000 ease-out">
+  <div
+    id="terminal-window"
+    class="terminal-window bg-bg-secondary border border-border rounded-lg shadow-2xl overflow-hidden transition-all duration-1000 ease-out"
+  >
     <!-- Terminal Header Bar -->
     <div class="bg-bg-tertiary px-4 py-3 flex items-center gap-2 border-b border-border">
       <div class="flex gap-2">
@@ -20,14 +26,15 @@ import { terminalCommands } from '../../utils/terminalCommands';
         <div class="w-3 h-3 rounded-full bg-accent-yellow"></div>
         <div class="w-3 h-3 rounded-full bg-accent-green"></div>
       </div>
-      <div class="flex-1 text-center text-xs text-fg-muted font-mono">
-        user@works-on-my-cloud ~
-      </div>
+      <div class="flex-1 text-center text-xs text-fg-muted font-mono">user@works-on-my-cloud ~</div>
       <div class="w-12"></div>
     </div>
 
     <!-- Terminal Content -->
-    <div id="terminal-content" class="terminal-content p-6 font-mono text-sm overflow-hidden flex flex-col">
+    <div
+      id="terminal-content"
+      class="terminal-content p-6 font-mono text-sm overflow-hidden flex flex-col"
+    >
       <div id="terminal-output" class="flex-1 overflow-y-auto">
         <!-- Output will be populated by script -->
       </div>
@@ -66,8 +73,11 @@ import { terminalCommands } from '../../utils/terminalCommands';
     const numCommands = Math.floor(Math.random() * 3) + 3; // 3-5 commands
     const selectedCommands = [];
     const usedIndices = new Set();
-    
-    while (selectedCommands.length < numCommands && selectedCommands.length < selectableCommands.length) {
+
+    while (
+      selectedCommands.length < numCommands &&
+      selectedCommands.length < selectableCommands.length
+    ) {
       const randomIndex = Math.floor(Math.random() * selectableCommands.length);
       if (!usedIndices.has(randomIndex)) {
         usedIndices.add(randomIndex);
@@ -161,7 +171,7 @@ import { terminalCommands } from '../../utils/terminalCommands';
         <span class="text-fg-primary">clear</span>
       `;
       output.appendChild(promptLine);
-      
+
       setTimeout(() => {
         clearScreen();
         onComplete();
@@ -177,13 +187,13 @@ import { terminalCommands } from '../../utils/terminalCommands';
       window.style.maxWidth = '56rem';
       terminalContent.style.minHeight = 'auto';
       terminalContent.style.height = 'auto';
-      
+
       // Hide skip button
       const skipBtn = document.getElementById('skip-animation-btn');
       if (skipBtn) {
         skipBtn.style.display = 'none';
       }
-      
+
       // Show content below terminal
       const contentBelow = document.getElementById('content-below-terminal');
       if (contentBelow) {
@@ -226,7 +236,7 @@ import { terminalCommands } from '../../utils/terminalCommands';
               fastfetchContainer.classList.remove('hidden');
               output.style.display = 'none';
               prompt.style.display = 'none';
-              
+
               // Wait for fastfetch to render, then shrink
               setTimeout(() => {
                 shrinkTerminal();
@@ -250,7 +260,7 @@ import { terminalCommands } from '../../utils/terminalCommands';
     const vh = window.innerHeight;
     const vw = window.innerWidth;
     const size = Math.min(vh * 0.85, vw * 0.85, 800);
-    
+
     window.style.width = `${size}px`;
     window.style.height = `${size}px`;
     terminalContent.style.height = `${size - 60}px`; // Subtract header height
@@ -268,12 +278,12 @@ import { terminalCommands } from '../../utils/terminalCommands';
     if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
       return;
     }
-    
+
     // Only initialize once
     if (terminalInitialized) {
       return;
     }
-    
+
     terminalInitialized = true;
     initTerminal();
   }
@@ -321,7 +331,8 @@ import { terminalCommands } from '../../utils/terminalCommands';
   }
 
   @keyframes pulse {
-    0%, 100% {
+    0%,
+    100% {
       opacity: 1;
     }
     50% {

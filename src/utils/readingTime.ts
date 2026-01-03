@@ -27,4 +27,3 @@ export function calculateReadingTime(content: string): number {
   // Minimum 1 minute
   return Math.max(1, readingTime);
 }
-

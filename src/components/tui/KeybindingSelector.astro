@@ -1,4 +1,5 @@
 ---
+
 ---
 
 <div class="flex flex-col items-center justify-center min-h-screen bg-bg-primary">
@@ -15,9 +16,7 @@
     >
       <div class="text-xl font-bold mb-2 text-accent-cyan">Vim Keys</div>
       <div class="text-sm text-fg-secondary mb-3">hjkl navigation</div>
-      <div class="text-xs text-fg-muted font-mono">
-        h ← | j ↓ | k ↑ | l →
-      </div>
+      <div class="text-xs text-fg-muted font-mono">h ← | j ↓ | k ↑ | l →</div>
     </button>
 
     <button
@@ -27,14 +26,14 @@
     >
       <div class="text-xl font-bold mb-2 text-accent-blue">Arrow Keys</div>
       <div class="text-sm text-fg-secondary mb-3">Standard navigation</div>
-      <div class="text-xs text-fg-muted font-mono">
-        ↑ ↓ ← →
-      </div>
+      <div class="text-xs text-fg-muted font-mono">↑ ↓ ← →</div>
     </button>
   </div>
 
   <div class="mt-8 text-fg-muted text-sm">
-    Press <kbd class="px-2 py-1 bg-bg-tertiary border border-border rounded">V</kbd> for Vim or <kbd class="px-2 py-1 bg-bg-tertiary border border-border rounded">A</kbd> for Arrows
+    Press <kbd class="px-2 py-1 bg-bg-tertiary border border-border rounded">V</kbd> for Vim or <kbd
+      class="px-2 py-1 bg-bg-tertiary border border-border rounded">A</kbd
+    > for Arrows
   </div>
 </div>
 
@@ -46,7 +45,7 @@
 
   function selectMode(mode: 'vim' | 'arrows') {
     selectedMode = mode;
-    
+
     // Update UI
     if (mode === 'vim') {
       vimButton?.classList.add('border-accent-cyan', 'bg-bg-tertiary');
@@ -97,5 +96,3 @@
     }
   }, 2000);
 </script>
-
-

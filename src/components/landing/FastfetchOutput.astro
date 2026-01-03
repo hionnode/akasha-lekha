@@ -1,4 +1,5 @@
 ---
+
 ---
 
 <div id="fastfetch-output" class="font-mono text-sm">
@@ -29,7 +30,12 @@
     let gradient = '';
 
     // Chrome/Chromium
-    if (ua.includes('Chrome') && !ua.includes('Edg') && !ua.includes('OPR') && !ua.includes('Brave')) {
+    if (
+      ua.includes('Chrome') &&
+      !ua.includes('Edg') &&
+      !ua.includes('OPR') &&
+      !ua.includes('Brave')
+    ) {
       const match = ua.match(/Chrome\/(\d+)/);
       version = match ? match[1] : '';
       name = 'Chrome';
@@ -185,7 +191,9 @@
     const os = detectOS();
     const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const memory = (navigator as any).deviceMemory ? `${(navigator as any).deviceMemory} GB` : undefined;
+    const memory = (navigator as any).deviceMemory
+      ? `${(navigator as any).deviceMemory} GB`
+      : undefined;
     const connection = (navigator as any).connection?.effectiveType;
 
     return {
@@ -256,4 +264,3 @@ ${infoLines.map((line) => `│  ${line.padEnd(maxInfoLength)}  │`).join('\n')}
     font-family: 'Inconsolata', monospace;
   }
 </style>
-

@@ -1,0 +1,370 @@
+---
+// Mobile drawer manager for left sidebar and right TOC
+---
+
+<!-- Left Sidebar Drawer Button (Mobile) -->
+<button
+  id="mobile-left-drawer-btn"
+  class="lg:hidden fixed left-4 bottom-6 z-50 p-3 bg-accent-blue text-bg-primary rounded-full shadow-lg hover:bg-accent-cyan transition-all focus:outline-none focus:ring-2 focus:ring-accent-blue focus:ring-offset-2 focus:ring-offset-bg-primary"
+  aria-label="Open navigation menu"
+  aria-expanded="false"
+>
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <line x1="3" y1="12" x2="21" y2="12"></line>
+    <line x1="3" y1="6" x2="21" y2="6"></line>
+    <line x1="3" y1="18" x2="21" y2="18"></line>
+  </svg>
+</button>
+
+<!-- Right TOC Drawer Button (Mobile) - Only on post pages -->
+<button
+  id="mobile-right-drawer-btn"
+  class="xl:hidden fixed right-4 bottom-6 z-50 p-3 bg-accent-purple text-bg-primary rounded-full shadow-lg hover:bg-accent-magenta transition-all focus:outline-none focus:ring-2 focus:ring-accent-purple focus:ring-offset-2 focus:ring-offset-bg-primary"
+  aria-label="Open table of contents"
+  aria-expanded="false"
+  style="display: none;"
+>
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <line x1="8" y1="6" x2="21" y2="6"></line>
+    <line x1="8" y1="12" x2="21" y2="12"></line>
+    <line x1="8" y1="18" x2="21" y2="18"></line>
+    <line x1="3" y1="6" x2="3.01" y2="6"></line>
+    <line x1="3" y1="12" x2="3.01" y2="12"></line>
+    <line x1="3" y1="18" x2="3.01" y2="18"></line>
+  </svg>
+</button>
+
+<!-- Left Drawer Overlay & Content -->
+<div
+  id="mobile-left-drawer-overlay"
+  class="lg:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] opacity-0 pointer-events-none transition-opacity duration-300"
+  aria-hidden="true"
+>
+</div>
+
+<div
+  id="mobile-left-drawer"
+  class="lg:hidden fixed left-0 top-0 bottom-0 w-[280px] bg-bg-secondary border-r border-border z-[70] transform -translate-x-full transition-transform duration-300 overflow-y-auto"
+  role="dialog"
+  aria-modal="true"
+  aria-label="Navigation menu"
+>
+  <div
+    class="p-4 border-b border-border flex items-center justify-between sticky top-0 bg-bg-secondary z-10"
+  >
+    <h2 class="text-sm font-semibold text-fg-primary uppercase tracking-wider">Navigation</h2>
+    <button
+      id="mobile-left-drawer-close"
+      class="p-2 text-fg-secondary hover:text-accent-blue transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue rounded"
+      aria-label="Close navigation menu"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+  </div>
+  <div id="mobile-left-drawer-content" class="p-4">
+    <!-- Content will be cloned from desktop sidebar -->
+  </div>
+</div>
+
+<!-- Right Drawer Overlay & Content -->
+<div
+  id="mobile-right-drawer-overlay"
+  class="xl:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] opacity-0 pointer-events-none transition-opacity duration-300"
+  aria-hidden="true"
+>
+</div>
+
+<div
+  id="mobile-right-drawer"
+  class="xl:hidden fixed right-0 top-0 bottom-0 w-[300px] bg-bg-secondary border-l border-border z-[70] transform translate-x-full transition-transform duration-300 overflow-y-auto"
+  role="dialog"
+  aria-modal="true"
+  aria-label="Table of contents"
+>
+  <div
+    class="p-4 border-b border-border flex items-center justify-between sticky top-0 bg-bg-secondary z-10"
+  >
+    <h2 class="text-sm font-semibold text-fg-primary uppercase tracking-wider">
+      Table of Contents
+    </h2>
+    <button
+      id="mobile-right-drawer-close"
+      class="p-2 text-fg-secondary hover:text-accent-blue transition-colors focus:outline-none focus:ring-2 focus:ring-accent-blue rounded"
+      aria-label="Close table of contents"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+  </div>
+  <div id="mobile-right-drawer-content" class="p-4">
+    <!-- Content will be cloned from TOC minimap -->
+  </div>
+</div>
+
+<style>
+  /* Prevent body scroll when drawer is open */
+  body.drawer-open {
+    overflow: hidden;
+  }
+
+  /* Smooth drawer animations */
+  .drawer-slide-in {
+    animation: slideIn 0.3s ease-out forwards;
+  }
+
+  .drawer-slide-out {
+    animation: slideOut 0.3s ease-out forwards;
+  }
+
+  @keyframes slideIn {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes slideOut {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-100%);
+    }
+  }
+</style>
+
+<script>
+  function initMobileDrawers() {
+    // Elements
+    const leftBtn = document.getElementById('mobile-left-drawer-btn');
+    const rightBtn = document.getElementById('mobile-right-drawer-btn');
+
+    const leftDrawer = document.getElementById('mobile-left-drawer');
+    const leftOverlay = document.getElementById('mobile-left-drawer-overlay');
+    const leftClose = document.getElementById('mobile-left-drawer-close');
+    const leftContent = document.getElementById('mobile-left-drawer-content');
+
+    const rightDrawer = document.getElementById('mobile-right-drawer');
+    const rightOverlay = document.getElementById('mobile-right-drawer-overlay');
+    const rightClose = document.getElementById('mobile-right-drawer-close');
+    const rightContent = document.getElementById('mobile-right-drawer-content');
+
+    if (!leftBtn || !leftDrawer || !leftOverlay) return;
+
+    // Check if we have TOC on this page
+    const tocMinimap = document.getElementById('toc-minimap');
+    const hasTOC = tocMinimap && tocMinimap.querySelector('#toc-minimap-nav');
+
+    if (hasTOC && rightBtn) {
+      rightBtn.style.display = 'block';
+    }
+
+    // Clone sidebar content to mobile drawer
+    function cloneSidebarContent() {
+      const blogSidebar = document.getElementById('blog-sidebar');
+      const seriesSidebar = document.getElementById('series-sidebar');
+
+      if (blogSidebar && leftContent) {
+        // Clone blog sidebar content
+        const clone = blogSidebar.cloneNode(true) as HTMLElement;
+        clone.id = 'blog-sidebar-mobile';
+        clone.classList.remove('hidden', 'lg:block', 'sticky', 'w-[250px]');
+        clone.classList.add('block');
+        leftContent.innerHTML = '';
+        leftContent.appendChild(clone);
+      } else if (seriesSidebar && leftContent) {
+        // Clone series sidebar content
+        const clone = seriesSidebar.cloneNode(true) as HTMLElement;
+        clone.id = 'series-sidebar-mobile';
+        clone.classList.remove('hidden', 'lg:block', 'sticky', 'w-[250px]');
+        clone.classList.add('block');
+        leftContent.innerHTML = '';
+        leftContent.appendChild(clone);
+      }
+    }
+
+    // Clone TOC content to mobile drawer
+    function cloneTOCContent() {
+      if (!hasTOC || !tocMinimap || !rightContent) return;
+
+      const tocNav = tocMinimap.querySelector('#toc-minimap-nav');
+      if (tocNav) {
+        const clone = tocNav.cloneNode(true) as HTMLElement;
+        clone.id = 'toc-minimap-nav-mobile';
+        rightContent.innerHTML = '';
+        rightContent.appendChild(clone);
+
+        // Re-attach click handlers for mobile TOC links
+        const mobileLinks = clone.querySelectorAll('a[data-toc-minimap-item]');
+        mobileLinks.forEach((link) => {
+          link.addEventListener('click', (e) => {
+            e.preventDefault();
+            const targetId = (link as HTMLAnchorElement).getAttribute('href')?.substring(1);
+            if (targetId) {
+              const target = document.getElementById(targetId);
+              if (target) {
+                closeRightDrawer();
+                setTimeout(() => {
+                  const headerOffset = 100;
+                  const elementPosition = target.getBoundingClientRect().top;
+                  const offsetPosition = elementPosition + window.pageYOffset - headerOffset;
+                  window.scrollTo({
+                    top: offsetPosition,
+                    behavior: 'smooth',
+                  });
+                }, 300);
+              }
+            }
+          });
+        });
+      }
+    }
+
+    // Open/Close functions
+    function openLeftDrawer() {
+      cloneSidebarContent();
+      if (leftDrawer && leftOverlay) {
+        leftDrawer.style.transform = 'translateX(0)';
+        leftOverlay.style.opacity = '1';
+        leftOverlay.style.pointerEvents = 'auto';
+        leftBtn?.setAttribute('aria-expanded', 'true');
+        document.body.classList.add('drawer-open');
+      }
+    }
+
+    function closeLeftDrawer() {
+      if (leftDrawer && leftOverlay) {
+        leftDrawer.style.transform = 'translateX(-100%)';
+        leftOverlay.style.opacity = '0';
+        leftOverlay.style.pointerEvents = 'none';
+        leftBtn?.setAttribute('aria-expanded', 'false');
+        document.body.classList.remove('drawer-open');
+      }
+    }
+
+    function openRightDrawer() {
+      cloneTOCContent();
+      if (rightDrawer && rightOverlay) {
+        rightDrawer.style.transform = 'translateX(0)';
+        rightOverlay.style.opacity = '1';
+        rightOverlay.style.pointerEvents = 'auto';
+        rightBtn?.setAttribute('aria-expanded', 'true');
+        document.body.classList.add('drawer-open');
+      }
+    }
+
+    function closeRightDrawer() {
+      if (rightDrawer && rightOverlay) {
+        rightDrawer.style.transform = 'translateX(100%)';
+        rightOverlay.style.opacity = '0';
+        rightOverlay.style.pointerEvents = 'none';
+        rightBtn?.setAttribute('aria-expanded', 'false');
+        document.body.classList.remove('drawer-open');
+      }
+    }
+
+    // Event listeners
+    leftBtn.addEventListener('click', openLeftDrawer);
+    leftClose?.addEventListener('click', closeLeftDrawer);
+    leftOverlay.addEventListener('click', closeLeftDrawer);
+
+    if (rightBtn) {
+      rightBtn.addEventListener('click', openRightDrawer);
+      rightClose?.addEventListener('click', closeRightDrawer);
+      rightOverlay?.addEventListener('click', closeRightDrawer);
+    }
+
+    // Escape key to close
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeLeftDrawer();
+        closeRightDrawer();
+      }
+    });
+
+    // Focus trap
+    function trapFocus(drawer: HTMLElement) {
+      const focusableElements = drawer.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      const firstElement = focusableElements[0] as HTMLElement;
+      const lastElement = focusableElements[focusableElements.length - 1] as HTMLElement;
+
+      drawer.addEventListener('keydown', (e) => {
+        if (e.key !== 'Tab') return;
+
+        if (e.shiftKey) {
+          if (document.activeElement === firstElement) {
+            e.preventDefault();
+            lastElement?.focus();
+          }
+        } else {
+          if (document.activeElement === lastElement) {
+            e.preventDefault();
+            firstElement?.focus();
+          }
+        }
+      });
+    }
+
+    if (leftDrawer) trapFocus(leftDrawer);
+    if (rightDrawer) trapFocus(rightDrawer);
+  }
+
+  // Initialize
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initMobileDrawers);
+  } else {
+    initMobileDrawers();
+  }
+
+  // Re-initialize on navigation
+  document.addEventListener('astro:page-load', initMobileDrawers);
+</script>

@@ -5,7 +5,8 @@
 <div class="flex flex-col items-center justify-center min-h-screen bg-bg-primary">
   <div class="flex gap-8 items-center mb-8">
     <!-- Linux Penguin (Tux) -->
-    <pre class="text-accent-cyan text-xs leading-tight">
+    <pre
+      class="text-accent-cyan text-xs leading-tight">
      .--.
     |o_o |
     |:_/ |
@@ -14,9 +15,10 @@
  /'\\_   _/\`\\
  \\___)=(___/
     </pre>
-    
+
     <!-- Kubernetes Logo -->
-    <pre class="text-accent-blue text-xs leading-tight">
+    <pre
+      class="text-accent-blue text-xs leading-tight">
    _  __
   | |/ /
   | ' / 
@@ -25,7 +27,7 @@
   |_|\\_\\
     </pre>
   </div>
-  
+
   <div class="text-center">
     <div class="text-fg-secondary text-lg mb-2">
       <span class="inline-block animate-pulse">Loading...</span>
@@ -35,10 +37,15 @@
 
 <style>
   @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
   }
-  
+
   .animate-pulse {
     animation: pulse 1s ease-in-out infinite;
   }

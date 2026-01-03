@@ -11,10 +11,19 @@ interface Props {
   seriesPart?: number;
 }
 
-const { title, excerpt, date, tags, slug, featured = false, content, series, seriesPart } = Astro.props;
+const {
+  title,
+  excerpt,
+  date,
+  tags,
+  slug,
+  featured = false,
+  content,
+  series,
+  seriesPart,
+} = Astro.props;
 
 import { calculateReadingTime } from '../../utils/readingTime';
-import TagPill from './TagPill.astro';
 
 const readingTime = calculateReadingTime(content);
 const formattedDate = new Date(date).toLocaleDateString('en-US', {
@@ -31,36 +40,55 @@ const formattedDate = new Date(date).toLocaleDateString('en-US', {
   data-post-slug={slug}
 >
   <div class="flex items-center gap-3 mb-2 flex-wrap">
-    {featured && (
-      <span class="text-xs font-semibold uppercase tracking-wider text-accent-cyan">Featured</span>
-    )}
-    {series && (
-      <span class="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-accent-purple bg-accent-purple/10 px-2 py-1 rounded">
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path>
-        </svg>
-        Series {seriesPart && `• Part ${seriesPart}`}
-      </span>
-    )}
+    {
+      featured && (
+        <span class="text-xs font-semibold uppercase tracking-wider text-accent-cyan">
+          Featured
+        </span>
+      )
+    }
+    {
+      series && (
+        <span class="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-accent-purple bg-accent-purple/10 px-2 py-1 rounded">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            class="w-3.5 h-3.5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
+          </svg>
+          Series {seriesPart && `• Part ${seriesPart}`}
+        </span>
+      )
+    }
   </div>
-  
-  <h3 class="text-xl font-semibold mb-3 text-fg-primary group-hover:text-accent-blue transition-colors">
+
+  <h3
+    class="text-xl font-semibold mb-3 text-fg-primary group-hover:text-accent-blue transition-colors"
+  >
     {title}
   </h3>
-  
+
   <p class="text-fg-secondary mb-4 line-clamp-2">
     {excerpt}
   </p>
-  
+
   <footer class="flex flex-wrap items-center gap-4 text-sm text-fg-muted">
     <time datetime={date}>{formattedDate}</time>
     <span>•</span>
     <span>{readingTime} min read</span>
-    {tags.slice(0, 3).map((tag) => (
-      <>
-        <span>•</span>
-        <span class="uppercase tracking-wider text-xs text-accent-blue">{tag}</span>
-      </>
-    ))}
+    {
+      tags.slice(0, 3).map((tag) => (
+        <>
+          <span>•</span>
+          <span class="uppercase tracking-wider text-xs text-accent-blue">{tag}</span>
+        </>
+      ))
+    }
   </footer>
 </a>
