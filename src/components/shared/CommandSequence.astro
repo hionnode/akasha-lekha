@@ -1,0 +1,17 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className = '' } = Astro.props;
+---
+
+<div class={`command-sequence ${className}`}>
+  <slot />
+</div>
+
+<style>
+  .command-sequence {
+    margin: 1.5rem 0;
+  }
+</style>

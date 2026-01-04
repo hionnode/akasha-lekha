@@ -1,0 +1,140 @@
+---
+interface Props {
+  cmd: string;
+  description?: string;
+  copyable?: boolean;
+}
+
+const { cmd, description, copyable = true } = Astro.props;
+---
+
+<div class="command-item" data-command={cmd}>
+  {description && <div class="command-description">{description}</div>}
+  <div class="command-wrapper">
+    <code class="command-text">{cmd}</code>
+    {
+      copyable && (
+        <button
+          class="command-copy"
+          data-command={cmd}
+          aria-label="Copy command"
+          title="Copy command"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+        </button>
+      )
+    }
+  </div>
+</div>
+
+<script>
+  function initCommandReference() {
+    const buttons = document.querySelectorAll('.command-copy');
+
+    buttons.forEach((button) => {
+      button.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const cmd = (button as HTMLElement).getAttribute('data-command');
+        if (!cmd) return;
+
+        try {
+          await navigator.clipboard.writeText(cmd);
+          const originalHTML = button.innerHTML;
+          button.innerHTML =
+            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+          button.classList.add('copied');
+
+          setTimeout(() => {
+            button.innerHTML = originalHTML;
+            button.classList.remove('copied');
+          }, 2000);
+        } catch (err) {
+          console.error('Failed to copy:', err);
+        }
+      });
+    });
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initCommandReference);
+  } else {
+    initCommandReference();
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', initCommandReference);
+</script>
+
+<style>
+  .command-item {
+    margin: 1rem 0;
+  }
+
+  .command-description {
+    color: var(--fg-muted);
+    font-size: 0.875rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .command-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    padding: 0.75rem 1rem;
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .command-text {
+    flex: 1;
+    color: var(--accent-green);
+    font-size: 0.875rem;
+    background: transparent;
+    padding: 0;
+    border: none;
+  }
+
+  .command-copy {
+    background: transparent;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.25rem;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+  }
+
+  .command-copy:hover {
+    background: var(--bg-tertiary);
+    color: var(--fg-secondary);
+  }
+
+  .command-copy.copied {
+    color: var(--accent-green);
+  }
+
+  .command-copy svg {
+    width: 16px;
+    height: 16px;
+  }
+</style>

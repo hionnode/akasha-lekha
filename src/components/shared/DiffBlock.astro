@@ -1,0 +1,19 @@
+---
+interface Props {
+  type: 'added' | 'removed' | 'context';
+}
+
+const { type } = Astro.props;
+---
+
+<div
+  data-diff-type={type}
+  role={type === 'added' ? 'insertion' : type === 'removed' ? 'deletion' : 'none'}
+  aria-label={type === 'added'
+    ? 'Added line'
+    : type === 'removed'
+      ? 'Removed line'
+      : 'Context line'}
+>
+  <slot />
+</div>

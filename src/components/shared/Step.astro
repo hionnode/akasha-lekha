@@ -1,0 +1,182 @@
+---
+interface Props {
+  number: number;
+  description: string;
+  dependsOn?: number;
+}
+
+const { number, description, dependsOn } = Astro.props;
+const stepId = `step-${number}`;
+---
+
+<div class="command-step" data-step-number={number} data-step-id={stepId}>
+  <div class="step-header">
+    <div class="step-number">{number}</div>
+    <div class="step-info">
+      <div class="step-description">{description}</div>
+      {dependsOn && <div class="step-dependency">Depends on step {dependsOn}</div>}
+    </div>
+    <button class="step-copy" data-step-id={stepId} aria-label="Copy command">
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+    </button>
+  </div>
+  <div class="step-command" data-step-id={stepId}>
+    <slot />
+  </div>
+</div>
+
+<script>
+  function initCommandSequence() {
+    const sequences = document.querySelectorAll('.command-sequence');
+
+    sequences.forEach((sequence) => {
+      const steps = sequence.querySelectorAll('.command-step');
+
+      steps.forEach((step) => {
+        const stepId = step.getAttribute('data-step-id');
+        if (!stepId) return;
+
+        const copyButton = step.querySelector(`.step-copy[data-step-id="${stepId}"]`);
+        const commandElement = step.querySelector(`.step-command[data-step-id="${stepId}"]`);
+
+        if (copyButton && commandElement) {
+          copyButton.addEventListener('click', async () => {
+            const text = commandElement.textContent?.trim() || '';
+
+            try {
+              await navigator.clipboard.writeText(text);
+              const originalHTML = copyButton.innerHTML;
+              copyButton.innerHTML =
+                '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+              copyButton.classList.add('copied');
+
+              setTimeout(() => {
+                copyButton.innerHTML = originalHTML;
+                copyButton.classList.remove('copied');
+              }, 2000);
+            } catch (err) {
+              console.error('Failed to copy:', err);
+            }
+          });
+        }
+      });
+    });
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initCommandSequence);
+  } else {
+    initCommandSequence();
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', initCommandSequence);
+</script>
+
+<style>
+  .command-step {
+    margin: 1rem 0;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--bg-secondary);
+    overflow: hidden;
+  }
+
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .step-number {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    background: var(--accent-blue);
+    color: var(--bg-primary);
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 0.875rem;
+    flex-shrink: 0;
+  }
+
+  .step-info {
+    flex: 1;
+  }
+
+  .step-description {
+    color: var(--fg-primary);
+    font-weight: 500;
+    font-size: 0.875rem;
+  }
+
+  .step-dependency {
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    margin-top: 0.25rem;
+  }
+
+  .step-copy {
+    background: transparent;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.25rem;
+    transition: all 0.2s ease;
+  }
+
+  .step-copy:hover {
+    background: var(--bg-secondary);
+    color: var(--fg-secondary);
+  }
+
+  .step-copy.copied {
+    color: var(--accent-green);
+  }
+
+  .step-copy svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .step-command {
+    padding: 1rem;
+    font-family: 'Inconsolata', monospace;
+    font-size: 0.875rem;
+    color: var(--accent-green);
+  }
+
+  .step-command :global(pre) {
+    margin: 0;
+    background: transparent;
+    border: none;
+  }
+
+  .step-command :global(code) {
+    background: transparent;
+    color: var(--accent-green);
+  }
+</style>

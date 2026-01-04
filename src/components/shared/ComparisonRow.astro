@@ -1,0 +1,28 @@
+---
+interface Props {
+  feature: string;
+  [key: string]: string | undefined;
+}
+
+const { feature, ...values } = Astro.props;
+const columns = Object.keys(values);
+const columnCount = columns.length;
+---
+
+<div class="comparison-row" style={`--column-count: ${columnCount};`}>
+  <div>{feature}</div>
+  {
+    columns.map((col) => (
+      <div
+        class={
+          values[col]?.toLowerCase().includes('best') ||
+          values[col]?.toLowerCase().includes('fastest')
+            ? 'best'
+            : ''
+        }
+      >
+        {values[col] || '-'}
+      </div>
+    ))
+  }
+</div>

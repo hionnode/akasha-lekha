@@ -1,0 +1,635 @@
+---
+title: "MDX Mastery: Code-Focused Components"
+date: "2025-01-19"
+excerpt: "Master specialized code-focused components for creating rich, interactive technical content in MDX"
+tags: ["mdx", "astro", "components", "devops", "kubernetes", "tutorial"]
+featured: true
+draft: false
+series: "MDX Mastery"
+seriesPart: 4
+---
+
+import Button from '../../../components/shared/Button.astro';
+import Badge from '../../../components/shared/Badge.astro';
+import PanelSwitcher from '../../../components/shared/PanelSwitcher.astro';
+import Panel from '../../../components/shared/Panel.astro';
+import FileTree from '../../../components/shared/FileTree.astro';
+import DiffViewer from '../../../components/shared/DiffViewer.astro';
+import DiffBlock from '../../../components/shared/DiffBlock.astro';
+import CommandReference from '../../../components/shared/CommandReference.astro';
+import Command from '../../../components/shared/Command.astro';
+import ApiEndpoint from '../../../components/shared/ApiEndpoint.astro';
+import ResponseExample from '../../../components/shared/ResponseExample.astro';
+import ComparisonTable from '../../../components/shared/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/shared/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/shared/ComparisonRow.astro';
+import K8sManifest from '../../../components/shared/K8sManifest.astro';
+import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
+import ResourceStatus from '../../../components/shared/ResourceStatus.astro';
+import CommandSequence from '../../../components/shared/CommandSequence.astro';
+import Step from '../../../components/shared/Step.astro';
+import EnvVars from '../../../components/shared/EnvVars.astro';
+import EnvVar from '../../../components/shared/EnvVar.astro';
+import ServiceMapping from '../../../components/shared/ServiceMapping.astro';
+import Service from '../../../components/shared/Service.astro';
+import Ingress from '../../../components/shared/Ingress.astro';
+
+# {frontmatter.title}
+
+**Part {frontmatter.seriesPart} of the MDX Mastery Series**
+
+Welcome to Part 4! In this comprehensive guide, we'll explore specialized code-focused components designed to enhance your technical blog posts, especially for DevOps, Kubernetes, and platform engineering content.
+
+:::info
+This is part 4 of the MDX Mastery series. Check out [Part 1: Getting Started](/blog/mdx-mastery-series/01-getting-started), [Part 2: Advanced Components](/blog/mdx-mastery-series/02-advanced-components), and [Part 3: Best Practices](/blog/mdx-mastery-series/03-best-practices) for the complete series!
+:::
+
+## Introduction
+
+Code-focused components provide specialized functionality for technical content:
+
+- **General Purpose**: Panel switchers, file trees, diff viewers, command references, API documentation, comparison tables
+- **DevOps/Platform Engineering**: Kubernetes manifests, terminal output, resource status, command sequences, environment variables, service mappings
+
+Let's dive into each component with real-world examples!
+
+## General Purpose Components
+
+### 1. Panel Switcher
+
+The Panel Switcher allows readers to switch between multiple content options, perfect for showing different package managers, cloud providers, or configuration options.
+
+**Usage Example:**
+
+<PanelSwitcher>
+  <Panel label="npm">
+    <pre><code class="language-bash">npm install @astrojs/mdx</code></pre>
+  </Panel>
+  <Panel label="pnpm">
+    <pre><code class="language-bash">pnpm add @astrojs/mdx</code></pre>
+  </Panel>
+  <Panel label="yarn">
+    <pre><code class="language-bash">yarn add @astrojs/mdx</code></pre>
+  </Panel>
+</PanelSwitcher>
+
+**Code:**
+
+```mdx
+import PanelSwitcher from '../../../components/shared/PanelSwitcher.astro';
+import Panel from '../../../components/shared/Panel.astro';
+
+<PanelSwitcher>
+  <Panel label="npm">
+    <pre><code class="language-bash">npm install package</code></pre>
+  </Panel>
+  <Panel label="pnpm">
+    <pre><code class="language-bash">pnpm add package</code></pre>
+  </Panel>
+</PanelSwitcher>
+```
+
+**Features:**
+- Keyboard navigation (Arrow keys, Home, End)
+- Accessible with ARIA attributes
+- Works with any content type (code, text, images, components)
+
+### 2. File Tree Beautifier
+
+Display project structures in a beautiful, navigable tree format.
+
+**Usage Example:**
+
+<FileTree>
+src/
+  components/
+    shared/
+      Button.astro
+      Badge.astro
+    blog/
+      PostCard.astro
+  content/
+    blog/
+      post.mdx
+  package.json
+</FileTree>
+
+**Code:**
+
+```mdx
+import FileTree from '../../../components/shared/FileTree.astro';
+
+<FileTree>
+src/
+  components/
+    Button.astro
+  package.json
+</FileTree>
+```
+
+**Features:**
+- Collapsible directories
+- File type icons
+- Copy path functionality
+- Syntax highlighting for file names
+
+### 3. Diff Viewer
+
+Show code changes with before/after comparison.
+
+**Usage Example:**
+
+<DiffViewer mode="unified">
+  <DiffBlock type="removed">
+```typescript
+const oldConfig = {
+  theme: 'light',
+  fontSize: 14
+};
+```
+  </DiffBlock>
+  <DiffBlock type="added">
+```typescript
+const newConfig = {
+  theme: 'dark',
+  fontSize: 16,
+  fontFamily: 'Inconsolata'
+};
+```
+  </DiffBlock>
+</DiffViewer>
+
+**Code:**
+
+```mdx
+import DiffViewer from '../../../components/shared/DiffViewer.astro';
+import DiffBlock from '../../../components/shared/DiffBlock.astro';
+
+<DiffViewer mode="unified">
+  <DiffBlock type="removed">
+    // Old code
+  </DiffBlock>
+  <DiffBlock type="added">
+    // New code
+  </DiffBlock>
+</DiffViewer>
+```
+
+**Features:**
+- Unified or split view modes
+- Color-coded additions (green) and removals (red)
+- Syntax highlighting preserved
+
+### 4. Command Reference
+
+Document CLI commands with descriptions and copy buttons.
+
+**Usage Example:**
+
+<CommandReference>
+  <Command cmd="kubectl get pods" description="List all pods in the current namespace" />
+  <Command cmd="kubectl get pods -A" description="List all pods in all namespaces" />
+  <Command cmd="kubectl describe pod &lt;pod-name&gt;" description="Get detailed information about a specific pod" />
+</CommandReference>
+
+**Code:**
+
+```mdx
+import CommandReference from '../../../components/shared/CommandReference.astro';
+import Command from '../../../components/shared/Command.astro';
+
+<CommandReference>
+  <Command cmd="npm install" description="Install dependencies" />
+  <Command cmd="npm run build" description="Build the project" />
+</CommandReference>
+```
+
+**Features:**
+- One-click copy functionality
+- Optional descriptions
+- Terminal-style formatting
+
+### 5. API Endpoint
+
+Document API endpoints with method badges, paths, and examples.
+
+**Usage Example:**
+
+<ApiEndpoint 
+  method="GET" 
+  path="/api/v1/pods/:namespace"
+  description="Retrieve all pods in a specific namespace"
+>
+  <ResponseExample title="Response">
+    <pre><code class="language-json">{'{'}
+  "pods": [
+    {'{'}
+      "name": "api-deployment-xyz",
+      "status": "Running",
+      "ready": "3/3"
+    {'}'}
+  ]
+{'}'}</code></pre>
+    </ResponseExample>
+</ApiEndpoint>
+
+**Code:**
+
+```mdx
+import ApiEndpoint from '../../../components/shared/ApiEndpoint.astro';
+import ResponseExample from '../../../components/shared/ResponseExample.astro';
+
+<ApiEndpoint method="GET" path="/api/users/:id" description="Fetch user by ID">
+  <ResponseExample>
+    <pre><code class="language-json">{'{'} "id": 1, "name": "John" {'}'}</code></pre>
+  </ResponseExample>
+</ApiEndpoint>
+```
+
+**Features:**
+- Method badges (GET, POST, PUT, DELETE, etc.)
+- Path parameter highlighting
+- Request/response examples
+
+### 6. Comparison Table
+
+Compare features, options, or tools side-by-side.
+
+**Usage Example:**
+
+<ComparisonTable>
+  <ComparisonHeader columns={['npm', 'pnpm', 'yarn']} />
+  <ComparisonRow feature="Install Speed" npm="Fast" pnpm="Faster" yarn="Fast" />
+  <ComparisonRow feature="Disk Usage" npm="High" pnpm="Low" yarn="Medium" />
+  <ComparisonRow feature="Monorepo Support" npm="Basic" pnpm="Excellent" yarn="Good" />
+</ComparisonTable>
+
+**Code:**
+
+```mdx
+import ComparisonTable from '../../../components/shared/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/shared/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/shared/ComparisonRow.astro';
+
+<ComparisonTable>
+  <ComparisonHeader columns={['Option A', 'Option B']} />
+  <ComparisonRow feature="Feature 1" optionA="Value A" optionB="Value B" />
+</ComparisonTable>
+```
+
+**Features:**
+- Responsive design
+- Optional "best" option highlighting
+- Mobile-friendly
+
+## DevOps/Platform Engineering Components
+
+### 7. Kubernetes Manifest Viewer
+
+Enhanced YAML viewer specifically for Kubernetes manifests.
+
+**Usage Example:**
+
+<K8sManifest kind="Deployment" namespace="production" name="nginx-deployment">
+  <pre><code class="language-yaml">{`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.21
+        ports:
+          - containerPort: 80`}</code></pre>
+</K8sManifest>
+
+**Code:**
+
+```mdx
+import K8sManifest from '../../../components/shared/K8sManifest.astro';
+
+<K8sManifest kind="Deployment" namespace="production">
+  <pre><code class="language-yaml">apiVersion: apps/v1
+kind: Deployment
+# ... manifest content</code></pre>
+</K8sManifest>
+```
+
+**Features:**
+- Resource type badge
+- Namespace indicator
+- Copy manifest button
+- YAML syntax highlighting
+
+### 8. Terminal Output Viewer
+
+Enhanced terminal output with line numbers, search, and filtering.
+
+**Usage Example:**
+
+<TerminalOutput title="kubectl get pods" searchable={true}>
+  <pre><code>{`NAMESPACE     NAME                    READY   STATUS    RESTARTS   AGE
+production    api-deployment-xyz      3/3     Running   0          2d
+staging       worker-pod-abc         0/1     Pending   0          5m
+default       test-pod-123           1/1     Running   1          1h`}</code></pre>
+</TerminalOutput>
+
+**Code:**
+
+```mdx
+import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
+
+<TerminalOutput title="Command Output" searchable={true}>
+Your terminal output here
+</TerminalOutput>
+```
+
+**Features:**
+- Line numbers
+- Search/filter functionality
+- Copy output button
+- Terminal-style window chrome
+- ANSI color preservation
+
+### 9. Resource Status Indicator
+
+Display Kubernetes resource status with color-coded indicators.
+
+**Usage Example:**
+
+<ResourceStatus name="api-deployment" status="Running" ready="3/3" kind="Deployment" namespace="production" />
+<ResourceStatus name="worker-pod" status="Pending" ready="0/1" kind="Pod" />
+<ResourceStatus name="db-service" status="Error" ready="0/1" kind="Service" />
+
+**Code:**
+
+```mdx
+import ResourceStatus from '../../../components/shared/ResourceStatus.astro';
+
+<ResourceStatus 
+  name="api-deployment" 
+  status="Running" 
+  ready="3/3" 
+  kind="Deployment"
+  namespace="production"
+/>
+```
+
+**Features:**
+- Color-coded status badges (green/yellow/red)
+- Ready state display
+- Optional namespace and kind
+- Icon indicators
+
+### 10. Command Sequence
+
+Multi-step command workflows with dependencies and explanations.
+
+**Usage Example:**
+
+<CommandSequence>
+  <Step number={1} description="Create namespace">
+    kubectl create namespace production
+  </Step>
+  <Step number={2} description="Apply deployment" dependsOn={1}>
+    kubectl apply -f deployment.yaml -n production
+  </Step>
+  <Step number={3} description="Verify pods are running" dependsOn={2}>
+    kubectl get pods -n production
+  </Step>
+  <Step number={4} description="Check service endpoints" dependsOn={2}>
+    kubectl get svc -n production
+  </Step>
+</CommandSequence>
+
+**Code:**
+
+```mdx
+import CommandSequence from '../../../components/shared/CommandSequence.astro';
+import Step from '../../../components/shared/Step.astro';
+
+<CommandSequence>
+  <Step number={1} description="Step description">
+    command here
+  </Step>
+  <Step number={2} description="Next step" dependsOn={1}>
+    another command
+  </Step>
+</CommandSequence>
+```
+
+**Features:**
+- Numbered steps with descriptions
+- Dependency visualization
+- Individual copy buttons per step
+- Terminal-style formatting
+
+### 11. Environment Variable Reference
+
+Document environment variables with descriptions, defaults, and required flags.
+
+**Usage Example:**
+
+<EnvVars>
+  <EnvVar 
+    name="DATABASE_URL" 
+    required 
+    description="PostgreSQL connection string"
+    default="postgres://localhost:5432/mydb"
+    type="string"
+  />
+  <EnvVar 
+    name="API_KEY" 
+    required 
+    description="External API authentication key"
+    type="string"
+  />
+  <EnvVar 
+    name="DEBUG" 
+    description="Enable debug mode for detailed logging"
+    default="false"
+    type="boolean"
+  />
+  <EnvVar 
+    name="MAX_CONNECTIONS" 
+    description="Maximum database connection pool size"
+    default="10"
+    type="number"
+  />
+</EnvVars>
+
+**Code:**
+
+```mdx
+import EnvVars from '../../../components/shared/EnvVars.astro';
+import EnvVar from '../../../components/shared/EnvVar.astro';
+
+<EnvVars>
+  <EnvVar 
+    name="VAR_NAME" 
+    required 
+    description="Variable description"
+    default="default-value"
+    type="string"
+  />
+</EnvVars>
+```
+
+**Features:**
+- Required/optional indicators
+- Type indicators (string, number, boolean)
+- Default value display
+- Copy variable name button
+
+### 12. Port/Service Mapping
+
+Display port mappings, service endpoints, and ingress rules.
+
+**Usage Example:**
+
+<ServiceMapping>
+  <Service name="api-service" port={8080} targetPort={3000} protocol="TCP" namespace="production" />
+  <Service name="db-service" port={5432} targetPort={5432} protocol="TCP" namespace="production" />
+  <Service name="redis-service" port={6379} targetPort={6379} protocol="TCP" namespace="production" />
+  <Ingress host="api.example.com" path="/" service="api-service" port={8080} tls={true} />
+  <Ingress host="api.example.com" path="/api/v1" service="api-service" port={8080} tls={true} />
+</ServiceMapping>
+
+**Code:**
+
+```mdx
+import ServiceMapping from '../../../components/shared/ServiceMapping.astro';
+import Service from '../../../components/shared/Service.astro';
+import Ingress from '../../../components/shared/Ingress.astro';
+
+<ServiceMapping>
+  <Service name="my-service" port={8080} targetPort={3000} protocol="TCP" />
+  <Ingress host="example.com" path="/" service="my-service" port={8080} />
+</ServiceMapping>
+```
+
+**Features:**
+- Port mapping visualization
+- Protocol indicators (TCP, UDP)
+- Ingress rules with TLS support
+- Copy endpoint URLs
+
+## Combining Components
+
+You can combine multiple components for rich, interactive content:
+
+<PanelSwitcher>
+  <Panel label="AWS">
+    <K8sManifest kind="Deployment" namespace="aws-prod">
+      <pre><code class="language-yaml">{`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-deployment
+spec:
+  replicas: 3`}</code></pre>
+    </K8sManifest>
+  </Panel>
+  <Panel label="GCP">
+    <K8sManifest kind="Deployment" namespace="gcp-prod">
+      <pre><code class="language-yaml">{`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-deployment
+spec:
+  replicas: 5`}</code></pre>
+    </K8sManifest>
+  </Panel>
+</PanelSwitcher>
+
+## Real-World Examples
+
+### Kubernetes Deployment Tutorial
+
+Here's a complete example combining multiple components:
+
+<CommandSequence>
+  <Step number={1} description="Create namespace">
+    kubectl create namespace myapp
+  </Step>
+  <Step number={2} description="Apply deployment manifest" dependsOn={1}>
+    kubectl apply -f deployment.yaml -n myapp
+  </Step>
+</CommandSequence>
+
+<K8sManifest kind="Deployment" namespace="myapp" name="myapp-deployment">
+  <pre><code class="language-yaml">{`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-deployment
+  namespace: myapp
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: myapp
+        image: myapp:latest
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: url`}</code></pre>
+</K8sManifest>
+
+<TerminalOutput title="kubectl get pods -n myapp">
+  <pre><code>{`NAME                              READY   STATUS    RESTARTS   AGE
+myapp-deployment-7d4b8c9f6-abc     1/1     Running   0          2m
+myapp-deployment-7d4b8c9f6-def     1/1     Running   0          2m
+myapp-deployment-7d4b8c9f6-ghi    1/1     Running   0          2m`}</code></pre>
+</TerminalOutput>
+
+<ResourceStatus name="myapp-deployment" status="Running" ready="3/3" kind="Deployment" namespace="myapp" />
+
+## Best Practices
+
+1. **Use appropriate components** - Choose components that match your content type
+2. **Keep it accessible** - All components include ARIA attributes and keyboard navigation
+3. **Combine thoughtfully** - Don't overuse components; use them where they add value
+4. **Test in MDX** - Verify components work correctly in your MDX files
+5. **Mobile-friendly** - All components are responsive and work on mobile devices
+
+## Next Steps
+
+Now that you've mastered code-focused components, you can:
+
+- Create rich technical documentation
+- Build interactive tutorials
+- Document APIs and services
+- Share Kubernetes configurations
+- Write comprehensive DevOps guides
+
+## Series Navigation
+
+- [Part 1: Getting Started](/blog/mdx-mastery-series/01-getting-started)
+- [Part 2: Advanced Components](/blog/mdx-mastery-series/02-advanced-components)
+- [Part 3: Best Practices](/blog/mdx-mastery-series/03-best-practices)
+- **Part 4: Code-Focused Components** (you are here)
+
+<div style="margin-top: 2rem;">
+  <Button href="/blog/mdx-mastery-series/03-best-practices" variant="secondary">
+    ← Part 3: Best Practices
+  </Button>
+</div>
+

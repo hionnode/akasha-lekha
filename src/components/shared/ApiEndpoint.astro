@@ -1,0 +1,92 @@
+---
+interface Props {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
+  path: string;
+  description?: string;
+  class?: string;
+}
+
+const { method, path, description, class: className = '' } = Astro.props;
+
+const methodColors: Record<string, string> = {
+  GET: 'var(--accent-green)',
+  POST: 'var(--accent-blue)',
+  PUT: 'var(--accent-yellow)',
+  DELETE: 'var(--accent-red)',
+  PATCH: 'var(--accent-purple)',
+  HEAD: 'var(--accent-cyan)',
+  OPTIONS: 'var(--fg-muted)',
+};
+---
+
+<div class={`api-endpoint ${className}`}>
+  <div class="api-header">
+    <span
+      class="api-method"
+      style={`background-color: ${methodColors[method] || methodColors.GET};`}
+    >
+      {method}
+    </span>
+    <code class="api-path">{path}</code>
+  </div>
+  {description && <div class="api-description">{description}</div>}
+  <div class="api-content">
+    <slot />
+  </div>
+</div>
+
+<style>
+  .api-endpoint {
+    margin: 1.5rem 0;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    background: var(--bg-secondary);
+  }
+
+  .api-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .api-method {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--bg-primary);
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .api-path {
+    flex: 1;
+    color: var(--accent-cyan);
+    font-size: 0.9375rem;
+    font-family: 'Inconsolata', monospace;
+    background: transparent;
+    padding: 0;
+    border: none;
+  }
+
+  .api-description {
+    color: var(--fg-secondary);
+    font-size: 0.875rem;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .api-content {
+    margin-top: 0.75rem;
+  }
+
+  .api-content :global(pre) {
+    margin: 0;
+  }
+</style>

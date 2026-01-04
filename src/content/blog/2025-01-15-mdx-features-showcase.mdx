@@ -1,0 +1,221 @@
+---
+title: "MDX Features Showcase"
+date: "2025-01-15"
+excerpt: "Comprehensive demonstration of MDX capabilities in Astro blog posts, including components, JSX expressions, and markdown directives"
+tags: ["mdx", "astro", "components", "tutorial"]
+featured: true
+draft: false
+---
+
+import Button from '../../components/shared/Button.astro';
+import TagPill from '../../components/blog/TagPill.astro';
+import Badge from '../../components/shared/Badge.astro';
+
+# {frontmatter.title}
+
+Published on {new Date(frontmatter.date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+
+{frontmatter.featured && <Badge text="Featured" variant="accent" />}
+
+## Introduction
+
+This post demonstrates the powerful capabilities of **MDX** (Markdown + JSX) in Astro blog posts. MDX allows you to seamlessly combine standard markdown with React/JSX components, enabling rich, interactive content creation.
+
+:::tip
+MDX processes markdown first, then JSX, so all your existing markdown directives continue to work!
+:::
+
+## What is MDX?
+
+MDX is a format that lets you write JSX in your markdown documents. This means you can:
+
+- Use standard markdown syntax (headings, lists, code blocks, etc.)
+- Embed React/JSX components directly
+- Use JSX expressions for dynamic content
+- Mix markdown directives with components
+
+## Component Integration
+
+### Using Buttons
+
+You can embed interactive buttons directly in your content:
+
+<Button href="/blog" variant="primary">Back to Blog</Button>
+
+<Button href="/blog" variant="secondary">View All Posts</Button>
+
+### Using Badges
+
+Display status indicators and labels:
+
+<Badge text="New" variant="accent" />
+<Badge text="Updated" variant="default" />
+
+### Using Tag Pills
+
+Show tags inline with your content:
+
+<div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0;">
+  <TagPill tag="mdx" href="/blog?tag=mdx" />
+  <TagPill tag="astro" href="/blog?tag=astro" />
+  <TagPill tag="components" href="/blog?tag=components" />
+</div>
+
+## JSX Expressions
+
+MDX supports JSX expressions for dynamic content:
+
+### Dynamic Dates
+
+This post was published on **{new Date(frontmatter.date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}**.
+
+### Conditional Rendering
+
+{frontmatter.featured ? (
+  <Badge text="This is a featured post!" variant="accent" />
+) : (
+  <Badge text="Regular post" variant="default" />
+)}
+
+### Calculations
+
+If this post had 2000 words, the estimated reading time would be approximately **{Math.ceil(2000 / 200)}** minutes.
+
+## Markdown Directives Still Work
+
+All your existing markdown directives continue to work seamlessly with MDX:
+
+### Callout Boxes
+
+:::tip
+This is a tip callout! Use callouts to highlight important information.
+:::
+
+:::note
+This is a note callout for additional context or information.
+:::
+
+:::warning
+This is a warning callout for important cautions or potential issues.
+:::
+
+:::caution
+This is a caution callout for critical warnings.
+:::
+
+:::info
+This is an info callout for general information.
+:::
+
+### Code Switcher
+
+You can use code switchers to show multiple code examples:
+
+:::code-switcher
+```bash npm
+npm install @astrojs/mdx
+```
+
+```bash pnpm
+pnpm add @astrojs/mdx
+```
+
+```bash yarn
+yarn add @astrojs/mdx
+```
+:::
+
+### Steps Component
+
+Use the steps directive for step-by-step instructions:
+
+:::steps
+1. Install MDX integration
+2. Update your Astro config
+3. Create `.mdx` files
+4. Import and use components
+:::
+
+### Code Blocks with Metadata
+
+Code blocks support metadata like titles and terminal flags:
+
+```typescript title="astro.config.mjs"
+import { defineConfig } from 'astro/config';
+import mdx from '@astrojs/mdx';
+
+export default defineConfig({
+  integrations: [mdx()],
+});
+```
+
+```bash terminal
+pnpm add @astrojs/mdx
+```
+
+## Combining Markdown and Components
+
+You can seamlessly combine markdown directives with MDX components:
+
+:::tip
+Try using components within callouts for even richer content!
+:::
+
+<div style="margin: 1rem 0;">
+  <Button href="/blog" variant="primary">Explore More Posts</Button>
+</div>
+
+## Real-World Patterns
+
+### Navigation Between Posts
+
+Create navigation flows between related content:
+
+<div style="display: flex; gap: 1rem; margin: 2rem 0;">
+  <Button href="/blog" variant="secondary">← Previous Post</Button>
+  <Button href="/blog" variant="secondary">Next Post →</Button>
+</div>
+
+### Interactive Elements
+
+Combine multiple components for rich interactions:
+
+<div style="border: 1px solid var(--border); padding: 1.5rem; border-radius: 0.5rem; margin: 1.5rem 0;">
+  <h3 style="margin-top: 0;">Quick Actions</h3>
+  <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+    <Button href="/blog" variant="primary">View Blog</Button>
+    <Button href="/blog" variant="secondary">Browse Tags</Button>
+  </div>
+  <div style="margin-top: 1rem;">
+    <p style="margin-bottom: 0.5rem;">Tags:</p>
+    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+      {frontmatter.tags.map((tag) => (
+        <TagPill tag={tag} href={`/blog?tag=${tag}`} />
+      ))}
+    </div>
+  </div>
+</div>
+
+## Best Practices
+
+1. **Import components at the top** - Right after frontmatter, before content
+2. **Use components for interactivity** - Buttons, navigation, widgets
+3. **Use markdown directives for structure** - Callouts, steps, code blocks
+4. **Keep it semantic** - Use proper HTML semantics for accessibility
+5. **Test in both dev and build** - Some components may behave differently
+
+## Conclusion
+
+MDX enables powerful content creation by combining the simplicity of markdown with the flexibility of React components. You can:
+
+- Write standard markdown for most content
+- Embed components for interactive elements
+- Use JSX expressions for dynamic content
+- Mix markdown directives with components seamlessly
+
+Start creating rich, interactive blog posts with MDX today!
+
+<div style="margin-top: 2rem;">
+  <Button href="/blog" variant="primary">Explore More MDX Posts</Button>
+</div>
+

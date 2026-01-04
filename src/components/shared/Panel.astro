@@ -1,0 +1,13 @@
+---
+interface Props {
+  label: string;
+  value?: string;
+}
+
+const { label, value } = Astro.props;
+const panelValue = value || label.toLowerCase().replace(/\s+/g, '-');
+---
+
+<div data-panel-label={label} data-panel-value={panelValue}>
+  <slot />
+</div>
