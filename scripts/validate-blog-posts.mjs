@@ -19,12 +19,29 @@ const BLOG_DIR = './src/content/blog';
 
 let hasErrors = false;
 
-const files = fs.readdirSync(BLOG_DIR).filter((file) => file.endsWith('.md'));
+// Recursively find all .mdx files
+function findMdxFiles(dir) {
+  const files = [];
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...findMdxFiles(fullPath));
+    } else if (entry.isFile() && entry.name.endsWith('.mdx')) {
+      files.push(fullPath);
+    }
+  }
+  
+  return files;
+}
+
+const files = findMdxFiles(BLOG_DIR);
 
 console.log(`Validating ${files.length} blog posts...\n`);
 
-files.forEach((file) => {
-  const filePath = path.join(BLOG_DIR, file);
+files.forEach((filePath) => {
+  const file = path.relative(BLOG_DIR, filePath);
   const fileContent = fs.readFileSync(filePath, 'utf-8');
   
   try {

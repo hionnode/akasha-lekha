@@ -1,0 +1,281 @@
+---
+interface Props {
+  title?: string;
+  searchable?: boolean;
+  class?: string;
+}
+
+const { title, searchable = false, class: className = '' } = Astro.props;
+const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
+---
+
+<div class={`terminal-output ${className}`} data-output-id={outputId}>
+  <div class="terminal-window-header">
+    <div class="terminal-controls">
+      <div class="terminal-dot"></div>
+      <div class="terminal-dot"></div>
+      <div class="terminal-dot"></div>
+    </div>
+    {title && <span class="terminal-title">{title}</span>}
+    {
+      searchable && (
+        <div class="terminal-search">
+          <input
+            type="text"
+            class="terminal-search-input"
+            placeholder="Search..."
+            data-output-id={outputId}
+          />
+        </div>
+      )
+    }
+    <button class="terminal-copy-button" data-output-id={outputId} aria-label="Copy output">
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+    </button>
+  </div>
+  <div class="terminal-content" data-output-id={outputId}>
+    <slot />
+  </div>
+</div>
+
+<script>
+  function initTerminalOutput() {
+    const outputs = document.querySelectorAll('.terminal-output');
+
+    outputs.forEach((output) => {
+      const outputId = output.getAttribute('data-output-id');
+      if (!outputId) return;
+
+      const content = output.querySelector(`.terminal-content[data-output-id="${outputId}"]`);
+      const searchInput = output.querySelector(
+        `.terminal-search-input[data-output-id="${outputId}"]`
+      );
+      const copyButton = output.querySelector(
+        `.terminal-copy-button[data-output-id="${outputId}"]`
+      );
+
+      // Add line numbers
+      if (content) {
+        const text = content.textContent || '';
+        const pre = content.querySelector('pre');
+
+        if (pre && !pre.querySelector('.line-numbers')) {
+          const lines = text.split('\n');
+          const lineNumbers = document.createElement('div');
+          lineNumbers.className = 'line-numbers';
+          lines.forEach((_, i) => {
+            const lineNum = document.createElement('span');
+            lineNum.className = 'line-number';
+            lineNum.textContent = String(i + 1);
+            lineNumbers.appendChild(lineNum);
+          });
+
+          const wrapper = document.createElement('div');
+          wrapper.className = 'terminal-content-wrapper';
+          wrapper.appendChild(lineNumbers);
+          wrapper.appendChild(pre.cloneNode(true));
+          content.innerHTML = '';
+          content.appendChild(wrapper);
+        }
+      }
+
+      // Search functionality
+      if (searchInput && content) {
+        searchInput.addEventListener('input', (e) => {
+          const query = (e.target as HTMLInputElement).value.toLowerCase();
+
+          if (query) {
+            // Simple search highlighting - could be enhanced
+            content.classList.add('searching');
+          } else {
+            content.classList.remove('searching');
+          }
+        });
+      }
+
+      // Copy functionality
+      if (copyButton && content) {
+        copyButton.addEventListener('click', async () => {
+          const text = content.textContent || '';
+
+          try {
+            await navigator.clipboard.writeText(text);
+            const originalHTML = copyButton.innerHTML;
+            copyButton.innerHTML =
+              '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+            copyButton.classList.add('copied');
+
+            setTimeout(() => {
+              copyButton.innerHTML = originalHTML;
+              copyButton.classList.remove('copied');
+            }, 2000);
+          } catch (err) {
+            console.error('Failed to copy:', err);
+          }
+        });
+      }
+    });
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initTerminalOutput);
+  } else {
+    initTerminalOutput();
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', initTerminalOutput);
+</script>
+
+<style>
+  .terminal-output {
+    margin: 1.5rem 0;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--bg-primary);
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .terminal-window-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+
+  .terminal-controls {
+    display: flex;
+    gap: 0.375rem;
+  }
+
+  .terminal-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--fg-muted);
+  }
+
+  .terminal-dot:nth-child(1) {
+    background: var(--accent-red);
+  }
+
+  .terminal-dot:nth-child(2) {
+    background: var(--accent-yellow);
+  }
+
+  .terminal-dot:nth-child(3) {
+    background: var(--accent-green);
+  }
+
+  .terminal-title {
+    flex: 1;
+    color: var(--fg-secondary);
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+
+  .terminal-search {
+    display: flex;
+    align-items: center;
+  }
+
+  .terminal-search-input {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    color: var(--fg-primary);
+    font-size: 0.75rem;
+    font-family: 'Inconsolata', monospace;
+    width: 150px;
+  }
+
+  .terminal-search-input:focus {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: 2px;
+    border-color: var(--accent-blue);
+  }
+
+  .terminal-copy-button {
+    background: transparent;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.25rem;
+    transition: all 0.2s ease;
+  }
+
+  .terminal-copy-button:hover {
+    background: var(--bg-secondary);
+    color: var(--fg-secondary);
+  }
+
+  .terminal-copy-button.copied {
+    color: var(--accent-green);
+  }
+
+  .terminal-copy-button svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .terminal-content {
+    padding: 1rem;
+    overflow-x: auto;
+    max-height: 500px;
+    overflow-y: auto;
+  }
+
+  .terminal-content-wrapper {
+    display: flex;
+    gap: 1rem;
+  }
+
+  .line-numbers {
+    display: flex;
+    flex-direction: column;
+    color: var(--fg-muted);
+    font-size: 0.875rem;
+    user-select: none;
+    text-align: right;
+    padding-right: 1rem;
+    border-right: 1px solid var(--border);
+  }
+
+  .line-number {
+    line-height: 1.5;
+  }
+
+  .terminal-content :global(pre) {
+    margin: 0;
+    background: transparent;
+    border: none;
+    flex: 1;
+  }
+
+  .terminal-content :global(code) {
+    background: transparent;
+  }
+</style>

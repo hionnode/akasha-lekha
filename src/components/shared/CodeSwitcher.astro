@@ -1,0 +1,113 @@
+---
+// Generic code switcher component - handles click events on pre-generated HTML
+---
+
+<script>
+  function initCodeSwitchers() {
+    // Find all switcher buttons (already in HTML from rehype plugin)
+    const switchers = document.querySelectorAll('.code-switcher');
+
+    switchers.forEach((switcher) => {
+      const buttons = switcher.querySelectorAll('.switch-tab');
+      const container = switcher.nextElementSibling as HTMLElement;
+
+      if (!container || !container.classList.contains('code-switcher-container')) {
+        return;
+      }
+
+      // Find all pre elements with data-switch-value in this container
+      const codeBlocks = container.querySelectorAll<HTMLElement>('pre[data-switch-value]');
+
+      buttons.forEach((button) => {
+        button.addEventListener('click', () => {
+          const switchValue = button.getAttribute('data-switch-value');
+          if (!switchValue) return;
+
+          // Update button states
+          buttons.forEach((btn) => {
+            if (btn === button) {
+              btn.classList.add('active');
+              btn.setAttribute('aria-selected', 'true');
+            } else {
+              btn.classList.remove('active');
+              btn.setAttribute('aria-selected', 'false');
+            }
+          });
+
+          // Show/hide code blocks
+          codeBlocks.forEach((block) => {
+            const blockValue = block.getAttribute('data-switch-value');
+            if (blockValue === switchValue) {
+              block.classList.remove('hidden');
+              block.setAttribute('aria-hidden', 'false');
+            } else {
+              block.classList.add('hidden');
+              block.setAttribute('aria-hidden', 'true');
+            }
+          });
+        });
+      });
+    });
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initCodeSwitchers);
+  } else {
+    initCodeSwitchers();
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', initCodeSwitchers);
+</script>
+
+<style>
+  .code-switcher {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    padding: 0.5rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .switch-tab {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 0.375rem;
+    color: var(--fg-muted);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .switch-tab:hover {
+    background: var(--bg-tertiary);
+    color: var(--fg-secondary);
+    border-color: var(--border);
+  }
+
+  .switch-tab.active {
+    background: var(--accent-blue);
+    color: var(--bg-primary);
+    border-color: var(--accent-blue);
+    font-weight: 600;
+  }
+
+  /* Hide elements when not active */
+  .code-switcher-container pre.hidden {
+    display: none !important;
+  }
+
+  .code-switcher-container pre {
+    transition: opacity 0.2s ease;
+  }
+</style>

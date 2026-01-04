@@ -1,0 +1,122 @@
+---
+interface Props {
+  name: string;
+  status: 'Running' | 'Pending' | 'Error' | 'Failed' | 'Succeeded' | 'CrashLoopBackOff' | 'Unknown';
+  ready?: string;
+  namespace?: string;
+  kind?: string;
+  class?: string;
+}
+
+const { name, status, ready, namespace, kind, class: className = '' } = Astro.props;
+
+const statusColors: Record<string, string> = {
+  Running: 'var(--accent-green)',
+  Succeeded: 'var(--accent-green)',
+  Pending: 'var(--accent-yellow)',
+  Error: 'var(--accent-red)',
+  Failed: 'var(--accent-red)',
+  CrashLoopBackOff: 'var(--accent-red)',
+  Unknown: 'var(--fg-muted)',
+};
+
+const statusIcons: Record<string, string> = {
+  Running: '●',
+  Succeeded: '✓',
+  Pending: '○',
+  Error: '✗',
+  Failed: '✗',
+  CrashLoopBackOff: '⚠',
+  Unknown: '?',
+};
+---
+
+<div class={`resource-status ${className}`}>
+  <div class="resource-status-main">
+    <span
+      class="resource-status-badge"
+      style={`background-color: ${statusColors[status] || statusColors.Unknown};`}
+      title={status}
+    >
+      <span class="resource-status-icon">{statusIcons[status] || '?'}</span>
+      {status}
+    </span>
+    <div class="resource-info">
+      <span class="resource-name">{name}</span>
+      {kind && <span class="resource-kind">{kind}</span>}
+      {namespace && <span class="resource-namespace">{namespace}</span>}
+    </div>
+    {ready && <span class="resource-ready">{ready}</span>}
+  </div>
+</div>
+
+<style>
+  .resource-status {
+    display: inline-block;
+    margin: 0.5rem 0.5rem 0.5rem 0;
+  }
+
+  .resource-status-main {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .resource-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    color: var(--bg-primary);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+  }
+
+  .resource-status-icon {
+    font-size: 0.625rem;
+  }
+
+  .resource-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+  }
+
+  .resource-name {
+    color: var(--fg-primary);
+    font-weight: 500;
+  }
+
+  .resource-kind {
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+  }
+
+  .resource-namespace {
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    padding: 0.125rem 0.375rem;
+    background: var(--bg-tertiary);
+    border-radius: 0.25rem;
+  }
+
+  .resource-ready {
+    color: var(--fg-secondary);
+    font-size: 0.75rem;
+    padding: 0.125rem 0.5rem;
+    background: var(--bg-tertiary);
+    border-radius: 0.25rem;
+    font-weight: 500;
+  }
+</style>

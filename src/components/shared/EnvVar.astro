@@ -1,0 +1,201 @@
+---
+interface Props {
+  name: string;
+  required?: boolean;
+  description?: string;
+  default?: string;
+  type?: 'string' | 'number' | 'boolean';
+}
+
+const { name, required = false, description, default: defaultValue, type = 'string' } = Astro.props;
+---
+
+<div class="env-var-item" data-var-name={name}>
+  <div class="env-var-header">
+    <code class="env-var-name">{name}</code>
+    {required && <span class="env-var-required">Required</span>}
+    {!required && <span class="env-var-optional">Optional</span>}
+    {type && <span class="env-var-type">{type}</span>}
+    <button class="env-var-copy" data-var-name={name} aria-label="Copy variable name">
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+    </button>
+  </div>
+  {description && <div class="env-var-description">{description}</div>}
+  {
+    defaultValue !== undefined && (
+      <div class="env-var-default">
+        <span class="env-var-default-label">Default:</span>
+        <code class="env-var-default-value">{defaultValue}</code>
+      </div>
+    )
+  }
+</div>
+
+<script>
+  function initEnvVars() {
+    const buttons = document.querySelectorAll('.env-var-copy');
+
+    buttons.forEach((button) => {
+      button.addEventListener('click', async () => {
+        const varName = (button as HTMLElement).getAttribute('data-var-name');
+        if (!varName) return;
+
+        try {
+          await navigator.clipboard.writeText(varName);
+          const originalHTML = button.innerHTML;
+          button.innerHTML =
+            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+          button.classList.add('copied');
+
+          setTimeout(() => {
+            button.innerHTML = originalHTML;
+            button.classList.remove('copied');
+          }, 2000);
+        } catch (err) {
+          console.error('Failed to copy:', err);
+        }
+      });
+    });
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initEnvVars);
+  } else {
+    initEnvVars();
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', initEnvVars);
+</script>
+
+<style>
+  .env-var-item {
+    margin: 1rem 0;
+    padding: 1rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+  }
+
+  .env-var-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .env-var-name {
+    color: var(--accent-cyan);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    font-family: 'Inconsolata', monospace;
+    background: transparent;
+    padding: 0;
+    border: none;
+  }
+
+  .env-var-required {
+    padding: 0.125rem 0.5rem;
+    background: var(--accent-red);
+    color: var(--bg-primary);
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .env-var-optional {
+    padding: 0.125rem 0.5rem;
+    background: var(--bg-tertiary);
+    color: var(--fg-muted);
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .env-var-type {
+    padding: 0.125rem 0.5rem;
+    background: var(--bg-tertiary);
+    color: var(--accent-purple);
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .env-var-copy {
+    background: transparent;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.25rem;
+    transition: all 0.2s ease;
+    margin-left: auto;
+  }
+
+  .env-var-copy:hover {
+    background: var(--bg-tertiary);
+    color: var(--fg-secondary);
+  }
+
+  .env-var-copy.copied {
+    color: var(--accent-green);
+  }
+
+  .env-var-copy svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .env-var-description {
+    color: var(--fg-secondary);
+    font-size: 0.875rem;
+    margin-bottom: 0.5rem;
+    line-height: 1.5;
+  }
+
+  .env-var-default {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .env-var-default-label {
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .env-var-default-value {
+    color: var(--accent-green);
+    font-size: 0.875rem;
+    font-family: 'Inconsolata', monospace;
+    background: var(--bg-tertiary);
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+  }
+</style>

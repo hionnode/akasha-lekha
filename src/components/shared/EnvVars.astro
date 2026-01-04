@@ -1,0 +1,17 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className = '' } = Astro.props;
+---
+
+<div class={`env-vars ${className}`}>
+  <slot />
+</div>
+
+<style>
+  .env-vars {
+    margin: 1.5rem 0;
+  }
+</style>

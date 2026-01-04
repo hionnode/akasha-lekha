@@ -1,0 +1,186 @@
+---
+title: "MDX Mastery: Getting Started"
+date: "2025-01-16"
+excerpt: "Learn the basics of using MDX in Astro blog posts, from installation to your first component"
+tags: ["mdx", "astro", "tutorial"]
+featured: false
+draft: false
+series: "MDX Mastery"
+seriesPart: 1
+---
+
+import Button from '../../../components/shared/Button.astro';
+import Badge from '../../../components/shared/Badge.astro';
+
+# {frontmatter.title}
+
+**Part {frontmatter.seriesPart} of the MDX Mastery Series**
+
+Welcome to the first part of our MDX Mastery series! In this post, we'll cover the fundamentals of MDX and how to get started using it in your Astro blog.
+
+:::info
+This is part 1 of a 4-part series. Make sure to check out the other parts for advanced topics and specialized components!
+:::
+
+## What is MDX?
+
+MDX stands for **Markdown + JSX**. It's a format that allows you to write JSX (React components) directly in your markdown files. This gives you the best of both worlds:
+
+- **Markdown simplicity** - Write content quickly with familiar markdown syntax
+- **Component power** - Embed interactive React/Astro components when needed
+
+## Why Use MDX?
+
+MDX enables you to:
+
+1. **Create interactive content** - Embed buttons, forms, and other interactive elements
+2. **Reuse components** - Use your existing Astro components in blog posts
+3. **Dynamic content** - Use JSX expressions for calculations and conditional rendering
+4. **Better organization** - Keep content and components together
+
+## Installation
+
+MDX support in Astro is provided by the `@astrojs/mdx` integration. If you're following this series, it should already be installed, but here's how to add it:
+
+```bash
+pnpm add @astrojs/mdx
+```
+
+## Basic Setup
+
+Once installed, add MDX to your `astro.config.mjs`:
+
+```javascript title="astro.config.mjs"
+import { defineConfig } from 'astro/config';
+import mdx from '@astrojs/mdx';
+
+export default defineConfig({
+  integrations: [mdx()],
+  // ... rest of your config
+});
+```
+
+:::tip
+The MDX integration automatically inherits your markdown configuration, including all your remark and rehype plugins!
+:::
+
+## Your First MDX File
+
+Create a new file with the `.mdx` extension:
+
+```
+src/content/blog/2025-01-16-my-first-mdx.mdx
+```
+
+### Basic Structure
+
+```mdx
+---
+title: "My First MDX Post"
+date: "2025-01-16"
+excerpt: "Learning MDX basics"
+tags: ["mdx", "tutorial"]
+featured: false
+draft: false
+---
+
+# My First MDX Post
+
+This is standard markdown that works exactly as expected!
+```
+
+### Adding Your First Component
+
+To use components, import them at the top (after frontmatter):
+
+```mdx
+---
+title: "My First MDX Post"
+date: "2025-01-16"
+excerpt: "Learning MDX basics"
+tags: ["mdx", "tutorial"]
+featured: false
+draft: false
+---
+
+import Button from '../../components/shared/Button.astro';
+
+# My First MDX Post
+
+Here's a button component:
+
+<Button href="/blog" variant="primary">Back to Blog</Button>
+```
+
+## JSX Expressions
+
+MDX supports JSX expressions for dynamic content:
+
+```mdx
+---
+title: "Dynamic Post"
+date: "2025-01-16"
+---
+
+# {frontmatter.title}
+
+Published on {new Date(frontmatter.date).toLocaleDateString()}
+```
+
+**Common JSX patterns:**
+
+- Access frontmatter: `{frontmatter.title}`
+- Format dates: `{new Date(frontmatter.date).toLocaleDateString()}`
+- Conditional rendering: `{condition && <Component />}`
+- Calculations: `{Math.ceil(wordCount / 200)}`
+
+## Available Components
+
+Your Astro project likely has several components you can use:
+
+- `<Button>` - Navigation buttons
+- `<Badge>` - Status indicators
+- `<TagPill>` - Tag displays
+- Any component from `src/components/`
+
+:::note
+Check your project's component directory to see what's available!
+:::
+
+## Combining Markdown and Components
+
+One of MDX's strengths is mixing markdown with components:
+
+```mdx
+## Introduction
+
+This is standard markdown content.
+
+<Button href="/blog">Explore More</Button>
+
+:::tip
+You can use markdown directives too!
+:::
+```
+
+## Next Steps
+
+Now that you understand the basics, you're ready to:
+
+1. Create your first MDX blog post
+2. Import and use components
+3. Use JSX expressions for dynamic content
+
+<div style="margin-top: 2rem;">
+  <Button href="/blog/mdx-mastery-series/02-advanced-components" variant="primary">
+    Continue to Part 2: Advanced Components →
+  </Button>
+</div>
+
+## Series Navigation
+
+- **Part 1: Getting Started** (you are here)
+- [Part 2: Advanced Components](/blog/mdx-mastery-series/02-advanced-components)
+- [Part 3: Best Practices](/blog/mdx-mastery-series/03-best-practices)
+- [Part 4: Code-Focused Components](/blog/mdx-mastery-series/04-code-focused-components)
+

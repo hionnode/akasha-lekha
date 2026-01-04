@@ -1,0 +1,100 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className = '' } = Astro.props;
+---
+
+<div class={`comparison-table-wrapper ${className}`}>
+  <div class="comparison-table" role="table">
+    <slot />
+  </div>
+</div>
+
+<style>
+  .comparison-table-wrapper {
+    margin: 1.5rem 0;
+    overflow-x: auto;
+  }
+
+  .comparison-table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--bg-secondary);
+    min-width: 100%;
+    display: block;
+  }
+
+  .comparison-table :global(.comparison-header) {
+    display: grid;
+    grid-template-columns: 1fr repeat(var(--column-count, 3), 1fr);
+    background: var(--bg-tertiary);
+    border-bottom: 2px solid var(--border);
+  }
+
+  .comparison-table :global(.comparison-header > *) {
+    padding: 0.75rem 1rem;
+    font-weight: 600;
+    text-align: center;
+    color: var(--fg-primary);
+    border-right: 1px solid var(--border);
+  }
+
+  .comparison-table :global(.comparison-header > *:first-child) {
+    text-align: left;
+  }
+
+  .comparison-table :global(.comparison-header > *:last-child) {
+    border-right: none;
+  }
+
+  .comparison-table :global(.comparison-row) {
+    display: grid;
+    grid-template-columns: 1fr repeat(var(--column-count, 3), 1fr);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .comparison-table :global(.comparison-row:last-child) {
+    border-bottom: none;
+  }
+
+  .comparison-table :global(.comparison-row:hover) {
+    background: var(--bg-tertiary);
+  }
+
+  .comparison-table :global(.comparison-row > *) {
+    padding: 0.75rem 1rem;
+    border-right: 1px solid var(--border);
+    color: var(--fg-secondary);
+  }
+
+  .comparison-table :global(.comparison-row > *:first-child) {
+    font-weight: 500;
+    color: var(--fg-primary);
+  }
+
+  .comparison-table :global(.comparison-row > *:last-child) {
+    border-right: none;
+  }
+
+  .comparison-table :global(.comparison-row > *.best) {
+    background: rgba(122, 162, 247, 0.1);
+    color: var(--accent-blue);
+    font-weight: 600;
+  }
+
+  @media (max-width: 768px) {
+    .comparison-table-wrapper {
+      font-size: 0.875rem;
+    }
+
+    .comparison-table :global(.comparison-header > *),
+    .comparison-table :global(.comparison-row > *) {
+      padding: 0.5rem 0.75rem;
+    }
+  }
+</style>

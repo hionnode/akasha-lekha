@@ -1,0 +1,17 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className = '' } = Astro.props;
+---
+
+<div class={`command-reference ${className}`}>
+  <slot />
+</div>
+
+<style>
+  .command-reference {
+    margin: 1.5rem 0;
+  }
+</style>

@@ -14,6 +14,7 @@ import BlogSidebar from '../../components/layout/BlogSidebar.astro';
 import MobileSidebarDrawers from '../../components/layout/MobileSidebarDrawers.astro';
 import VimShortcuts from '../../components/shared/VimShortcuts.astro';
 import CodeBlockEnhancer from '../../components/shared/CodeBlockEnhancer.astro';
+import CodeSwitcher from '../../components/shared/CodeSwitcher.astro';
 import PostMetadata from '../../components/blog/PostMetadata.astro';
 import { calculateReadingTime } from '../../utils/readingTime';
 import { getRelatedPostsByTags } from '../../utils/tagNavigation';
@@ -34,6 +35,27 @@ interface Props {
 }
 
 const { post, allPosts } = Astro.props;
+
+// #region agent log
+fetch('http://127.0.0.1:7243/ingest/4d41dbb3-242e-461c-af27-61b3d29dc367', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    location: 'blog/[...slug].astro:37',
+    message: 'Post loaded',
+    data: {
+      slug: post.slug,
+      title: post.data.title,
+      bodyLength: post.body?.length || 0,
+      hasSeries: !!post.data.series,
+    },
+    timestamp: Date.now(),
+    sessionId: 'debug-session',
+    runId: 'run1',
+    hypothesisId: 'A',
+  }),
+}).catch(() => {});
+// #endregion
 
 // Auto-calculate series total if this is a series post
 let seriesTotal = post.data.seriesTotal;
@@ -71,7 +93,64 @@ if (relatedPosts.length < 4) {
   ];
 }
 
-const { Content } = await post.render();
+// #region agent log
+fetch('http://127.0.0.1:7243/ingest/4d41dbb3-242e-461c-af27-61b3d29dc367', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    location: 'blog/[...slug].astro:75',
+    message: 'Before post.render()',
+    data: { slug: post.slug },
+    timestamp: Date.now(),
+    sessionId: 'debug-session',
+    runId: 'run1',
+    hypothesisId: 'A',
+  }),
+}).catch(() => {});
+// #endregion
+
+let renderResult;
+try {
+  renderResult = await post.render();
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/4d41dbb3-242e-461c-af27-61b3d29dc367', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      location: 'blog/[...slug].astro:82',
+      message: 'After post.render() - success',
+      data: {
+        slug: post.slug,
+        hasContent: !!renderResult.Content,
+        contentType: typeof renderResult.Content,
+      },
+      timestamp: Date.now(),
+      sessionId: 'debug-session',
+      runId: 'run1',
+      hypothesisId: 'A',
+    }),
+  }).catch(() => {});
+  // #endregion
+} catch (error) {
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/4d41dbb3-242e-461c-af27-61b3d29dc367', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      location: 'blog/[...slug].astro:88',
+      message: 'post.render() error',
+      data: { slug: post.slug, error: error instanceof Error ? error.message : String(error) },
+      timestamp: Date.now(),
+      sessionId: 'debug-session',
+      runId: 'run1',
+      hypothesisId: 'A',
+    }),
+  }).catch(() => {});
+  // #endregion
+  throw error;
+}
+
+const { Content } = renderResult;
 const readingTime = calculateReadingTime(post.body);
 const formattedDate = new Date(post.data.date).toLocaleDateString('en-US', {
   year: 'numeric',
@@ -176,7 +255,7 @@ const isSeries = post.data.series && post.data.seriesPart && seriesTotal;
               </div>
             </header>
 
-            <div class="prose prose-invert max-w-none">
+            <div class="prose prose-invert max-w-none" id="content-container">
               <Content />
             </div>
 
@@ -221,6 +300,7 @@ const isSeries = post.data.series && post.data.seriesPart && seriesTotal;
     <VimShortcuts />
     <MobileSidebarDrawers />
     <CodeBlockEnhancer />
+    <CodeSwitcher />
   </div>
 </Layout>
 
@@ -272,4 +352,61 @@ const isSeries = post.data.series && post.data.seriesPart && seriesTotal;
     updateReadingProgress();
     window.addEventListener('scroll', onScroll, { passive: true });
   });
+
+  // #region agent log - Check rendered content
+  function checkRenderedContent() {
+    const container = document.getElementById('content-container');
+    if (!container) {
+      fetch('http://127.0.0.1:7243/ingest/4d41dbb3-242e-461c-af27-61b3d29dc367', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          location: 'blog/[...slug].astro:client',
+          message: 'Content container not found',
+          data: {},
+          timestamp: Date.now(),
+          sessionId: 'debug-session',
+          runId: 'run1',
+          hypothesisId: 'E',
+        }),
+      }).catch(() => {});
+      return;
+    }
+
+    const html = container.innerHTML;
+    const textContent = container.textContent || '';
+    const codeSwitchers = container.querySelectorAll('.code-switcher');
+    const codeSwitcherContainers = container.querySelectorAll('.code-switcher-container');
+    const preElements = container.querySelectorAll('pre[data-switch-value]');
+
+    fetch('http://127.0.0.1:7243/ingest/4d41dbb3-242e-461c-af27-61b3d29dc367', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        location: 'blog/[...slug].astro:client',
+        message: 'Content rendered',
+        data: {
+          htmlLength: html.length,
+          textLength: textContent.length,
+          codeSwitcherCount: codeSwitchers.length,
+          containerCount: codeSwitcherContainers.length,
+          preWithSwitchValue: preElements.length,
+          hasContent: html.length > 0,
+        },
+        timestamp: Date.now(),
+        sessionId: 'debug-session',
+        runId: 'run1',
+        hypothesisId: 'E',
+      }),
+    }).catch(() => {});
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', checkRenderedContent);
+  } else {
+    checkRenderedContent();
+  }
+
+  document.addEventListener('astro:page-load', checkRenderedContent);
+  // #endregion
 </script>
