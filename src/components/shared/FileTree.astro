@@ -12,6 +12,7 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
   class={`file-tree ${className}`}
   data-collapsible={collapsible}
   data-default-expanded={defaultExpanded}
+  style="white-space: pre;"
 >
   <slot />
 </div>
@@ -47,12 +48,28 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
     const root: TreeNode[] = [];
     const stack: Array<{ node: TreeNode; indent: number }> = [];
 
+    // Detect indentation size (2 or 4 spaces)
+    let indentSize = 2;
+    for (const line of lines) {
+      const leadingSpaces = line.length - line.trimStart().length;
+      if (leadingSpaces > 0 && leadingSpaces % 4 === 0) {
+        indentSize = 4;
+        break;
+      } else if (leadingSpaces > 0 && leadingSpaces % 2 === 0) {
+        indentSize = 2;
+        break;
+      }
+    }
+
     lines.forEach((line) => {
       const trimmed = line.trim();
       if (!trimmed) return;
 
-      // Calculate indent level (assuming 2 spaces per level)
-      const indent = line.length - line.trimStart().length;
+      // Calculate indent level based on detected indent size
+      const leadingSpaces = line.length - line.trimStart().length;
+      const indent = leadingSpaces;
+      const level = Math.floor(leadingSpaces / indentSize);
+
       const isDirectory =
         trimmed.endsWith('/') || (!trimmed.includes('.') && !trimmed.match(/\.\w+$/));
       const name = trimmed.replace(/\/$/, '');
@@ -61,7 +78,7 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
         name,
         type: isDirectory ? ('directory' as const) : ('file' as const),
         path: name,
-        level: 0,
+        level: level,
         children: isDirectory ? ([] as TreeNode[]) : undefined,
       };
 
@@ -71,11 +88,13 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
       }
 
       if (stack.length === 0) {
+        // Root level node
         root.push(node);
         if (isDirectory) {
           stack.push({ node, indent });
         }
       } else {
+        // Child node
         const parent = stack[stack.length - 1].node;
         if (parent.children) {
           node.level = parent.level + 1;
@@ -88,6 +107,7 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
       }
     });
 
+    console.log('[FileTree] Parsed tree structure:', JSON.stringify(root, null, 2));
     return root;
   }
 
@@ -188,8 +208,13 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
       // Parse text content if it's plain text
       const textContent = tree.textContent?.trim() || '';
       if (textContent && !tree.querySelector('.tree-node')) {
+        console.log('[FileTree] Parsing text content:', textContent);
         const nodes = parseTreeText(textContent);
+        console.log('[FileTree] Parsed nodes:', nodes);
+        // Clear the original text content to prevent double rendering
+        tree.textContent = '';
         nodes.forEach((node: TreeNode) => {
+          console.log('[FileTree] Rendering node:', node);
           renderTree(node, tree as HTMLElement, collapsible, defaultExpanded);
         });
       }
@@ -314,7 +339,7 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
   document.addEventListener('astro:page-load', initFileTree);
 </script>
 
-<style>
+<style is:global>
   .file-tree {
     font-family: 'Inconsolata', monospace;
     font-size: 0.875rem;
@@ -327,7 +352,7 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
   }
 
   .tree-node {
-    display: flex;
+    display: flex !important;
     align-items: center;
     gap: 0.5rem;
     padding: 0.375rem 0.5rem;

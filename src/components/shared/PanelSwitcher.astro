@@ -146,23 +146,24 @@ const { defaultActive, class: className = '' } = Astro.props;
     display: flex;
     gap: 0.5rem;
     margin-bottom: 1rem;
-    padding: 0.5rem;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border);
+    border-radius: 0.75rem;
     flex-wrap: wrap;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   }
 
   .panel-switcher-tab {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.5rem 1rem;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 0.375rem;
-    color: var(--fg-muted);
-    font-size: 0.875rem;
+    padding: 0.625rem 1.25rem;
+    background: var(--bg-secondary);
+    border: 2px solid var(--border);
+    border-radius: 0.5rem;
+    color: var(--fg-secondary);
+    font-size: 0.9375rem;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.2s ease;
@@ -183,10 +184,11 @@ const { defaultActive, class: className = '' } = Astro.props;
 
   .panel-switcher-tab.active {
     background: var(--accent-blue);
-    color: var(--bg-primary);
+    color: #ffffff;
     border-color: var(--accent-blue);
-    font-weight: 600;
-    box-shadow: 0 2px 4px rgba(122, 162, 247, 0.2);
+    font-weight: 700;
+    box-shadow: 0 4px 12px rgba(122, 162, 247, 0.3);
+    transform: translateY(-1px);
   }
 
   .panel-switcher-content {
