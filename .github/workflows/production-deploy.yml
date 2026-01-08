@@ -102,7 +102,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --message "Production deploy - ${{ github.sha }}"
+          command: deploy
 
       # Create deployment summary
       - name: Create Summary
