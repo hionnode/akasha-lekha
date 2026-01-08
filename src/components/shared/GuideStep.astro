@@ -1,0 +1,377 @@
+---
+interface Props {
+  title: string;
+  number?: number;
+  variant?: 'default' | 'compact';
+  defaultExpanded?: boolean;
+}
+
+const { title, number, variant = 'default', defaultExpanded = false } = Astro.props;
+const hasNumber = number !== undefined;
+
+// Generate stable ID from title for localStorage persistence
+function generateStableId(title: string): string {
+  // Simple hash function to create a stable ID from the title
+  let hash = 0;
+  for (let i = 0; i < title.length; i++) {
+    const char = title.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return `guide-step-${Math.abs(hash).toString(36)}`;
+}
+
+const stepId = generateStableId(title);
+---
+
+<div class={`guide-step ${variant}`} data-has-number={hasNumber} data-step-id={stepId}>
+  <button class="guide-step-header" data-step-id={stepId} aria-expanded={defaultExpanded}>
+    <input
+      type="checkbox"
+      class="guide-step-checkbox"
+      aria-label={`Mark "${title}" as complete`}
+      data-step-id={stepId}
+    />
+    {hasNumber && <div class="guide-step-number">{number}</div>}
+    <h4 class="guide-step-title">{title}</h4>
+    <svg
+      class="guide-step-chevron"
+      xmlns="http://www.w3.org/2000/svg"
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
+  </button>
+  <div
+    class="guide-step-content"
+    data-step-id={stepId}
+    style={defaultExpanded ? '' : 'display: none;'}
+  >
+    <slot />
+  </div>
+</div>
+
+<script>
+  function initGuideSteps() {
+    const steps = document.querySelectorAll('.guide-step');
+
+    steps.forEach((step) => {
+      const stepId = step.getAttribute('data-step-id');
+      if (!stepId) return;
+
+      const header = step.querySelector(
+        `.guide-step-header[data-step-id="${stepId}"]`
+      ) as HTMLButtonElement;
+      const content = step.querySelector(
+        `.guide-step-content[data-step-id="${stepId}"]`
+      ) as HTMLElement;
+      const checkbox = step.querySelector(
+        `.guide-step-checkbox[data-step-id="${stepId}"]`
+      ) as HTMLInputElement;
+
+      if (!header || !content || !checkbox) return;
+
+      // Load saved state from localStorage
+      const savedState = localStorage.getItem(`guide-step-${stepId}`);
+      if (savedState) {
+        const state = JSON.parse(savedState);
+        checkbox.checked = state.completed || false;
+        if (state.expanded) {
+          content.style.display = 'block';
+          header.setAttribute('aria-expanded', 'true');
+        }
+      }
+
+      // Toggle expand/collapse on header click
+      header.addEventListener('click', (e) => {
+        // Don't toggle if clicking the checkbox
+        if (e.target === checkbox) return;
+
+        const isExpanded = header.getAttribute('aria-expanded') === 'true';
+
+        if (isExpanded) {
+          content.style.display = 'none';
+          header.setAttribute('aria-expanded', 'false');
+        } else {
+          content.style.display = 'block';
+          header.setAttribute('aria-expanded', 'true');
+        }
+
+        // Save expanded state
+        const currentState = JSON.parse(localStorage.getItem(`guide-step-${stepId}`) || '{}');
+        localStorage.setItem(
+          `guide-step-${stepId}`,
+          JSON.stringify({
+            ...currentState,
+            expanded: !isExpanded,
+          })
+        );
+      });
+
+      // Handle checkbox state changes
+      checkbox.addEventListener('change', (e) => {
+        e.stopPropagation(); // Prevent header click event
+
+        const currentState = JSON.parse(localStorage.getItem(`guide-step-${stepId}`) || '{}');
+        localStorage.setItem(
+          `guide-step-${stepId}`,
+          JSON.stringify({
+            ...currentState,
+            completed: checkbox.checked,
+          })
+        );
+      });
+    });
+  }
+
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initGuideSteps);
+  } else {
+    initGuideSteps();
+  }
+
+  // Re-initialize on navigation (Astro View Transitions)
+  document.addEventListener('astro:page-load', initGuideSteps);
+</script>
+
+<style>
+  .guide-step {
+    margin: 1.5rem 0;
+    border-left: 3px solid var(--accent-blue);
+    background: var(--bg-secondary);
+    border-radius: 0.375rem;
+    overflow: hidden;
+    transition: border-color 0.2s ease;
+  }
+
+  .guide-step:hover {
+    border-left-color: var(--accent-blue-bright, var(--accent-blue));
+  }
+
+  .guide-step.compact {
+    margin: 1rem 0;
+  }
+
+  .guide-step-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.875rem 1.25rem;
+    background: linear-gradient(
+      to right,
+      rgba(var(--accent-blue-rgb, 59, 130, 246), 0.05),
+      transparent
+    );
+    border: none;
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+  }
+
+  .guide-step-header:hover {
+    background: linear-gradient(
+      to right,
+      rgba(var(--accent-blue-rgb, 59, 130, 246), 0.08),
+      transparent
+    );
+  }
+
+  .guide-step-checkbox {
+    width: 1.25rem;
+    height: 1.25rem;
+    cursor: pointer;
+    accent-color: var(--accent-blue);
+    flex-shrink: 0;
+  }
+
+  .guide-step-number {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.75rem;
+    height: 1.75rem;
+    background: var(--accent-blue);
+    color: var(--bg-primary);
+    border-radius: 0.25rem;
+    font-weight: 700;
+    font-size: 0.875rem;
+    flex-shrink: 0;
+  }
+
+  .guide-step-title {
+    margin: 0;
+    color: var(--fg-primary);
+    font-weight: 600;
+    font-size: 0.9375rem;
+    line-height: 1.4;
+    flex: 1;
+  }
+
+  .guide-step-chevron {
+    flex-shrink: 0;
+    color: var(--fg-muted);
+    transition: transform 0.2s ease;
+  }
+
+  .guide-step-header[aria-expanded='true'] .guide-step-chevron {
+    transform: rotate(180deg);
+  }
+
+  .guide-step-content {
+    padding: 1.25rem;
+    animation: slideDown 0.2s ease-out;
+  }
+
+  @keyframes slideDown {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Style ordered lists inside GuideStep */
+  .guide-step-content :global(ol) {
+    margin: 0;
+    padding-left: 1.5rem;
+    list-style: none;
+    counter-reset: guide-counter;
+  }
+
+  .guide-step-content :global(ol > li) {
+    counter-increment: guide-counter;
+    position: relative;
+    margin-bottom: 0.875rem;
+    padding-left: 0.5rem;
+    color: var(--fg-secondary);
+    line-height: 1.6;
+  }
+
+  .guide-step-content :global(ol > li:last-child) {
+    margin-bottom: 0;
+  }
+
+  .guide-step-content :global(ol > li::before) {
+    content: counter(guide-counter) '.';
+    position: absolute;
+    left: -1.5rem;
+    color: var(--accent-blue);
+    font-weight: 600;
+    font-size: 0.875rem;
+  }
+
+  /* Style nested lists */
+  .guide-step-content :global(ol ol) {
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+    padding-left: 1.75rem;
+  }
+
+  .guide-step-content :global(ol ol > li) {
+    margin-bottom: 0.5rem;
+    font-size: 0.9em;
+  }
+
+  /* Style unordered lists */
+  .guide-step-content :global(ul) {
+    margin: 0;
+    padding-left: 1.5rem;
+    list-style: none;
+  }
+
+  .guide-step-content :global(ul > li) {
+    position: relative;
+    margin-bottom: 0.875rem;
+    padding-left: 0.5rem;
+    color: var(--fg-secondary);
+    line-height: 1.6;
+  }
+
+  .guide-step-content :global(ul > li:last-child) {
+    margin-bottom: 0;
+  }
+
+  .guide-step-content :global(ul > li::before) {
+    content: '•';
+    position: absolute;
+    left: -1rem;
+    color: var(--accent-blue);
+    font-weight: 700;
+  }
+
+  /* Style code within lists */
+  .guide-step-content :global(li code) {
+    background: var(--bg-tertiary);
+    color: var(--accent-green);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.875em;
+    font-family: 'Inconsolata', monospace;
+  }
+
+  /* Style strong/bold text */
+  .guide-step-content :global(strong) {
+    color: var(--fg-primary);
+    font-weight: 600;
+  }
+
+  /* Style paragraphs (for concluding text) */
+  .guide-step-content :global(p) {
+    margin: 0;
+    color: var(--fg-secondary);
+    line-height: 1.6;
+  }
+
+  .guide-step-content :global(p + p) {
+    margin-top: 0.75rem;
+  }
+
+  /* Style concluding paragraphs differently */
+  .guide-step-content :global(ol + p),
+  .guide-step-content :global(ul + p) {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-style: italic;
+    color: var(--fg-muted);
+    font-size: 0.9375rem;
+  }
+
+  /* Responsive adjustments */
+  @media (max-width: 640px) {
+    .guide-step-header {
+      padding: 0.75rem 1rem;
+    }
+
+    .guide-step-content {
+      padding: 1rem;
+    }
+
+    .guide-step-number {
+      min-width: 1.5rem;
+      height: 1.5rem;
+      font-size: 0.8125rem;
+    }
+
+    .guide-step-title {
+      font-size: 0.875rem;
+    }
+
+    .guide-step-checkbox {
+      width: 1.125rem;
+      height: 1.125rem;
+    }
+  }
+</style>

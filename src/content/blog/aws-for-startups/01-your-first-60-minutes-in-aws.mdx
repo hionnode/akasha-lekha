@@ -7,7 +7,7 @@ series: "AWS From Zero to Production"
 seriesPart: 1
 ---
 
-import Step from '../../../components/shared/Step.astro';
+import GuideStep from '../../../components/shared/GuideStep.astro';
 import Command from '../../../components/shared/Command.astro';
 import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
 import EnvVars from '../../../components/shared/EnvVars.astro';
@@ -95,13 +95,13 @@ There is no way to limit root's power. That's by design—it's the "break glass"
 
 Root access keys are long-lived credentials that grant unlimited API access. If they exist, delete them immediately.
 
-<Step number={1} description="Delete Root Access Keys">
+<GuideStep title="Delete Root Access Keys">
   1. Sign in to the [AWS Console](https://console.aws.amazon.com/) as root
   2. Click your account name in the top-right corner
   3. Select **Security credentials**
   4. In the **Access keys** section, check if any keys exist
   5. If keys exist, click **Actions** → **Delete**
-</Step>
+</GuideStep>
 
 <Alert type="caution">
 
@@ -166,7 +166,7 @@ An IAM admin user has the same practical capabilities for daily work, but with k
 
 Create a group first, then add users to it. This pattern scales when you add team members later.
 
-<Step number={1} description="Create Admin Group">
+<GuideStep title="Create Admin Group">
   1. Sign in to the [IAM console](https://console.aws.amazon.com/iam/)
   2. In the left navigation, click **User groups**
   3. Click **Create group**
@@ -174,11 +174,9 @@ Create a group first, then add users to it. This pattern scales when you add tea
   5. In the **Attach permissions policies** section, search for `AdministratorAccess`
   6. Select the checkbox next to **AdministratorAccess**
   7. Click **Create group**
-</Step>
+</GuideStep>
 
-### Create Your Admin User
-
-<Step number={2} description="Create IAM Admin User">
+<GuideStep title="Create Your Admin User">
   1. In the IAM console, click **Users** in the left navigation
   2. Click **Create user**
   3. Enter a username (e.g., `yourname-admin`—use your name, not a generic "admin")
@@ -189,40 +187,32 @@ Create a group first, then add users to it. This pattern scales when you add tea
   8. Click **Next**
   9. Select the **Administrators** group you created
   10. Click **Next**, then **Create user**
-</Step>
+</GuideStep>
 
-### Enable MFA on Your Admin User
-
-<Step number={3} description="Enable MFA">
+<GuideStep title="Enable MFA on Your Admin User">
   1. In the IAM console, click **Users**
   2. Click your new admin username
   3. Select the **Security credentials** tab
   4. In the **Multi-factor authentication (MFA)** section, click **Assign MFA device**
   5. Follow the prompts to set up your authenticator app or passkey
-</Step>
+</GuideStep>
 
-### Switch to Your Admin User
-
-<Step number={4} description="Switch to Admin User">
+<GuideStep title="Switch to Your Admin User">
   1. Sign out of root
   2. Go to your AWS sign-in URL: `https://YOUR_ACCOUNT_ID.signin.aws.amazon.com/console`
   3. Sign in with your new IAM admin credentials
   
   **Bookmark this URL.** You'll use it daily.
-</Step>
+</GuideStep>
 
-### Set an Account Alias
-
-That 12-digit account ID is hard to remember. Create an alias:
-
-<Step number={5} description="Set Account Alias">
+<GuideStep title="Set an Account Alias">
   1. In the IAM console, find **AWS Account** on the right side of the dashboard
   2. Next to **Account Alias**, click **Create**
   3. Enter something memorable (e.g., `mycompany-prod`)
   4. Click **Save changes**
   
   Your new sign-in URL: `https://mycompany-prod.signin.aws.amazon.com/console`
-</Step>
+</GuideStep>
 
 <Alert type="tip" title="The Fine Line">
 
@@ -244,7 +234,7 @@ AWS bills are post-paid. You find out what you owe 30 days after you've spent it
 
 By default, only root can view billing information. That's a problem—you want to avoid using root. Fix this now:
 
-<Step number={1} description="Activate IAM Billing Access">
+<GuideStep title="Activate IAM Billing Access">
   1. Sign in as **root** (last time for a while)
   2. Click your account name → **Account**
   3. Scroll to **IAM user and role access to Billing information**
@@ -253,13 +243,13 @@ By default, only root can view billing information. That's a problem—you want 
   6. Click **Update**
   
   Now your IAM admin user can view and manage billing.
-</Step>
+</GuideStep>
 
 ### Create a Budget Alert
 
 AWS Budgets notifies you before costs spiral.
 
-<Step number={2} description="Create Budget Alert">
+<GuideStep title="Create Budget Alert">
   1. Sign in as your IAM admin user
   2. Go to **Billing and Cost Management** → **Budgets**
   3. Click **Create budget**
@@ -273,7 +263,7 @@ AWS Budgets notifies you before costs spiral.
   8. Add alert thresholds (see table below)
   9. For each threshold, add your email address
   10. Click **Next**, then **Create budget**
-</Step>
+</GuideStep>
 
 **Recommended Alert Thresholds:**
 
@@ -305,12 +295,12 @@ AWS Free Tier gives you limited free usage of many services. It's easy to accide
 | Lambda | 1M requests/month | Usually fine |
 | NAT Gateway | ⚠️ NOT FREE | $0.045/hr ≈ $32/mo |
 
-<Step number={3} description="Enable Free Tier Alerts">
+<GuideStep title="Enable Free Tier Alerts">
   1. Go to **Billing and Cost Management** → **Billing preferences**
   2. Select **Receive Free Tier Usage Alerts**
   3. Enter your email address
   4. Click **Save preferences**
-</Step>
+</GuideStep>
 
 <Alert type="note">
 
@@ -341,7 +331,7 @@ These cost extra and generate massive log volumes. For now, the default manageme
 
 ### Create a Trail
 
-<Step number={1} description="Create CloudTrail">
+<GuideStep title="Create CloudTrail">
   1. Go to the [CloudTrail console](https://console.aws.amazon.com/cloudtrail/)
   2. Click **Create trail**
   3. Configure the trail:
@@ -357,7 +347,7 @@ These cost extra and generate massive log volumes. For now, the default manageme
   7. Click **Next**, then **Create trail**
   
   Your account is now recording everything. This log is your forensic evidence if anything ever goes wrong.
-</Step>
+</GuideStep>
 
 <Alert type="note">
 
