@@ -97,7 +97,7 @@ There is no way to limit root's power. That's by design—it's the "break glass"
 
 Root access keys are long-lived credentials that grant unlimited API access. If they exist, delete them immediately.
 
-<GuideStep title="Delete Root Access Keys">
+<GuideStep title="Delete Root Access Keys" syncKey="root-access-keys">
   1. Sign in to the [AWS Console](https://console.aws.amazon.com/) as root
   2. Click your account name in the top-right corner
   3. Select **Security credentials**
@@ -168,7 +168,7 @@ An IAM admin user has the same practical capabilities for daily work, but with k
 
 Create a group first, then add users to it. This pattern scales when you add team members later.
 
-<GuideStep title="Create Admin Group">
+<GuideStep title="Create Admin Group" syncKey="admin-user-created">
   1. Sign in to the [IAM console](https://console.aws.amazon.com/iam/)
   2. In the left navigation, click **User groups**
   3. Click **Create group**
@@ -191,7 +191,7 @@ Create a group first, then add users to it. This pattern scales when you add tea
   10. Click **Next**, then **Create user**
 </GuideStep>
 
-<GuideStep title="Enable MFA on Your Admin User">
+<GuideStep title="Enable MFA on Your Admin User" syncKey="admin-mfa">
   1. In the IAM console, click **Users**
   2. Click your new admin username
   3. Select the **Security credentials** tab
@@ -207,7 +207,7 @@ Create a group first, then add users to it. This pattern scales when you add tea
   **Bookmark this URL.** You'll use it daily.
 </GuideStep>
 
-<GuideStep title="Set an Account Alias">
+<GuideStep title="Set an Account Alias" syncKey="account-alias">
   1. In the IAM console, find **AWS Account** on the right side of the dashboard
   2. Next to **Account Alias**, click **Create**
   3. Enter something memorable (e.g., `mycompany-prod`)
@@ -236,7 +236,7 @@ AWS bills are post-paid. You find out what you owe 30 days after you've spent it
 
 By default, only root can view billing information. That's a problem—you want to avoid using root. Fix this now:
 
-<GuideStep title="Activate IAM Billing Access">
+<GuideStep title="Activate IAM Billing Access" syncKey="billing-access">
   1. Sign in as **root** (last time for a while)
   2. Click your account name → **Account**
   3. Scroll to **IAM user and role access to Billing information**
@@ -251,7 +251,7 @@ By default, only root can view billing information. That's a problem—you want 
 
 AWS Budgets notifies you before costs spiral.
 
-<GuideStep title="Create Budget Alert">
+<GuideStep title="Create Budget Alert" syncKey="budget-alert">
   1. Sign in as your IAM admin user
   2. Go to **Billing and Cost Management** → **Budgets**
   3. Click **Create budget**
@@ -297,7 +297,7 @@ AWS Free Tier gives you limited free usage of many services. It's easy to accide
 | Lambda | 1M requests/month | Usually fine |
 | NAT Gateway | ⚠️ NOT FREE | $0.045/hr ≈ $32/mo |
 
-<GuideStep title="Enable Free Tier Alerts">
+<GuideStep title="Enable Free Tier Alerts" syncKey="free-tier-alerts">
   1. Go to **Billing and Cost Management** → **Billing preferences**
   2. Select **Receive Free Tier Usage Alerts**
   3. Enter your email address
@@ -333,7 +333,7 @@ These cost extra and generate massive log volumes. For now, the default manageme
 
 ### Create a Trail
 
-<GuideStep title="Create CloudTrail">
+<GuideStep title="Create CloudTrail" syncKey="cloudtrail">
   1. Go to the [CloudTrail console](https://console.aws.amazon.com/cloudtrail/)
   2. Click **Create trail**
   3. Configure the trail:
@@ -452,33 +452,33 @@ Use this checklist to verify you've completed all the security steps:
     {
       category: "SECURITY",
       tasks: [
-        "Root account MFA enabled",
-        "Root access keys deleted",
-        "IAM admin user created",
-        "IAM admin MFA enabled"
+        { text: "Root account MFA enabled", syncKey: "root-mfa" },
+        { text: "Root access keys deleted", syncKey: "root-access-keys" },
+        { text: "IAM admin user created", syncKey: "admin-user-created" },
+        { text: "IAM admin MFA enabled", syncKey: "admin-mfa" }
       ]
     },
     {
       category: "BILLING",
       tasks: [
-        "Billing alerts enabled in preferences",
-        "CloudWatch billing alarm created",
-        "Free Tier usage alerts enabled"
+        { text: "Billing alerts enabled in preferences", syncKey: "billing-access" },
+        { text: "CloudWatch billing alarm created", syncKey: "budget-alert" },
+        { text: "Free Tier usage alerts enabled", syncKey: "free-tier-alerts" }
       ]
     },
     {
       category: "AUDIT",
       tasks: [
-        "CloudTrail enabled for all regions",
-        "Log file validation enabled"
+        { text: "CloudTrail enabled for all regions", syncKey: "cloudtrail" },
+        { text: "Log file validation enabled", syncKey: "cloudtrail-validation" }
       ]
     },
     {
       category: "HOUSEKEEPING",
       tasks: [
-        "Account alias set",
-        "Primary region selected",
-        "IAM sign-in URL bookmarked"
+        { text: "Account alias set", syncKey: "account-alias" },
+        { text: "Primary region selected", syncKey: "primary-region" },
+        { text: "IAM sign-in URL bookmarked", syncKey: "iam-url" }
       ]
     }
   ]}

@@ -1,6 +1,6 @@
 ---
 interface Props {
-  items: { category: string; tasks: string[] }[];
+  items: { category: string; tasks: (string | { text: string; syncKey?: string })[] }[];
 }
 
 const { items } = Astro.props;
@@ -16,11 +16,18 @@ const checklistId = 'validation-checklist';
           <ul class="task-list">
             {section.tasks.map((task, taskIdx) => {
               const taskId = `${checklistId}-${sectionIdx}-${taskIdx}`;
+              const taskText = typeof task === 'string' ? task : task.text;
+              const syncKey = typeof task === 'object' && task.syncKey ? task.syncKey : undefined;
               return (
                 <li class="task-item">
                   <label class="task-label">
-                    <input type="checkbox" class="task-checkbox" data-task-id={taskId} />
-                    <span class="task-text">{task}</span>
+                    <input
+                      type="checkbox"
+                      class="task-checkbox"
+                      data-task-id={taskId}
+                      data-sync-key={syncKey}
+                    />
+                    <span class="task-text">{taskText}</span>
                   </label>
                 </li>
               );
@@ -50,6 +57,7 @@ const checklistId = 'validation-checklist';
     // Load saved state from localStorage
     checkboxes.forEach((checkbox) => {
       const taskId = checkbox.getAttribute('data-task-id');
+      const syncKey = checkbox.getAttribute('data-sync-key');
       if (!taskId) return;
 
       const saved = localStorage.getItem(taskId);
@@ -57,11 +65,52 @@ const checklistId = 'validation-checklist';
         (checkbox as HTMLInputElement).checked = true;
       }
 
+      // Listen for sync events from GuideSteps
+      if (syncKey) {
+        window.addEventListener('storage', (e) => {
+          if (e.key === `sync-${syncKey}` && e.newValue) {
+            const syncState = JSON.parse(e.newValue);
+            if (syncState.source !== 'checklist') {
+              (checkbox as HTMLInputElement).checked = syncState.completed;
+              localStorage.setItem(taskId, syncState.completed.toString());
+              updateProgress();
+            }
+          }
+        });
+
+        // Check for existing sync state
+        const syncState = localStorage.getItem(`sync-${syncKey}`);
+        if (syncState) {
+          const state = JSON.parse(syncState);
+          (checkbox as HTMLInputElement).checked = state.completed;
+          localStorage.setItem(taskId, state.completed.toString());
+        }
+      }
+
       // Save state on change
       checkbox.addEventListener('change', (e) => {
         const target = e.target as HTMLInputElement;
         localStorage.setItem(taskId, target.checked.toString());
         updateProgress();
+
+        // Sync with GuideStep if syncKey exists
+        if (syncKey) {
+          localStorage.setItem(
+            `sync-${syncKey}`,
+            JSON.stringify({
+              completed: target.checked,
+              source: 'checklist',
+            })
+          );
+
+          // Trigger storage event for same-page sync
+          window.dispatchEvent(
+            new StorageEvent('storage', {
+              key: `sync-${syncKey}`,
+              newValue: JSON.stringify({ completed: target.checked, source: 'checklist' }),
+            })
+          );
+        }
       });
     });
 

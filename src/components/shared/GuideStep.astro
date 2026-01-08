@@ -4,9 +4,10 @@ interface Props {
   number?: number;
   variant?: 'default' | 'compact';
   defaultExpanded?: boolean;
+  syncKey?: string; // Key to sync with validation checklist
 }
 
-const { title, number, variant = 'default', defaultExpanded = false } = Astro.props;
+const { title, number, variant = 'default', defaultExpanded = false, syncKey } = Astro.props;
 const hasNumber = number !== undefined;
 
 // Generate stable ID from title for localStorage persistence
@@ -24,13 +25,19 @@ function generateStableId(title: string): string {
 const stepId = generateStableId(title);
 ---
 
-<div class={`guide-step ${variant}`} data-has-number={hasNumber} data-step-id={stepId}>
+<div
+  class={`guide-step ${variant}`}
+  data-has-number={hasNumber}
+  data-step-id={stepId}
+  data-sync-key={syncKey}
+>
   <button class="guide-step-header" data-step-id={stepId} aria-expanded={defaultExpanded}>
     <input
       type="checkbox"
       class="guide-step-checkbox"
       aria-label={`Mark "${title}" as complete`}
       data-step-id={stepId}
+      data-sync-key={syncKey}
     />
     {hasNumber && <div class="guide-step-number">{number}</div>}
     <h4 class="guide-step-title">{title}</h4>
@@ -75,6 +82,7 @@ const stepId = generateStableId(title);
       const checkbox = step.querySelector(
         `.guide-step-checkbox[data-step-id="${stepId}"]`
       ) as HTMLInputElement;
+      const syncKey = checkbox?.getAttribute('data-sync-key');
 
       if (!header || !content || !checkbox) return;
 
@@ -86,6 +94,32 @@ const stepId = generateStableId(title);
         if (state.expanded) {
           content.style.display = 'block';
           header.setAttribute('aria-expanded', 'true');
+        }
+      }
+
+      // Listen for sync events from validation checklist
+      if (syncKey) {
+        window.addEventListener('storage', (e) => {
+          if (e.key === `sync-${syncKey}` && e.newValue) {
+            const syncState = JSON.parse(e.newValue);
+            checkbox.checked = syncState.completed;
+
+            const currentState = JSON.parse(localStorage.getItem(`guide-step-${stepId}`) || '{}');
+            localStorage.setItem(
+              `guide-step-${stepId}`,
+              JSON.stringify({
+                ...currentState,
+                completed: syncState.completed,
+              })
+            );
+          }
+        });
+
+        // Check for existing sync state
+        const syncState = localStorage.getItem(`sync-${syncKey}`);
+        if (syncState) {
+          const state = JSON.parse(syncState);
+          checkbox.checked = state.completed;
         }
       }
 
@@ -127,6 +161,25 @@ const stepId = generateStableId(title);
             completed: checkbox.checked,
           })
         );
+
+        // Sync with validation checklist if syncKey exists
+        if (syncKey) {
+          localStorage.setItem(
+            `sync-${syncKey}`,
+            JSON.stringify({
+              completed: checkbox.checked,
+              source: 'guidestep',
+            })
+          );
+
+          // Trigger storage event for same-page sync
+          window.dispatchEvent(
+            new StorageEvent('storage', {
+              key: `sync-${syncKey}`,
+              newValue: JSON.stringify({ completed: checkbox.checked, source: 'guidestep' }),
+            })
+          );
+        }
       });
     });
   }
