@@ -367,23 +367,47 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
   }
 
   .tree-node[data-level] {
-    padding-left: calc(0.5rem + var(--tree-indent, 0px));
+    padding-left: calc(0.5rem + (var(--tree-level, 0) * 1.5rem));
+  }
+
+  .tree-node[data-level='0'] {
+    --tree-level: 0;
   }
 
   .tree-node[data-level='1'] {
-    --tree-indent: 1.5rem;
+    --tree-level: 1;
   }
 
   .tree-node[data-level='2'] {
-    --tree-indent: 3rem;
+    --tree-level: 2;
   }
 
   .tree-node[data-level='3'] {
-    --tree-indent: 4.5rem;
+    --tree-level: 3;
   }
 
   .tree-node[data-level='4'] {
-    --tree-indent: 6rem;
+    --tree-level: 4;
+  }
+
+  .tree-node[data-level='5'] {
+    --tree-level: 5;
+  }
+
+  .tree-node[data-level='6'] {
+    --tree-level: 6;
+  }
+
+  .tree-node[data-level='7'] {
+    --tree-level: 7;
+  }
+
+  .tree-node[data-level='8'] {
+    --tree-level: 8;
+  }
+
+  .tree-node[data-level='9'] {
+    --tree-level: 9;
   }
 
   .tree-node:hover {
@@ -479,7 +503,7 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
     display: flex;
     align-items: center;
     justify-content: center;
-    opacity: 0;
+    opacity: 0.4; /* Always visible but subtle */
     transition:
       opacity 0.2s ease,
       color 0.2s ease,

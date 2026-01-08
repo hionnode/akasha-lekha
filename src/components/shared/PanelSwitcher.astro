@@ -57,6 +57,10 @@ const { defaultActive, class: className = '' } = Astro.props;
         button.setAttribute('id', `tab-${value}`);
 
         button.addEventListener('click', () => {
+          // Add ripple effect
+          button.classList.add('ripple');
+          setTimeout(() => button.classList.remove('ripple'), 400);
+
           // Update active tab
           panelData.forEach(({ value: v }) => {
             const tab = tabsContainer.querySelector(`[data-panel-value="${v}"]`);
@@ -66,15 +70,22 @@ const { defaultActive, class: className = '' } = Astro.props;
               tab?.classList.add('active');
               tab?.setAttribute('aria-selected', 'true');
               panel?.classList.remove('hidden');
+              panel?.classList.add('entering');
               panel?.setAttribute('aria-hidden', 'false');
+              // Remove entering class after animation
+              setTimeout(() => panel?.classList.remove('entering'), 300);
               activeValue = value;
             } else {
               tab?.classList.remove('active');
               tab?.setAttribute('aria-selected', 'false');
               panel?.classList.add('hidden');
+              panel?.classList.remove('entering');
               panel?.setAttribute('aria-hidden', 'true');
             }
           });
+
+          // Update active indicator position
+          updateActiveIndicator();
         });
 
         // Keyboard navigation
@@ -109,6 +120,20 @@ const { defaultActive, class: className = '' } = Astro.props;
         tabsContainer.appendChild(button);
       });
 
+      // Function to update active indicator position
+      const updateActiveIndicator = () => {
+        const activeTab = tabsContainer.querySelector('.panel-switcher-tab.active') as HTMLElement;
+        if (activeTab && tabsContainer) {
+          const tabRect = activeTab.getBoundingClientRect();
+          const containerRect = tabsContainer.getBoundingClientRect();
+          const left = tabRect.left - containerRect.left + tabsContainer.scrollLeft;
+          const width = tabRect.width;
+
+          (tabsContainer as HTMLElement).style.setProperty('--indicator-left', `${left}px`);
+          (tabsContainer as HTMLElement).style.setProperty('--indicator-width', `${width}px`);
+        }
+      };
+
       // Initialize panel visibility
       panelData.forEach(({ value, element }) => {
         element.setAttribute('id', `panel-${value}`);
@@ -123,6 +148,12 @@ const { defaultActive, class: className = '' } = Astro.props;
           element.setAttribute('aria-hidden', 'true');
         }
       });
+
+      // Set initial indicator position
+      setTimeout(updateActiveIndicator, 0);
+
+      // Update indicator on window resize
+      window.addEventListener('resize', updateActiveIndicator);
     });
   }
 
@@ -140,18 +171,33 @@ const { defaultActive, class: className = '' } = Astro.props;
 <style>
   .panel-switcher-wrapper {
     margin: 1.5rem 0;
+    border: 2px solid var(--border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--bg-secondary);
   }
 
   .panel-switcher-tabs {
     display: flex;
     gap: 0.5rem;
-    margin-bottom: 1rem;
     padding: 0.75rem;
     background: var(--bg-tertiary);
-    border: 2px solid var(--border);
-    border-radius: 0.75rem;
+    border-bottom: 2px solid var(--border);
     flex-wrap: wrap;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    position: relative;
+  }
+
+  /* Active indicator line */
+  .panel-switcher-tabs::after {
+    content: '';
+    position: absolute;
+    bottom: -2px;
+    left: var(--indicator-left, 0);
+    width: var(--indicator-width, 0);
+    height: 2px;
+    background: var(--accent-blue);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 1;
   }
 
   .panel-switcher-tab {
@@ -159,22 +205,28 @@ const { defaultActive, class: className = '' } = Astro.props;
     align-items: center;
     gap: 0.5rem;
     padding: 0.625rem 1.25rem;
-    background: var(--bg-secondary);
-    border: 2px solid var(--border);
-    border-radius: 0.5rem;
-    color: var(--fg-secondary);
+    background: transparent;
+    border: 2px solid transparent;
+    border-radius: 0.375rem;
+    color: var(--fg-muted);
     font-size: 0.9375rem;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     font-family: 'Inconsolata', monospace;
     outline: none;
+    position: relative;
   }
 
   .panel-switcher-tab:hover {
-    background: var(--bg-tertiary);
+    background: rgba(122, 162, 247, 0.1);
     color: var(--fg-secondary);
-    border-color: var(--border);
+    border-color: rgba(122, 162, 247, 0.2);
+  }
+
+  /* Click feedback animation */
+  .panel-switcher-tab:active {
+    transform: scale(0.95);
   }
 
   .panel-switcher-tab:focus-visible {
@@ -183,32 +235,66 @@ const { defaultActive, class: className = '' } = Astro.props;
   }
 
   .panel-switcher-tab.active {
-    background: var(--accent-blue);
-    color: #ffffff;
+    background: rgba(122, 162, 247, 0.15);
+    color: var(--accent-blue);
     border-color: var(--accent-blue);
     font-weight: 700;
-    box-shadow: 0 4px 12px rgba(122, 162, 247, 0.3);
-    transform: translateY(-1px);
+  }
+
+  /* Ripple effect on click */
+  .panel-switcher-tab::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    border-radius: 50%;
+    background: rgba(122, 162, 247, 0.3);
+    transform: translate(-50%, -50%);
+    transition:
+      width 0.4s ease,
+      height 0.4s ease,
+      opacity 0.4s ease;
+    opacity: 0;
+  }
+
+  .panel-switcher-tab.ripple::before {
+    width: 100%;
+    height: 100%;
+    opacity: 1;
   }
 
   .panel-switcher-content {
     position: relative;
-    min-height: 2rem;
+    min-height: 100px;
+    padding: 1.5rem;
   }
 
+  /* Crossfade transition */
   .panel-switcher-content > [data-panel-label] {
     display: block;
-    animation: fadeIn 0.2s ease-in-out;
+    opacity: 1;
+    transform: translateY(0);
+    transition:
+      opacity 0.2s ease-in-out,
+      transform 0.2s ease-in-out;
   }
 
   .panel-switcher-content > [data-panel-label].hidden {
-    display: none !important;
+    display: none;
+    opacity: 0;
+    transform: translateY(8px);
   }
 
-  @keyframes fadeIn {
+  .panel-switcher-content > [data-panel-label].entering {
+    animation: slideIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  @keyframes slideIn {
     from {
       opacity: 0;
-      transform: translateY(4px);
+      transform: translateY(8px);
     }
     to {
       opacity: 1;
@@ -220,12 +306,26 @@ const { defaultActive, class: className = '' } = Astro.props;
   @media (max-width: 768px) {
     .panel-switcher-tabs {
       gap: 0.375rem;
-      padding: 0.375rem;
+      padding: 0.5rem;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    .panel-switcher-tabs::-webkit-scrollbar {
+      display: none;
     }
 
     .panel-switcher-tab {
-      padding: 0.5rem 0.75rem;
-      font-size: 0.8125rem;
+      padding: 0.75rem 1rem;
+      font-size: 0.875rem;
+      min-height: 44px;
+      flex-shrink: 0;
+    }
+
+    .panel-switcher-content {
+      padding: 1rem;
     }
   }
 </style>

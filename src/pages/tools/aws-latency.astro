@@ -1,0 +1,165 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Header from '../../components/layout/Header.astro';
+import Footer from '../../components/layout/Footer.astro';
+import Container from '../../components/layout/Container.astro';
+import AwsRegionLatency from '../../components/shared/AwsRegionLatency.astro';
+---
+
+<Layout title="AWS Region Latency Checker | works-on-my.cloud">
+  <div class="min-h-screen flex flex-col">
+    <Header />
+    <main id="main-content" class="flex-1">
+      <Container class="py-12">
+        <div class="tool-header">
+          <h1>AWS Region Latency Checker</h1>
+          <p class="tool-description">
+            Test your network latency to all AWS regions and find the fastest one for your location.
+            This tool pings S3 endpoints in each region to measure real-world latency.
+          </p>
+        </div>
+
+        <AwsRegionLatency client:load />
+
+        <div class="tool-info">
+          <h2>How It Works</h2>
+          <p>
+            This tool measures your network latency to AWS S3 endpoints in 16 different regions
+            worldwide. For each region, it performs 3 ping tests and uses the median value to avoid
+            outliers.
+          </p>
+
+          <h3>Understanding the Results</h3>
+          <ul>
+            <li>
+              <strong>✓ EXCELLENT (&lt; 50ms):</strong> Ideal for real-time applications, gaming, and
+              low-latency services
+            </li>
+            <li><strong>✓ GOOD (50-100ms):</strong> Great for most web applications and APIs</li>
+            <li><strong>○ FAIR (100-200ms):</strong> Acceptable for standard web services</li>
+            <li>
+              <strong>✗ HIGH (&gt; 200ms):</strong> May cause noticeable delays in interactive applications
+            </li>
+          </ul>
+
+          <h3>Choosing the Right Region</h3>
+          <p>
+            While latency is important, it's not the only factor to consider when choosing an AWS
+            region:
+          </p>
+          <ul>
+            <li><strong>Compliance:</strong> GDPR, data residency requirements, etc.</li>
+            <li>
+              <strong>Service Availability:</strong> Not all AWS services are available in all regions
+            </li>
+            <li><strong>Pricing:</strong> Costs can vary 10-20% between regions</li>
+            <li><strong>User Location:</strong> Choose regions close to your primary user base</li>
+          </ul>
+
+          <h3>Technical Details</h3>
+          <p>
+            This tool uses the browser's <code>fetch</code> API to measure latency to S3 endpoints. The
+            measurements represent the round-trip time from your browser to AWS infrastructure. Actual
+            application performance may vary based on your specific use case.
+          </p>
+        </div>
+      </Container>
+    </main>
+    <Footer />
+  </div>
+</Layout>
+
+<style>
+  .tool-header {
+    margin-bottom: 2rem;
+  }
+
+  .tool-header h1 {
+    font-size: 2.5rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+    color: var(--fg-primary);
+  }
+
+  .tool-description {
+    font-size: 1.125rem;
+    color: var(--fg-secondary);
+    line-height: 1.6;
+    max-width: 800px;
+  }
+
+  .tool-info {
+    margin-top: 3rem;
+    padding-top: 2rem;
+    border-top: 2px solid var(--border);
+  }
+
+  .tool-info h2 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+    color: var(--fg-primary);
+  }
+
+  .tool-info h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-top: 2rem;
+    margin-bottom: 0.75rem;
+    color: var(--fg-primary);
+  }
+
+  .tool-info p {
+    color: var(--fg-secondary);
+    line-height: 1.6;
+    margin-bottom: 1rem;
+  }
+
+  .tool-info ul {
+    list-style: none;
+    padding-left: 0;
+    margin-bottom: 1.5rem;
+  }
+
+  .tool-info ul li {
+    color: var(--fg-secondary);
+    line-height: 1.8;
+    margin-bottom: 0.5rem;
+    padding-left: 1.5rem;
+    position: relative;
+  }
+
+  .tool-info ul li::before {
+    content: '→';
+    position: absolute;
+    left: 0;
+    color: var(--accent-blue);
+  }
+
+  .tool-info code {
+    font-family: 'Inconsolata', monospace;
+    background: var(--bg-secondary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.9em;
+    color: var(--accent-blue);
+  }
+
+  @media (max-width: 768px) {
+    .tool-header h1 {
+      font-size: 2rem;
+    }
+
+    .tool-description {
+      font-size: 1rem;
+    }
+
+    .tool-info h2 {
+      font-size: 1.5rem;
+    }
+
+    .tool-info h3 {
+      font-size: 1.125rem;
+    }
+  }
+</style>

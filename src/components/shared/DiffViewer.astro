@@ -64,30 +64,32 @@ const { mode = 'unified', class: className = '' } = Astro.props;
   .diff-viewer-unified [data-diff-type='added']::before {
     content: '+';
     position: absolute;
-    left: 0;
+    left: 0.5rem;
     width: 2rem;
     text-align: center;
     font-weight: bold;
+    font-family: 'Inconsolata', monospace;
     color: var(--accent-green);
   }
 
   .diff-viewer-unified [data-diff-type='removed']::before {
     content: '-';
     position: absolute;
-    left: 0;
+    left: 0.5rem;
     width: 2rem;
     text-align: center;
     font-weight: bold;
+    font-family: 'Inconsolata', monospace;
     color: var(--accent-red);
   }
 
   .diff-added {
-    background: rgba(158, 206, 106, 0.1);
+    background: rgba(158, 206, 106, 0.15);
     border-left: 3px solid var(--accent-green);
   }
 
   .diff-removed {
-    background: rgba(247, 118, 142, 0.1);
+    background: rgba(247, 118, 142, 0.15);
     border-left: 3px solid var(--accent-red);
   }
 

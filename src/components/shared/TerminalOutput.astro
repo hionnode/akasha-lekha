@@ -94,14 +94,47 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
 
       // Search functionality
       if (searchInput && content) {
+        let originalText = '';
+        const pre = content.querySelector('pre');
+        if (pre) {
+          originalText = pre.textContent || '';
+        }
+
         searchInput.addEventListener('input', (e) => {
           const query = (e.target as HTMLInputElement).value.toLowerCase();
+          const codeElement = content.querySelector('pre code') || content.querySelector('pre');
+
+          if (!codeElement || !originalText) return;
 
           if (query) {
-            // Simple search highlighting - could be enhanced
-            content.classList.add('searching');
+            // Escape special regex characters
+            const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`(${escapedQuery})`, 'gi');
+
+            // Highlight matches
+            const highlightedText = originalText.replace(
+              regex,
+              '<mark class="search-highlight">$1</mark>'
+            );
+            codeElement.innerHTML = highlightedText;
+
+            // Count matches
+            const matches = originalText.match(regex);
+            const matchCount = matches ? matches.length : 0;
+
+            // Update search input with match count
+            if (matchCount > 0) {
+              searchInput.setAttribute(
+                'placeholder',
+                `${matchCount} match${matchCount > 1 ? 'es' : ''}`
+              );
+            } else {
+              searchInput.setAttribute('placeholder', 'No matches');
+            }
           } else {
-            content.classList.remove('searching');
+            // Reset to original text
+            codeElement.textContent = originalText;
+            searchInput.setAttribute('placeholder', 'Search...');
           }
         });
       }
@@ -277,5 +310,13 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
 
   .terminal-content :global(code) {
     background: transparent;
+  }
+
+  .terminal-content :global(mark.search-highlight) {
+    background: var(--accent-yellow);
+    color: var(--bg-primary);
+    padding: 0.125rem 0.25rem;
+    border-radius: 0.125rem;
+    font-weight: 600;
   }
 </style>
