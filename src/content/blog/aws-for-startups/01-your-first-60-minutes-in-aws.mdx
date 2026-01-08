@@ -16,6 +16,7 @@ import EnvVars from '../../../components/shared/EnvVars.astro';
 import EnvVar from '../../../components/shared/EnvVar.astro';
 import Alert from '../../../components/shared/Alert.astro';
 import AwsRegionLatency from '../../../components/shared/AwsRegionLatency.astro';
+import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
 
 
 *What everyone skips and regrets later*
@@ -444,29 +445,44 @@ Before moving on, verify your setup:
 
 **ROOT ACCOUNT**
 - [ ] MFA enabled on root
-- [ ] No root access keys exist
-- [ ] Root password stored in password manager
-- [ ] MFA recovery codes saved securely
+Use this checklist to verify you've completed all the security steps:
 
-**IAM ADMIN USER**
-- [ ] Admin IAM user created (not generic "admin")
-- [ ] User added to Administrators group
-- [ ] MFA enabled on admin user
-- [ ] Can sign in with IAM user successfully
-
-**BILLING**
-- [ ] IAM billing access activated (root-only task)
-- [ ] AWS Budget created with alert thresholds
-- [ ] Free Tier usage alerts enabled
-
-**AUDIT**
-- [ ] CloudTrail enabled for all regions
-- [ ] Log file validation enabled
-
-**HOUSEKEEPING**
-- [ ] Account alias set
-- [ ] Primary region selected
-- [ ] IAM sign-in URL bookmarked
+<ValidationChecklist 
+  items={[
+    {
+      category: "SECURITY",
+      tasks: [
+        "Root account MFA enabled",
+        "Root access keys deleted",
+        "IAM admin user created",
+        "IAM admin MFA enabled"
+      ]
+    },
+    {
+      category: "BILLING",
+      tasks: [
+        "Billing alerts enabled in preferences",
+        "CloudWatch billing alarm created",
+        "Free Tier usage alerts enabled"
+      ]
+    },
+    {
+      category: "AUDIT",
+      tasks: [
+        "CloudTrail enabled for all regions",
+        "Log file validation enabled"
+      ]
+    },
+    {
+      category: "HOUSEKEEPING",
+      tasks: [
+        "Account alias set",
+        "Primary region selected",
+        "IAM sign-in URL bookmarked"
+      ]
+    }
+  ]}
+/>
 
 <Alert type="note">
 
