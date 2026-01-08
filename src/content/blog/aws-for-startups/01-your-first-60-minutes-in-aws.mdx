@@ -37,19 +37,25 @@ AWS operates on a shared responsibility model. They secure the infrastructure—
 
 <Alert type="important" title="AWS Shared Responsibility Model">
 
-**Your Responsibility:**
-- Customer data & encryption
-- Identity & access management (IAM)
-- Application security
-- Operating system & network configuration
-- Firewall & security group rules
-
-**AWS Responsibility:**
-- Physical security of data centers
-- Hardware & infrastructure
-- Network infrastructure
-- Virtualization layer
-- Managed service security (S3, RDS, Lambda, etc.)
+```
+┌─────────────────────────────────────────────────────────┐
+│                    YOUR RESPONSIBILITY                  │
+├─────────────────────────────────────────────────────────┤
+│  • Customer Data & Encryption                           │
+│  • Identity & Access Management (IAM)                   │
+│  • Application Security                                 │
+│  • OS & Network Configuration                           │
+│  • Firewall & Security Group Rules                      │
+├─────────────────────────────────────────────────────────┤
+│                   AWS RESPONSIBILITY                    │
+├─────────────────────────────────────────────────────────┤
+│  • Physical Security of Data Centers                    │
+│  • Hardware & Infrastructure                            │
+│  • Network Infrastructure                               │
+│  • Virtualization Layer                                 │
+│  • Managed Service Security (S3, RDS, Lambda)           │
+└─────────────────────────────────────────────────────────┘
+```
 
 </Alert>
 
@@ -157,6 +163,32 @@ For everything else, use an IAM admin user—which we'll create next.
 
 MFA protects against password theft, but it doesn't reduce root's power. A mistake made while signed in as root—deleting the wrong resource, misconfiguring a policy—has no safety net.
 
+```
+┌──────────────────────────────────────────────────────┐
+│                    ROOT USER                         │
+│  ⚠️  Unlimited Power • No Audit Trail • No Limits   │
+│  ✓  MFA Enabled • Locked Away • Emergency Only      │
+└──────────────────────────────────────────────────────┘
+                        │
+                        │ Creates
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│                  IAM ADMIN USER                      │
+│  ✓  Full Practical Access                           │
+│  ✓  Actions Logged in CloudTrail                    │
+│  ✓  Can Be Revoked Without Losing Account           │
+│  ✓  Can Add Restrictions Later                      │
+│  ✓  Daily Operations                                │
+└──────────────────────────────────────────────────────┘
+                        │
+                        │ Creates (Later)
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│              TEAM MEMBERS (IAM Users)                │
+│  Limited Permissions • Specific Roles                │
+└──────────────────────────────────────────────────────┘
+```
+
 An IAM admin user has the same practical capabilities for daily work, but with key differences:
 
 - Actions are logged in CloudTrail with the specific user identity
@@ -232,6 +264,39 @@ Create a group first, then add users to it. This pattern scales when you add tea
 
 AWS bills are post-paid. You find out what you owe 30 days after you've spent it. Without alerts, a misconfiguration or attack can run up thousands of dollars before you notice.
 
+### The $10,000 Surprise
+
+```
+┌────────────────────────────────────────────────────┐
+│         AWS BILLING ALERT ARCHITECTURE             │
+└────────────────────────────────────────────────────┘
+
+   AWS Services Running
+          │
+          ▼
+   ┌──────────────┐
+   │ Cost Accrues │
+   └──────┬───────┘
+          │
+          ▼
+   ┌─────────────────────────────────────┐
+   │      CloudWatch Billing Alarm       │
+   │  Threshold: $10 (or your limit)     │
+   └──────┬──────────────────────────────┘
+          │
+          ▼ (When threshold exceeded)
+   ┌─────────────────────────────────────┐
+   │         SNS Topic                   │
+   │  Sends notification                 │
+   └──────┬──────────────────────────────┘
+          │
+          ▼
+   ┌─────────────────────────────────────┐
+   │      📧 Email Alert                 │
+   │  "Your AWS bill is approaching $10" │
+   └─────────────────────────────────────┘
+```
+
 ### Activate IAM Billing Access
 
 By default, only root can view billing information. That's a problem—you want to avoid using root. Fix this now:
@@ -240,12 +305,10 @@ By default, only root can view billing information. That's a problem—you want 
   1. Sign in as **root** (last time for a while)
   2. Click your account name → **Account**
   3. Scroll to **IAM user and role access to Billing information**
-  4. Click **Edit**
-  5. Select **Activate IAM Access**
-  6. Click **Update**
-  
-  Now your IAM admin user can view and manage billing.
+  4. Click **Edit** → Select **Activate IAM Access**
+  5. Click **Update**
 </GuideStep>
+  Now your IAM admin user can view and manage billing.
 
 ### Create a Budget Alert
 
@@ -314,7 +377,46 @@ AWS Free Tier gives you limited free usage of many services. It's easy to accide
 
 ## CloudTrail: Your Audit Log
 
-CloudTrail records every API call made in your AWS account. Who did what, when, and from where. Without it, you're flying blind.
+### Why You Need This
+
+CloudTrail records every API call made in your AWS account. When something goes wrong—a resource gets deleted, a security group opens to the internet, costs spike—CloudTrail is how you figure out what happened.
+
+```
+┌─────────────┐
+│   AWS API   │  Every action in AWS = API call
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────────────────────────────────────┐
+│              CLOUDTRAIL                         │
+│  Records: Who, What, When, Where, How           │
+└──────┬──────────────────────────────────────────┘
+       │
+       ▼
+┌─────────────────────────────────────────────────┐
+│           S3 Bucket (Encrypted)                 │
+│  • Log File Validation Enabled                  │
+│  • Tamper-Proof Audit Trail                     │
+│  • 90-day retention (or longer)                 │
+└─────────────────────────────────────────────────┘
+       │
+       ▼
+┌─────────────────────────────────────────────────┐
+│         When Things Go Wrong...                 │
+│  Query logs to find:                            │
+│  • Who deleted that EC2 instance?               │
+│  • What changed in the security group?          │
+│  • When did costs start spiking?                │
+└─────────────────────────────────────────────────┘
+```
+
+Without it, you're flying blind. With it, you have a complete audit log:
+
+- **Who** made the change
+- **What** they changed
+- **When** it happened
+- **Where** they were (IP address)
+- **How** they authenticated
 
 ### What CloudTrail Logs
 
