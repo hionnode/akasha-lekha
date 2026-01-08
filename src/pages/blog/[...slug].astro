@@ -165,11 +165,13 @@ const isSeries = post.data.series && post.data.seriesPart && seriesTotal;
 <Layout title={post.data.title}>
   <SEO
     title={post.data.title}
-    description={post.data.excerpt}
+    description={post.data.description || post.data.excerpt}
     type="article"
     publishedTime={post.data.date}
     modifiedTime={post.data.updated}
     tags={post.data.tags}
+    author={post.data.author}
+    category={post.data.series}
   />
   <div class="min-h-screen flex flex-col">
     <Header />
