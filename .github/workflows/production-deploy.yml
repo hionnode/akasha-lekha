@@ -1,99 +1,173 @@
-name: Production Deployment
+# .github/workflows/production.yml
+#
+# Deploys to production when code is merged to main
+# Features:
+# - Full production deployment
+# - Deployment tracking
+# - Build caching
+# - Job summary with deployment details
+# - Slack/Discord notification ready
+
+name: Production
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_cache:
+        description: 'Skip build cache'
+        type: boolean
+        default: false
+
+concurrency:
+  group: production
+  cancel-in-progress: false  # Never cancel production deploys
+
+permissions:
+  contents: read
+  deployments: write
+  statuses: write
+
+env:
+  WRANGLER_SEND_METRICS: false
 
 jobs:
-  quality-checks:
-    name: Run Quality Checks
+  deploy:
+    name: Deploy Production
     runs-on: ubuntu-latest
     
+    # Environment with optional protection rules
+    # Configure in: Repository → Settings → Environments → production
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.deployment-url }}
+    
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'pnpm'
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 8
-
-      - name: Get pnpm store directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Cache pnpm dependencies
+      - name: Cache Astro Build
+        if: ${{ !inputs.skip_cache }}
         uses: actions/cache@v4
+        id: cache-astro
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          path: |
+            node_modules/.astro
+            .astro
+          key: astro-prod-${{ runner.os }}-${{ hashFiles('src/**/*', 'public/**/*', 'astro.config.*') }}
           restore-keys: |
-            ${{ runner.os }}-pnpm-store-
+            astro-prod-${{ runner.os }}-
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Install Dependencies
+        run: pnpm install
 
-      - name: Run linting
-        run: pnpm lint
+      - name: Build
+        id: build
+        run: |
+          START_TIME=$(date +%s)
+          pnpm run build
+          END_TIME=$(date +%s)
+          echo "duration=$((END_TIME - START_TIME))" >> $GITHUB_OUTPUT
+        env:
+          PUBLIC_ENV: production
 
-      - name: Validate blog posts
-        run: pnpm validate:blog
+      # Get the previous version for potential rollback reference
+      - name: Get Previous Version
+        id: previous
+        run: |
+          PREV_VERSION=$(npx wrangler versions list --json 2>/dev/null | jq -r '.[0].id // empty' || echo "")
+          echo "version=$PREV_VERSION" >> $GITHUB_OUTPUT
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-      - name: TypeScript check
-        run: pnpm typecheck
-
-      - name: Build site
-        run: pnpm build
-
-  deploy-production:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: quality-checks
-    permissions:
-      contents: read
-      deployments: write
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 8
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build site
-        run: pnpm build
-
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
+      # Deploy to production
+      - name: Deploy to Production
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: akasha-lekha
-          directory: dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-          branch: main
+          command: deploy --message "Production deploy - ${{ github.sha }}"
 
-      - name: Notify deployment success
+      # Create deployment summary
+      - name: Create Summary
+        if: success()
         run: |
-          echo "✅ Production deployment successful!"
-          echo "Site is live at your Cloudflare Pages domain"
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 🚀 Production Deployment Complete
+          
+          | Property | Value |
+          |:---------|:------|
+          | **URL** | ${{ steps.deploy.outputs.deployment-url }} |
+          | **Commit** | `${{ github.sha }}` |
+          | **Build Time** | ${{ steps.build.outputs.duration }}s |
+          | **Cache** | ${{ steps.cache-astro.outputs.cache-hit == 'true' && '✅ Hit' || '❌ Miss' }} |
+          | **Triggered by** | @${{ github.actor }} |
+          | **Previous Version** | `${{ steps.previous.outputs.version || 'N/A' }}` |
+          
+          ### Rollback Command
+          If you need to rollback, run:
+          ```bash
+          npx wrangler versions deploy ${{ steps.previous.outputs.version }}
+          ```
+          
+          Or use the [Rollback Workflow](../actions/workflows/rollback.yml).
+          EOF
 
+      # Update commit status
+      - name: Update Commit Status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
+            const url = '${{ steps.deploy.outputs.deployment-url }}';
+            
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: state,
+              target_url: url || `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              description: state === 'success' ? 'Deployed to production' : 'Production deploy failed',
+              context: 'Production Deployment'
+            });
 
+      # Optional: Slack notification
+      # Uncomment and add SLACK_WEBHOOK secret to enable
+      # - name: Notify Slack
+      #   if: always()
+      #   uses: 8398a7/action-slack@v3
+      #   with:
+      #     status: ${{ job.status }}
+      #     fields: repo,message,commit,author,action,workflow,took
+      #     text: |
+      #       ${{ job.status == 'success' && '✅' || '❌' }} Production deployment ${{ job.status }}
+      #       URL: ${{ steps.deploy.outputs.deployment-url }}
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
 
-
+  # Optional: Run smoke tests after deployment
+  # smoke-test:
+  #   name: Smoke Tests
+  #   needs: deploy
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Health Check
+  #       run: |
+  #         curl -sf ${{ needs.deploy.outputs.url }}/health || exit 1

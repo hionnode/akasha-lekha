@@ -479,7 +479,22 @@ Why:
 
 **But shouldn't I pick the closest region for latency?**
 
-For user-facing applications, yes. But you're setting up infrastructure foundations, not serving users yet. Start with `us-east-1`, expand to other regions when latency actually matters for your users.
+For development and learning, no—stick with `us-east-1`. The 
+benefits (features first, most documentation, lowest friction) 
+outweigh the latency difference you won't notice anyway.
+
+For production, it's a different conversation. Before deploying 
+your first user-facing workload, answer two questions:
+
+1. **Where are your users?** If 80% are in Europe, `eu-west-1` 
+   (Ireland) will serve them better than Virginia.
+
+2. **What does compliance require?** GDPR may require EU data 
+   residency. Healthcare and finance have their own rules. 
+   Check before you deploy, not after.
+
+The pattern: develop in `us-east-1`, deploy production where 
+your users and lawyers tell you to.
 
 **Test your latency to AWS regions:**
 
