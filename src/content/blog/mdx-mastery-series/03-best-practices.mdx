@@ -1,0 +1,355 @@
+---
+title: "MDX Mastery: Best Practices"
+date: "2025-01-18"
+excerpt: "Learn best practices for writing maintainable, accessible, and performant MDX content"
+tags: ["mdx", "astro", "best-practices", "tutorial"]
+featured: false
+draft: false
+series: "MDX Mastery"
+seriesPart: 3
+---
+
+import Button from '../../../components/shared/Button.astro';
+import Badge from '../../../components/shared/Badge.astro';
+import TagPill from '../../../components/blog/TagPill.astro';
+
+# {frontmatter.title}
+
+**Part {frontmatter.seriesPart} of the MDX Mastery Series**
+
+In this final part of the series, we'll cover best practices for writing maintainable, accessible, and performant MDX content.
+
+:::info
+This is part 3 of a 4-part series. Make sure you've read [Part 1](/blog/mdx-mastery-series/01-getting-started) and [Part 2](/blog/mdx-mastery-series/02-advanced-components) first! Check out [Part 4: Code-Focused Components](/blog/mdx-mastery-series/04-code-focused-components) for specialized components.
+:::
+
+## Code Organization
+
+### Import Order
+
+Always import components in a consistent order:
+
+1. External dependencies (if any)
+2. Shared components
+3. Blog-specific components
+4. Layout components
+
+```mdx
+---
+title: "My Post"
+---
+
+import Button from '../../components/shared/Button.astro';
+import Badge from '../../components/shared/Badge.astro';
+import TagPill from '../../components/blog/TagPill.astro';
+
+# Content starts here
+```
+
+### Component Grouping
+
+Group related components together:
+
+```mdx
+// Navigation components
+import Button from '../../components/shared/Button.astro';
+
+// Display components
+import Badge from '../../components/shared/Badge.astro';
+import TagPill from '../../components/blog/TagPill.astro';
+```
+
+## Content Structure
+
+### Use Markdown for Content
+
+Prefer markdown for most content:
+
+```mdx
+## Good: Use markdown for paragraphs
+
+This is a paragraph written in markdown. It's simple, readable, and works everywhere.
+
+## Avoid: Overusing components
+
+<div>
+  <p>This is unnecessarily complex for simple content.</p>
+</div>
+```
+
+### Use Components for Interactivity
+
+Reserve components for interactive or dynamic content:
+
+```mdx
+## Good: Component for interaction
+
+<Button href="/blog" variant="primary">Explore More</Button>
+
+## Avoid: Component for static text
+
+<Badge text="Static text that could be markdown" />
+```
+
+## Accessibility
+
+### Semantic HTML
+
+Use semantic HTML elements:
+
+```mdx
+<!-- Good: Semantic structure -->
+<nav>
+  <Button href="/blog">Back</Button>
+  <Button href="/next">Next</Button>
+</nav>
+
+<!-- Avoid: Generic divs -->
+<div>
+  <Button href="/blog">Back</Button>
+</div>
+```
+
+### ARIA Labels
+
+Add ARIA labels when needed:
+
+```mdx
+<Button href="/blog" aria-label="Navigate back to blog listing">
+  ← Back
+</Button>
+```
+
+### Keyboard Navigation
+
+Ensure interactive components are keyboard accessible:
+
+```mdx
+<!-- Good: Button is keyboard accessible -->
+<Button href="/blog">Click me</Button>
+
+<!-- Avoid: Div that looks like button but isn't -->
+<div onClick={...}>Click me</div>
+```
+
+## Performance
+
+### Build-Time Rendering
+
+Remember that MDX is rendered at build time for static sites:
+
+```mdx
+<!-- This calculation happens at build time -->
+{Math.ceil(2000 / 200)} minutes read
+```
+
+### Component Size
+
+Keep components lightweight:
+
+- Avoid heavy dependencies in components used in MDX
+- Consider code splitting for large components
+- Test build performance with many MDX files
+
+### Image Optimization
+
+Use Astro's image optimization:
+
+```mdx
+import { Image } from 'astro:assets';
+import myImage from '../assets/image.jpg';
+
+<Image src={myImage} alt="Description" />
+```
+
+## Markdown Directives vs Components
+
+### When to Use Markdown Directives
+
+Use markdown directives for:
+
+- **Callouts** - `:::tip`, `:::note`, `:::warning`
+- **Code blocks** - Standard code fences
+- **Steps** - `:::steps` for instructions
+- **Code switchers** - `:::code-switcher` for multiple examples
+
+```mdx
+:::tip
+Use markdown directives for structured content like callouts.
+:::
+```
+
+### When to Use Components
+
+Use components for:
+
+- **Navigation** - Buttons, links
+- **Interactive elements** - Forms, widgets
+- **Dynamic content** - Calculations, conditional rendering
+- **Reusable UI** - Cards, badges, tags
+
+```mdx
+<Button href="/blog" variant="primary">Navigate</Button>
+```
+
+## Testing
+
+### Development Testing
+
+Test your MDX files in development:
+
+```bash
+pnpm dev
+```
+
+Check that:
+- Components render correctly
+- JSX expressions work
+- Markdown directives function
+- Styling is correct
+
+### Build Testing
+
+Always test the production build:
+
+```bash
+pnpm build
+pnpm preview
+```
+
+Some components may behave differently in production.
+
+### Validation
+
+Use the validation script:
+
+```bash
+pnpm validate:blog
+```
+
+This checks:
+- Frontmatter schema
+- Required fields
+- Date formats
+- Tag arrays
+
+## Common Pitfalls
+
+### 1. Forgetting Imports
+
+```mdx
+<!-- ❌ Bad: Component used without import -->
+<Button href="/blog">Click</Button>
+
+<!-- ✅ Good: Import first -->
+import Button from '../../components/shared/Button.astro';
+<Button href="/blog">Click</Button>
+```
+
+### 2. Incorrect Paths
+
+```mdx
+<!-- ❌ Bad: Wrong relative path -->
+import Button from './components/Button.astro';
+
+<!-- ✅ Good: Correct relative path from blog/ -->
+import Button from '../../components/shared/Button.astro';
+```
+
+### 3. Mixing Quotes
+
+```mdx
+<!-- ❌ Bad: Inconsistent quotes -->
+<Button href="/blog" variant='primary'>Click</Button>
+
+<!-- ✅ Good: Consistent double quotes -->
+<Button href="/blog" variant="primary">Click</Button>
+```
+
+### 4. Over-nesting Components
+
+```mdx
+<!-- ❌ Bad: Unnecessary nesting -->
+<div>
+  <div>
+    <Button href="/blog">Click</Button>
+  </div>
+</div>
+
+<!-- ✅ Good: Direct usage -->
+<Button href="/blog">Click</Button>
+```
+
+## Documentation
+
+### Comment Complex Logic
+
+Add comments for complex JSX:
+
+```mdx
+{/* Calculate reading time based on word count */}
+{Math.ceil(frontmatter.wordCount / 200)} minutes
+```
+
+### Document Component Usage
+
+If using custom components, document their props:
+
+```mdx
+{/* Button component accepts: href, variant (primary|secondary) */}
+<Button href="/blog" variant="primary">Click</Button>
+```
+
+## Maintenance
+
+### Keep Components Updated
+
+Regularly update component imports if components change:
+
+```mdx
+// Check for component API changes
+import Button from '../../components/shared/Button.astro';
+```
+
+### Refactor When Needed
+
+If you find yourself repeating patterns, consider:
+
+- Creating reusable component compositions
+- Extracting common JSX into functions
+- Creating custom MDX components
+
+## Series Summary
+
+Throughout this series, we've covered:
+
+1. **Getting Started** - Basics of MDX, installation, first components
+2. **Advanced Components** - Composition, dynamic content, real-world patterns
+3. **Best Practices** - Organization, accessibility, performance, testing
+4. **Code-Focused Components** - Specialized components for technical content (see [Part 4](/blog/mdx-mastery-series/04-code-focused-components))
+
+You're now equipped to create rich, interactive blog posts with MDX!
+
+<div style="margin-top: 2rem; padding: 1.5rem; background: var(--bg-secondary); border-radius: 0.5rem;">
+  <h3 style="margin-top: 0;">Ready to Start?</h3>
+  <p>Create your first MDX blog post and start using components in your content!</p>
+  <div style="margin-top: 1rem;">
+    <Button href="/blog" variant="primary">View All Posts</Button>
+  </div>
+</div>
+
+## Series Navigation
+
+- [Part 1: Getting Started](/blog/mdx-mastery-series/01-getting-started)
+- [Part 2: Advanced Components](/blog/mdx-mastery-series/02-advanced-components)
+- **Part 3: Best Practices** (you are here)
+- [Part 4: Code-Focused Components](/blog/mdx-mastery-series/04-code-focused-components)
+
+## Additional Resources
+
+- [Astro MDX Documentation](https://docs.astro.build/en/guides/integrations-guide/mdx/)
+- [MDX Guide](https://mdxjs.com/)
+- [Astro Components](https://docs.astro.build/en/basics/astro-components/)
+
+Happy MDX writing! 🚀
+
