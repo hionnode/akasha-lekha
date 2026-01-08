@@ -1,0 +1,603 @@
+---
+title: "Part 3: DevOps Components - APIs, Environment Variables & Kubernetes"
+excerpt: "Document your infrastructure with beautiful API endpoints, environment variable tables, and Kubernetes manifests. Professional DevOps documentation made easy."
+date: "2026-01-08"
+tags: ["mdx", "components", "devops", "kubernetes", "api"]
+series: "component-guide"
+seriesPart: 3
+seriesTotal: 3
+---
+
+import ApiEndpoint from '../../../components/shared/ApiEndpoint.astro';
+import ResponseExample from '../../../components/shared/ResponseExample.astro';
+import EnvVars from '../../../components/shared/EnvVars.astro';
+import EnvVar from '../../../components/shared/EnvVar.astro';
+import K8sManifest from '../../../components/shared/K8sManifest.astro';
+import Service from '../../../components/shared/Service.astro';
+import Badge from '../../../components/shared/Badge.astro';
+import Step from '../../../components/shared/Step.astro';
+import Command from '../../../components/shared/Command.astro';
+
+# Part 3: DevOps & Infrastructure Components
+
+In Parts 1 and 2, we covered code display and interactive components. Now let's explore components specifically designed for DevOps and infrastructure documentation: **ApiEndpoint**, **EnvVars**, **K8sManifest**, and **Service**.
+
+## Table of Contents
+
+1. [ApiEndpoint - REST API Documentation](#apiendpoint)
+2. [EnvVars - Environment Configuration](#envvars)
+3. [K8sManifest - Kubernetes Resources](#k8smanifest)
+4. [Service - Kubernetes Services](#service)
+5. [Complete Infrastructure Docs](#complete-infrastructure-docs)
+
+---
+
+## ApiEndpoint
+
+### What is it?
+
+The `ApiEndpoint` component creates beautiful, professional API documentation with color-coded HTTP methods, copyable paths, and response examples.
+
+### When to use it
+
+✅ **Perfect for:**
+- REST API documentation
+- Integration guides
+- Backend tutorials
+- API reference pages
+- Webhook documentation
+
+❌ **Not ideal for:**
+- GraphQL APIs (use code blocks)
+- WebSocket connections
+- Non-HTTP protocols
+
+### Basic Usage
+
+<ApiEndpoint 
+  method="GET" 
+  path="/api/users/:id"
+  description="Retrieve a user by their unique ID"
+>
+  **Response:**
+  <ResponseExample>
+    ```json
+    {
+      "id": "usr_abc123",
+      "name": "John Doe",
+      "email": "john@example.com",
+      "createdAt": "2026-01-08T12:00:00Z"
+    }
+    ```
+  </ResponseExample>
+</ApiEndpoint>
+
+**Code:**
+```mdx
+<ApiEndpoint method="GET" path="/api/users/:id">
+  <ResponseExample>
+    \`\`\`json
+    { "id": "123", "name": "John" }
+    \`\`\`
+  </ResponseExample>
+</ApiEndpoint>
+```
+
+### Props Reference
+
+- `method` (required): HTTP method (GET, POST, PUT, DELETE, PATCH)
+- `path` (required): API endpoint path
+- `description` (optional): What the endpoint does
+
+### HTTP Method Colors
+
+- **GET**: Blue (read operations)
+- **POST**: Green (create operations)
+- **PUT**: Yellow (update operations)
+- **DELETE**: Red (delete operations)
+- **PATCH**: Purple (partial update)
+
+### Features
+
+- ✅ **Color-coded methods**: Instant visual recognition
+- ✅ **Copy path button**: One-click copy
+- ✅ **Response examples**: Show expected output
+- ✅ **Request/response tabs**: Organize information
+
+### Complete API Example
+
+<ApiEndpoint 
+  method="POST" 
+  path="/api/users"
+  description="Create a new user account"
+>
+  **Request Body:**
+  ```json
+  {
+    "email": "user@example.com",
+    "name": "Jane Smith",
+    "password": "secure_password_123",
+    "role": "user"
+  }
+  ```
+  
+  **Validation Rules:**
+  - Email must be valid format
+  - Password minimum 8 characters
+  - Role must be: `user`, `admin`, or `moderator`
+  
+  <ResponseExample>
+    **Success (201 Created):**
+    ```json
+    {
+      "id": "usr_xyz789",
+      "email": "user@example.com",
+      "name": "Jane Smith",
+      "role": "user",
+      "createdAt": "2026-01-08T12:30:00Z",
+      "emailVerified": false
+    }
+    ```
+    
+    **Error (400 Bad Request):**
+    ```json
+    {
+      "error": "VALIDATION_ERROR",
+      "message": "Invalid email format",
+      "field": "email"
+    }
+    ```
+  </ResponseExample>
+</ApiEndpoint>
+
+### Pro Tips
+
+1. **Use RESTful paths**: `/api/users/:id` not `/api/getUser`
+2. **Show both success and error**: Include error responses
+3. **Document validation**: List requirements clearly
+4. **Include headers**: Show required authentication
+5. **Real examples**: Use realistic data, not "foo" and "bar"
+
+---
+
+## EnvVars
+
+### What is it?
+
+The `EnvVars` component documents environment variables with copy buttons, required badges, and clear descriptions.
+
+### When to use it
+
+✅ **Perfect for:**
+- Configuration guides
+- Deployment documentation
+- Setup instructions
+- Environment setup
+- Docker/Kubernetes configs
+
+❌ **Not ideal for:**
+- Code variables (use code blocks)
+- Command-line arguments
+- Config files (use code blocks)
+
+### Basic Usage
+
+<EnvVars>
+  <EnvVar 
+    name="DATABASE_URL" 
+    value="postgresql://localhost:5432/mydb"
+    required={true}
+    description="PostgreSQL connection string"
+  />
+  
+  <EnvVar 
+    name="PORT" 
+    value="3000"
+    required={false}
+    description="HTTP server port (default: 3000)"
+  />
+  
+  <EnvVar 
+    name="NODE_ENV" 
+    value="production"
+    required={true}
+    description="Environment mode: development, staging, or production"
+  />
+</EnvVars>
+
+**Code:**
+```mdx
+<EnvVars>
+  <EnvVar 
+    name="DATABASE_URL" 
+    value="postgresql://localhost:5432/db"
+    required={true}
+    description="Database connection string"
+  />
+</EnvVars>
+```
+
+### Props Reference
+
+**EnvVar:**
+- `name` (required): Variable name (UPPERCASE_SNAKE_CASE)
+- `value` (optional): Example value
+- `required` (optional): Is it required? (boolean)
+- `description` (optional): What it does
+
+### Features
+
+- ✅ **Copy name**: Click to copy variable name
+- ✅ **Copy value**: Click to copy example value
+- ✅ **Required badge**: Visual indicator
+- ✅ **Syntax highlighting**: Automatic
+
+### Complete Configuration Example
+
+<EnvVars>
+  <EnvVar 
+    name="DATABASE_URL" 
+    value="postgresql://user:pass@localhost:5432/mydb"
+    required={true}
+    description="Main database connection string (PostgreSQL)"
+  />
+  
+  <EnvVar 
+    name="REDIS_URL" 
+    value="redis://localhost:6379"
+    required={true}
+    description="Redis connection for caching and sessions"
+  />
+  
+  <EnvVar 
+    name="JWT_SECRET" 
+    value="your-super-secret-key-change-this"
+    required={true}
+    description="Secret key for JWT token signing (min 32 characters)"
+  />
+  
+  <EnvVar 
+    name="SMTP_HOST" 
+    value="smtp.gmail.com"
+    required={false}
+    description="SMTP server for sending emails"
+  />
+  
+  <EnvVar 
+    name="SMTP_PORT" 
+    value="587"
+    required={false}
+    description="SMTP server port (default: 587)"
+  />
+  
+  <EnvVar 
+    name="LOG_LEVEL" 
+    value="info"
+    required={false}
+    description="Logging level: debug, info, warn, error (default: info)"
+  />
+</EnvVars>
+
+### Pro Tips
+
+1. **Use UPPERCASE_SNAKE_CASE**: Standard convention
+2. **Provide realistic values**: Show actual examples
+3. **Mark required vars**: Use `required={true}`
+4. **Explain defaults**: Mention default values in description
+5. **Group related vars**: Keep database vars together, etc.
+
+---
+
+## K8sManifest
+
+### What is it?
+
+The `K8sManifest` component displays Kubernetes resource manifests with kind badges, namespace indicators, and copy buttons.
+
+### When to use it
+
+✅ **Perfect for:**
+- Kubernetes tutorials
+- Deployment guides
+- Infrastructure documentation
+- Helm chart examples
+- K8s configuration
+
+❌ **Not ideal for:**
+- Docker Compose (use code blocks)
+- Terraform (use code blocks)
+- Non-Kubernetes YAML
+
+### Basic Usage
+
+<K8sManifest 
+  kind="Deployment" 
+  name="web-app"
+  namespace="production"
+>
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      containers:
+      - name: web-app
+        image: myregistry/web-app:1.0.0
+        ports:
+        - containerPort: 3000
+```
+</K8sManifest>
+
+**Code:**
+```mdx
+<K8sManifest kind="Deployment" name="web-app" namespace="production">
+\`\`\`yaml
+apiVersion: apps/v1
+kind: Deployment
+...
+\`\`\`
+</K8sManifest>
+```
+
+### Props Reference
+
+- `kind` (required): Resource type (Deployment, Service, etc.)
+- `name` (required): Resource name
+- `namespace` (optional): Kubernetes namespace
+
+### Common Kinds
+
+- **Workloads**: Deployment, StatefulSet, DaemonSet, Job, CronJob
+- **Services**: Service, Ingress
+- **Config**: ConfigMap, Secret
+- **Storage**: PersistentVolume, PersistentVolumeClaim
+
+### Features
+
+- ✅ **Kind badge**: Color-coded by type
+- ✅ **Namespace indicator**: Shows where it deploys
+- ✅ **Copy button**: Copy entire manifest
+- ✅ **Syntax highlighting**: YAML highlighting
+
+### Complete Deployment Example
+
+<K8sManifest kind="Deployment" name="api-server" namespace="production">
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+  namespace: production
+  labels:
+    app: api-server
+    version: v1.0.0
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: api-server
+  template:
+    metadata:
+      labels:
+        app: api-server
+        version: v1.0.0
+    spec:
+      containers:
+      - name: api-server
+        image: myregistry/api-server:1.0.0
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: NODE_ENV
+          value: production
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: url
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+```
+</K8sManifest>
+
+### Pro Tips
+
+1. **Use valid YAML**: Test with `kubectl apply --dry-run`
+2. **Include resource limits**: Always set requests/limits
+3. **Add health checks**: Liveness and readiness probes
+4. **Use secrets**: Don't hardcode sensitive data
+5. **Comment complex fields**: Explain non-obvious settings
+
+---
+
+## Complete Infrastructure Docs
+
+Let's combine all components for complete infrastructure documentation:
+
+## Deploying a Microservices Application
+
+<Step number={1} description="Configure Environment">
+  Set up your environment variables:
+  
+  <EnvVars>
+    <EnvVar 
+      name="DATABASE_URL" 
+      value="postgresql://user:pass@postgres:5432/app"
+      required={true}
+      description="PostgreSQL database connection"
+    />
+    <EnvVar 
+      name="REDIS_URL" 
+      value="redis://redis:6379"
+      required={true}
+      description="Redis for caching"
+    />
+    <EnvVar 
+      name="API_KEY" 
+      value="your-api-key-here"
+      required={true}
+      description="External API authentication"
+    />
+  </EnvVars>
+</Step>
+
+<Step number={2} description="Deploy Database">
+  <K8sManifest kind="StatefulSet" name="postgres" namespace="database">
+  ```yaml
+  apiVersion: apps/v1
+  kind: StatefulSet
+  metadata:
+    name: postgres
+    namespace: database
+  spec:
+    serviceName: postgres
+    replicas: 1
+    selector:
+      matchLabels:
+        app: postgres
+    template:
+      metadata:
+        labels:
+          app: postgres
+      spec:
+        containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+          - containerPort: 5432
+          env:
+          - name: POSTGRES_DB
+            value: app
+          - name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: postgres-secret
+                key: password
+  ```
+  </K8sManifest>
+</Step>
+
+<Step number={3} description="Deploy API Service">
+  <K8sManifest kind="Deployment" name="api" namespace="production">
+  ```yaml
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: api
+    namespace: production
+  spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: api
+    template:
+      metadata:
+        labels:
+          app: api
+      spec:
+        containers:
+        - name: api
+          image: myregistry/api:1.0.0
+          ports:
+          - containerPort: 3000
+          envFrom:
+          - configMapRef:
+              name: api-config
+  ```
+  </K8sManifest>
+</Step>
+
+<Step number={4} description="Expose API">
+  Create the API endpoint:
+  
+  <ApiEndpoint method="GET" path="/api/v1/health">
+    Health check endpoint
+    
+    <ResponseExample>
+      ```json
+      {
+        "status": "healthy",
+        "version": "1.0.0",
+        "uptime": 3600
+      }
+      ```
+    </ResponseExample>
+  </ApiEndpoint>
+</Step>
+
+---
+
+## Best Practices Summary
+
+### ApiEndpoint
+- ✅ Use RESTful paths
+- ✅ Show success and errors
+- ✅ Document validation
+- ✅ Real examples
+
+### EnvVars
+- ✅ UPPERCASE_SNAKE_CASE
+- ✅ Realistic values
+- ✅ Mark required
+- ✅ Explain defaults
+
+### K8sManifest
+- ✅ Valid YAML
+- ✅ Resource limits
+- ✅ Health checks
+- ✅ Use secrets
+
+---
+
+## Next Steps
+
+You've now mastered all the core components! In **Part 4**, we'll explore **Advanced Patterns**: combining components, creating templates, and building complete documentation systems.
+
+---
+
+## Quick Reference
+
+### Import Statements
+
+```js
+import { ApiEndpoint, ResponseExample } from '@/components/shared/ApiEndpoint.astro';
+import { EnvVars, EnvVar } from '@/components/shared/EnvVars.astro';
+import { K8sManifest } from '@/components/shared/K8sManifest.astro';
+import { ComparisonTable, ComparisonHeader, ComparisonRow } from '@/components/shared/ComparisonTable.astro';
+```
+
+Happy documenting! 🚀

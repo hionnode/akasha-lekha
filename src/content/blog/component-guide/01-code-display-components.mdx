@@ -1,0 +1,631 @@
+---
+title: "Part 1: Code Display Components - PanelSwitcher, FileTree & DiffViewer"
+excerpt: "Master the art of displaying code with interactive switchers, beautiful file trees, and clear diff views. Learn when and how to use each component effectively."
+date: "2026-01-08"
+tags: ["mdx", "components", "code-display", "tutorial"]
+series: "component-guide"
+seriesPart: 1
+seriesTotal: 3
+---
+
+import PanelSwitcher from '../../../components/shared/PanelSwitcher.astro';
+import Panel from '../../../components/shared/Panel.astro';
+import FileTree from '../../../components/shared/FileTree.astro';
+import DiffViewer from '../../../components/shared/DiffViewer.astro';
+import DiffBlock from '../../../components/shared/DiffBlock.astro';
+import Command from '../../../components/shared/Command.astro';
+
+# Part 1: Code Display Components
+
+Welcome to the first part of our comprehensive component guide! In this post, we'll explore the three most essential components for displaying code: **PanelSwitcher**, **FileTree**, and **DiffViewer**.
+
+## Table of Contents
+
+1. [PanelSwitcher - The Swiss Army Knife](#panelswitcher)
+2. [FileTree - Visual Project Structure](#filetree)
+3. [DiffViewer - Show Code Changes](#diffviewer)
+4. [Real-World Examples](#real-world-examples)
+
+---
+
+## PanelSwitcher
+
+### What is it?
+
+The `PanelSwitcher` lets readers choose between different code examples without cluttering your page. It's perfect for showing alternatives like different package managers, programming languages, or frameworks.
+
+### When to use it
+
+✅ **Perfect for:**
+- Package manager alternatives (npm, pnpm, yarn, bun)
+- Programming language comparisons (JavaScript vs TypeScript)
+- Framework examples (React vs Vue vs Svelte)
+- Configuration formats (JSON vs YAML vs TOML)
+- Different approaches to the same problem
+
+❌ **Not ideal for:**
+- Single code examples (just use a code block)
+- Completely different concepts (use separate sections)
+- More than 5-6 options (gets crowded)
+
+### Basic Usage
+
+<PanelSwitcher defaultActive="npm">
+  <Panel label="npm">
+    ```bash
+    npm install express
+    npm run dev
+    ```
+  </Panel>
+  
+  <Panel label="pnpm">
+    ```bash
+    pnpm add express
+    pnpm dev
+    ```
+  </Panel>
+  
+  <Panel label="yarn">
+    ```bash
+    yarn add express
+    yarn dev
+    ```
+  </Panel>
+  
+  <Panel label="bun">
+    ```bash
+    bun add express
+    bun dev
+    ```
+  </Panel>
+</PanelSwitcher>
+
+**Code:**
+```mdx
+<PanelSwitcher defaultActive="npm">
+  <Panel label="npm">
+    \`\`\`bash
+    npm install express
+    npm run dev
+    \`\`\`
+  </Panel>
+  
+  <Panel label="pnpm">
+    \`\`\`bash
+    pnpm add express
+    pnpm dev
+    \`\`\`
+  </Panel>
+</PanelSwitcher>
+```
+
+### Props Reference
+
+**PanelSwitcher:**
+- `defaultActive` (optional): Which panel to show initially (defaults to first panel)
+- `class` (optional): Additional CSS classes
+
+**Panel:**
+- `label` (required): Display text for the tab
+- `value` (optional): Internal identifier (auto-generated from label if not provided)
+
+### Features
+
+- ✅ **Keyboard navigation**: Use Arrow keys, Home, End to switch tabs
+- ✅ **Animated indicator**: Blue line slides smoothly under active tab
+- ✅ **Click feedback**: Ripple effect on click
+- ✅ **Mobile-friendly**: 44px touch targets, horizontal scroll
+- ✅ **Accessible**: Full ARIA support, screen reader friendly
+
+### Advanced Example: Language Comparison
+
+<PanelSwitcher defaultActive="javascript">
+  <Panel label="JavaScript">
+    ```js
+    // Fetch user data
+    async function getUser(id) {
+      const response = await fetch(`/api/users/${id}`);
+      const data = await response.json();
+      return data;
+    }
+    
+    // Usage
+    const user = await getUser(123);
+    console.log(user.name);
+    ```
+  </Panel>
+  
+  <Panel label="TypeScript">
+    ```ts
+    // Fetch user data with type safety
+    interface User {
+      id: number;
+      name: string;
+      email: string;
+    }
+    
+    async function getUser(id: number): Promise<User> {
+      const response = await fetch(`/api/users/${id}`);
+      const data: User = await response.json();
+      return data;
+    }
+    
+    // Usage
+    const user = await getUser(123);
+    console.log(user.name); // Type-safe!
+    ```
+  </Panel>
+  
+  <Panel label="Python">
+    ```python
+    import requests
+    from typing import Dict
+    
+    def get_user(user_id: int) -> Dict:
+        """Fetch user data from API"""
+        response = requests.get(f"/api/users/{user_id}")
+        return response.json()
+    
+    # Usage
+    user = get_user(123)
+    print(user['name'])
+    ```
+  </Panel>
+</PanelSwitcher>
+
+### Pro Tips
+
+1. **Set sensible defaults**: Use `defaultActive` to show the most common option first
+2. **Keep labels short**: 1-2 words max (npm, pnpm, not "Node Package Manager")
+3. **Consistent structure**: Keep code examples equivalent across panels
+4. **Limit options**: 3-5 panels is ideal, 6+ gets crowded on mobile
+
+---
+
+## FileTree
+
+### What is it?
+
+The `FileTree` component displays project directory structures in a beautiful, interactive format. It's worth a thousand words when explaining project organization.
+
+### When to use it
+
+✅ **Perfect for:**
+- Showing project scaffolding
+- Explaining file organization
+- Documentation of folder structures
+- Before/after project structure
+- Configuration file locations
+
+❌ **Not ideal for:**
+- Showing file contents (use code blocks)
+- Very large projects (show only relevant parts)
+- Flat structures with 2-3 files (just list them)
+
+### Basic Usage
+
+<FileTree>
+my-project/
+  src/
+    components/
+      Button.astro
+      Header.astro
+      Footer.astro
+    layouts/
+      BaseLayout.astro
+    pages/
+      index.astro
+      about.astro
+    styles/
+      global.css
+  public/
+    favicon.svg
+  package.json
+  astro.config.mjs
+</FileTree>
+
+**Code:**
+```mdx
+<FileTree>
+my-project/
+  src/
+    components/
+      Button.astro
+    pages/
+      index.astro
+  package.json
+</FileTree>
+```
+
+### Formatting Rules
+
+**Important conventions:**
+
+1. **Indentation**: Use 2 spaces per level
+2. **Folders**: End with `/`
+3. **Files**: No trailing slash
+4. **Nesting**: Up to 9 levels supported
+
+**Example:**
+```
+folder/              ← Folder (ends with /)
+  subfolder/         ← Nested folder (2 spaces)
+    file.txt         ← File (no slash)
+  another-file.js    ← Same level as subfolder
+```
+
+### Features
+
+- ✅ **Color-coded icons**: Blue folders, cyan files
+- ✅ **Copy path buttons**: Always visible (subtle opacity)
+- ✅ **Collapsible folders**: Click to expand/collapse
+- ✅ **Automatic icons**: Based on file extension
+- ✅ **Unlimited nesting**: Up to 9 levels deep
+
+### Advanced Example: Full Stack Project
+
+<FileTree>
+fullstack-app/
+  apps/
+    web/
+      src/
+        app/
+          layout.tsx
+          page.tsx
+        components/
+          ui/
+            button.tsx
+            input.tsx
+          features/
+            auth/
+              login-form.tsx
+              signup-form.tsx
+      package.json
+      tsconfig.json
+    api/
+      src/
+        routes/
+          users.ts
+          auth.ts
+        middleware/
+          auth.ts
+        db/
+          schema.ts
+      package.json
+  packages/
+    shared/
+      src/
+        types/
+          user.ts
+          api.ts
+        utils/
+          validation.ts
+      package.json
+  docker-compose.yml
+  pnpm-workspace.yaml
+  turbo.json
+</FileTree>
+
+### Pro Tips
+
+1. **Show only relevant files**: Don't include `node_modules`, `.git`, etc.
+2. **Order matters**: Put folders first, then files (alphabetically)
+3. **Use comments**: Add inline comments for clarity
+4. **Highlight key files**: Mention important files in surrounding text
+5. **Keep it focused**: Show 10-20 files max for readability
+
+---
+
+## DiffViewer
+
+### What is it?
+
+The `DiffViewer` component shows code changes with clear visual indicators. It's perfect for migration guides, refactoring examples, and before/after comparisons.
+
+### When to use it
+
+✅ **Perfect for:**
+- Migration guides (v1 → v2)
+- Configuration updates
+- Refactoring examples
+- Before/after comparisons
+- Breaking changes documentation
+
+❌ **Not ideal for:**
+- Completely new code (just show the code)
+- Unrelated code snippets (use separate blocks)
+- Large file changes (show only relevant parts)
+
+### Basic Usage
+
+<DiffViewer mode="unified">
+  <DiffBlock type="removed">
+    ```js
+    // Old way: CommonJS
+    const express = require('express');
+    module.exports = app;
+    ```
+  </DiffBlock>
+  
+  <DiffBlock type="added">
+    ```js
+    // New way: ES Modules
+    import express from 'express';
+    export default app;
+    ```
+  </DiffBlock>
+</DiffViewer>
+
+**Code:**
+```mdx
+<DiffViewer mode="unified">
+  <DiffBlock type="removed">
+    \`\`\`js
+    const express = require('express');
+    \`\`\`
+  </DiffBlock>
+  
+  <DiffBlock type="added">
+    \`\`\`js
+    import express from 'express';
+    \`\`\`
+  </DiffBlock>
+</DiffViewer>
+```
+
+### Props Reference
+
+**DiffViewer:**
+- `mode` (optional): `"unified"` or `"split"` (default: unified)
+
+**DiffBlock:**
+- `type` (required): `"added"` or `"removed"`
+
+### Features
+
+- ✅ **+/- symbols**: Clear visual indicators
+- ✅ **Color-coded**: Green for additions, red for removals
+- ✅ **Syntax highlighting**: Preserved from code blocks
+- ✅ **Left border**: 3px solid indicator
+- ✅ **Increased opacity**: 0.15 for better visibility
+
+### Advanced Example: Configuration Migration
+
+<DiffViewer>
+  <DiffBlock type="removed">
+    ```js
+    // astro.config.mjs (v3)
+    export default defineConfig({
+      output: 'static',
+      markdown: {
+        syntaxHighlight: 'shiki',
+        shikiConfig: {
+          theme: 'nord'
+        }
+      }
+    });
+    ```
+  </DiffBlock>
+  
+  <DiffBlock type="added">
+    ```js
+    // astro.config.mjs (v4)
+    export default defineConfig({
+      output: 'static',
+      markdown: {
+        shikiConfig: {
+          themes: {
+            light: 'github-light',
+            dark: 'tokyo-night'
+          }
+        }
+      }
+    });
+    ```
+  </DiffBlock>
+</DiffViewer>
+
+### Pro Tips
+
+1. **Show minimal context**: Only include changed lines + 1-2 lines around them
+2. **Align indentation**: Keep the same indentation in removed/added blocks
+3. **Add comments**: Explain why the change is needed
+4. **Use unified mode**: It's easier to read than split mode
+5. **Group related changes**: Put related changes in the same DiffViewer
+
+---
+
+## Real-World Examples
+
+### Example 1: Complete Setup Guide
+
+Let's combine all three components to create a complete setup guide:
+
+**Step 1: Install Dependencies**
+
+<PanelSwitcher defaultActive="npm">
+  <Panel label="npm">
+    ```bash
+    npm create astro@latest my-blog
+    cd my-blog
+    npm install
+    ```
+  </Panel>
+  
+  <Panel label="pnpm">
+    ```bash
+    pnpm create astro@latest my-blog
+    cd my-blog
+    pnpm install
+    ```
+  </Panel>
+  
+  <Panel label="yarn">
+    ```bash
+    yarn create astro my-blog
+    cd my-blog
+    yarn install
+    ```
+  </Panel>
+</PanelSwitcher>
+
+**Step 2: Verify Project Structure**
+
+Your project should look like this:
+
+<FileTree>
+my-blog/
+  src/
+    pages/
+      index.astro
+    layouts/
+      BaseLayout.astro
+  public/
+    favicon.svg
+  astro.config.mjs
+  package.json
+  tsconfig.json
+</FileTree>
+
+**Step 3: Update Configuration**
+
+<DiffViewer>
+  <DiffBlock type="removed">
+    ```js
+    // astro.config.mjs
+    export default defineConfig({});
+    ```
+  </DiffBlock>
+  
+  <DiffBlock type="added">
+    ```js
+    // astro.config.mjs
+    export default defineConfig({
+      site: 'https://myblog.com',
+      markdown: {
+        shikiConfig: {
+          theme: 'tokyo-night'
+        }
+      }
+    });
+    ```
+  </DiffBlock>
+</DiffViewer>
+
+### Example 2: Framework Migration
+
+**Before: Express.js (CommonJS)**
+
+<FileTree>
+express-app/
+  src/
+    app.js
+    routes/
+      users.js
+      posts.js
+  package.json
+</FileTree>
+
+**After: Fastify (ES Modules)**
+
+<FileTree>
+fastify-app/
+  src/
+    app.ts
+    routes/
+      users.ts
+      posts.ts
+  package.json
+  tsconfig.json
+</FileTree>
+
+**Code Changes:**
+
+<DiffViewer>
+  <DiffBlock type="removed">
+    ```js
+    // Express
+    const express = require('express');
+    const app = express();
+    
+    app.get('/users', (req, res) => {
+      res.json({ users: [] });
+    });
+    
+    app.listen(3000);
+    ```
+  </DiffBlock>
+  
+  <DiffBlock type="added">
+    ```ts
+    // Fastify
+    import Fastify from 'fastify';
+    const fastify = Fastify();
+    
+    fastify.get('/users', async (request, reply) => {
+      return { users: [] };
+    });
+    
+    await fastify.listen({ port: 3000 });
+    ```
+  </DiffBlock>
+</DiffViewer>
+
+---
+
+## Best Practices Summary
+
+### PanelSwitcher
+- ✅ Use for 2-5 alternatives
+- ✅ Set sensible `defaultActive`
+- ✅ Keep labels short
+- ✅ Maintain consistent structure
+
+### FileTree
+- ✅ Show only relevant files
+- ✅ Use 2-space indentation
+- ✅ Add `/` to folders
+- ✅ Limit to 10-20 files
+
+### DiffViewer
+- ✅ Show minimal context
+- ✅ Align indentation
+- ✅ Add explanatory comments
+- ✅ Use unified mode
+
+---
+
+## Next Steps
+
+In **Part 2**, we'll explore **Interactive Components**: TerminalOutput, Command, and Step components for creating engaging tutorials.
+
+**Coming up:**
+- Part 2: Interactive Components
+- Part 3: DevOps Components
+- Part 4: Advanced Patterns
+
+---
+
+## Quick Reference
+
+### Import Statements
+
+```js
+import { PanelSwitcher, Panel } from '@/components/shared/PanelSwitcher.astro';
+import FileTree from '@/components/shared/FileTree.astro';
+import { DiffViewer, DiffBlock } from '@/components/shared/DiffViewer.astro';
+```
+
+### Keyboard Shortcuts
+
+**PanelSwitcher:**
+- `Tab` - Focus tabs
+- `Arrow Left/Right` - Switch tabs
+- `Home/End` - First/last tab
+- `Enter/Space` - Activate tab
+
+**FileTree:**
+- `Click` - Expand/collapse folders
+- `Hover` - Show copy button
+
+Happy documenting! 🚀

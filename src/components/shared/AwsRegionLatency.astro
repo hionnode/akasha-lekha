@@ -1,0 +1,419 @@
+---
+// AWS Region Latency Checker - Lazygit-style TUI
+---
+
+<div class="region-latency-tui">
+  <div class="tui-header">
+    <div class="tui-title">AWS Region Latency Test</div>
+    <div class="tui-command">$ aws-latency-check --all-regions</div>
+  </div>
+
+  <button id="test-latency-btn" class="tui-button">
+    <span class="button-text">▶ Run Test</span>
+    <span class="button-loading hidden">⟳ Testing...</span>
+  </button>
+
+  <div id="latency-results" class="tui-results hidden">
+    <div class="results-header">
+      <span class="col-region">REGION</span>
+      <span class="col-location">LOCATION</span>
+      <span class="col-latency">LATENCY</span>
+      <span class="col-status">STATUS</span>
+    </div>
+    <div id="results-list" class="results-body">
+      <!-- Results will be inserted here -->
+    </div>
+  </div>
+
+  <div id="latency-error" class="tui-error hidden">
+    <div class="error-message">✗ Unable to test latency. Check your network connection.</div>
+  </div>
+</div>
+
+<script>
+  const AWS_REGIONS = [
+    { code: 'us-east-1', name: 'US East (N. Virginia)' },
+    { code: 'us-east-2', name: 'US East (Ohio)' },
+    { code: 'us-west-1', name: 'US West (N. California)' },
+    { code: 'us-west-2', name: 'US West (Oregon)' },
+    { code: 'eu-west-1', name: 'Europe (Ireland)' },
+    { code: 'eu-west-2', name: 'Europe (London)' },
+    { code: 'eu-west-3', name: 'Europe (Paris)' },
+    { code: 'eu-central-1', name: 'Europe (Frankfurt)' },
+    { code: 'eu-north-1', name: 'Europe (Stockholm)' },
+    { code: 'ap-south-1', name: 'Asia Pacific (Mumbai)' },
+    { code: 'ap-northeast-1', name: 'Asia Pacific (Tokyo)' },
+    { code: 'ap-northeast-2', name: 'Asia Pacific (Seoul)' },
+    { code: 'ap-southeast-1', name: 'Asia Pacific (Singapore)' },
+    { code: 'ap-southeast-2', name: 'Asia Pacific (Sydney)' },
+    { code: 'sa-east-1', name: 'South America (São Paulo)' },
+    { code: 'ca-central-1', name: 'Canada (Central)' },
+  ];
+
+  function truncate(str: string, maxLen: number): string {
+    if (str.length <= maxLen) return str;
+    return str.substring(0, maxLen - 1) + '…';
+  }
+
+  async function measureLatency(region: { code: string; name: string }): Promise<number | null> {
+    const iterations = 3;
+    const latencies: number[] = [];
+    // Use S3 endpoint for reliable latency testing
+    // S3 endpoints are available in all regions and respond to HEAD requests
+    const testUrl = `https://s3.${region.code}.amazonaws.com/`;
+
+    for (let i = 0; i < iterations; i++) {
+      const start = performance.now();
+
+      try {
+        // Use fetch with no-cors mode
+        await fetch(testUrl, {
+          method: 'GET',
+          mode: 'no-cors',
+          cache: 'no-store',
+        });
+
+        const end = performance.now();
+        latencies.push(end - start);
+      } catch (error) {
+        // If fetch fails completely, skip this iteration
+        console.warn(`Failed to measure latency for ${region.code}:`, error);
+      }
+
+      // Small delay between iterations
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    if (latencies.length === 0) return null;
+
+    // Return median latency
+    latencies.sort((a, b) => a - b);
+    return latencies[Math.floor(latencies.length / 2)];
+  }
+
+  function getStatusSymbol(latency: number): string {
+    if (latency < 50) return '✓ EXCELLENT';
+    if (latency < 100) return '✓ GOOD';
+    if (latency < 200) return '○ FAIR';
+    return '✗ HIGH';
+  }
+
+  function getLatencyClass(latency: number): string {
+    if (latency < 50) return 'excellent';
+    if (latency < 100) return 'good';
+    if (latency < 200) return 'fair';
+    return 'poor';
+  }
+
+  async function testAllRegions() {
+    const button = document.getElementById('test-latency-btn') as HTMLButtonElement | null;
+    const results = document.getElementById('latency-results');
+    const resultsList = document.getElementById('results-list');
+    const errorDiv = document.getElementById('latency-error');
+
+    errorDiv?.classList.add('hidden');
+    if (!button || !results || !resultsList || !errorDiv) return;
+    (button?.querySelector('.button-text') as HTMLElement | null)?.classList.add('hidden');
+    (button?.querySelector('.button-loading') as HTMLElement | null)?.classList.remove('hidden');
+    button.disabled = true;
+
+    resultsList.innerHTML = '';
+    results.classList.remove('hidden');
+
+    const regionResults: Array<{ code: string; name: string; latency: number }> = [];
+
+    for (const region of AWS_REGIONS) {
+      const latency = await measureLatency(region);
+
+      if (latency !== null) {
+        regionResults.push({ ...region, latency });
+      }
+    }
+
+    if (regionResults.length === 0) {
+      errorDiv.classList.remove('hidden');
+      results.classList.add('hidden');
+    } else {
+      regionResults.sort((a, b) => a.latency - b.latency);
+
+      resultsList.innerHTML = '';
+      regionResults.forEach((result, index) => {
+        const resultRow = document.createElement('div');
+        resultRow.className = `result-row ${getLatencyClass(result.latency)} ${index === 0 ? 'best' : ''}`;
+
+        const regionCode = index === 0 ? `★ ${result.code}` : result.code;
+        const latencyMs = `${Math.round(result.latency)}ms`;
+        const status = getStatusSymbol(result.latency);
+
+        resultRow.innerHTML = `
+          <span class="col-region">${truncate(regionCode, 15)}</span>
+          <span class="col-location">${truncate(result.name, 28)}</span>
+          <span class="col-latency">${latencyMs}</span>
+          <span class="col-status">${status}</span>
+        `;
+        resultsList.appendChild(resultRow);
+      });
+    }
+
+    (button?.querySelector('.button-text') as HTMLElement | null)?.classList.remove('hidden');
+    (button?.querySelector('.button-loading') as HTMLElement | null)?.classList.add('hidden');
+    button.disabled = false;
+  }
+
+  function initLatencyChecker() {
+    const button = document.getElementById('test-latency-btn');
+    if (button) {
+      button.addEventListener('click', testAllRegions);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initLatencyChecker);
+  } else {
+    initLatencyChecker();
+  }
+
+  document.addEventListener('astro:page-load', initLatencyChecker);
+</script>
+
+<style>
+  .region-latency-tui {
+    margin: 2rem 0;
+    border: 2px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--bg-secondary);
+    overflow: hidden;
+    font-family: 'Inconsolata', monospace;
+  }
+
+  .tui-header {
+    padding: 1rem 1.25rem;
+    background: var(--bg-tertiary);
+    border-bottom: 2px solid var(--border);
+  }
+
+  .tui-title {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--accent-blue);
+    margin-bottom: 0.25rem;
+  }
+
+  .tui-command {
+    font-size: 0.875rem;
+    color: var(--fg-muted);
+  }
+
+  .tui-button {
+    width: 100%;
+    padding: 1rem 1.25rem;
+    background: var(--bg-tertiary);
+    color: var(--accent-green);
+    border: none;
+    border-bottom: 2px solid var(--border);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: left;
+  }
+
+  .tui-button:hover:not(:disabled) {
+    background: rgba(122, 162, 247, 0.1);
+    color: var(--accent-blue);
+  }
+
+  .tui-button:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
+  .tui-results {
+    background: var(--bg-primary);
+  }
+
+  .results-header {
+    display: grid;
+    grid-template-columns: 150px 1fr 110px 130px;
+    gap: 0.75rem;
+    padding: 0.875rem 1.25rem;
+    background: var(--bg-tertiary);
+    border-bottom: 2px solid var(--border);
+    font-weight: 700;
+    font-size: 0.8125rem;
+    color: var(--fg-muted);
+    letter-spacing: 0.5px;
+  }
+
+  .results-body {
+    max-height: 400px;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  .result-row {
+    display: grid;
+    grid-template-columns: 150px 1fr 110px 130px;
+    gap: 0.75rem;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    transition: all 0.15s ease;
+    animation: fadeIn 0.2s ease;
+    font-size: 0.875rem;
+  }
+
+  .result-row:hover {
+    background: var(--bg-tertiary);
+  }
+
+  .result-row.best {
+    background: rgba(16, 185, 129, 0.15);
+    border-left: 3px solid var(--accent-green);
+  }
+
+  .result-row.excellent {
+    background: rgba(16, 185, 129, 0.08);
+  }
+
+  .result-row.good {
+    background: rgba(122, 162, 247, 0.08);
+  }
+
+  .result-row.fair {
+    background: rgba(245, 158, 11, 0.08);
+  }
+
+  .result-row.poor {
+    background: rgba(239, 68, 68, 0.08);
+  }
+
+  .result-row span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .col-region {
+    font-weight: 600;
+    color: var(--fg-primary);
+  }
+
+  .col-location {
+    color: var(--fg-secondary);
+  }
+
+  .col-latency {
+    font-weight: 700;
+    text-align: right;
+  }
+
+  .col-status {
+    font-weight: 600;
+    font-size: 0.8125rem;
+  }
+
+  .result-row.excellent .col-latency,
+  .result-row.excellent .col-status {
+    color: var(--accent-green);
+  }
+
+  .result-row.good .col-latency,
+  .result-row.good .col-status {
+    color: var(--accent-blue);
+  }
+
+  .result-row.fair .col-latency,
+  .result-row.fair .col-status {
+    color: #f59e0b;
+  }
+
+  .result-row.poor .col-latency,
+  .result-row.poor .col-status {
+    color: #ef4444;
+  }
+
+  .tui-error {
+    padding: 1.25rem;
+    background: rgba(239, 68, 68, 0.1);
+    border-top: 2px solid #ef4444;
+  }
+
+  .error-message {
+    font-size: 0.875rem;
+    color: #ef4444;
+    font-weight: 600;
+  }
+
+  .hidden {
+    display: none;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  /* Scrollbar styling for TUI aesthetic */
+  .results-body::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .results-body::-webkit-scrollbar-track {
+    background: var(--bg-tertiary);
+  }
+
+  .results-body::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+  }
+
+  .results-body::-webkit-scrollbar-thumb:hover {
+    background: var(--fg-muted);
+  }
+
+  /* Mobile responsive */
+  @media (max-width: 768px) {
+    .tui-header {
+      padding: 0.875rem 1rem;
+    }
+
+    .tui-title {
+      font-size: 0.9375rem;
+    }
+
+    .tui-command {
+      font-size: 0.8125rem;
+    }
+
+    .tui-button {
+      padding: 0.875rem 1rem;
+      font-size: 0.875rem;
+    }
+
+    .results-header {
+      grid-template-columns: 110px 1fr 85px 105px;
+      gap: 0.5rem;
+      padding: 0.75rem 1rem;
+      font-size: 0.75rem;
+    }
+
+    .result-row {
+      grid-template-columns: 110px 1fr 85px 105px;
+      gap: 0.5rem;
+      padding: 0.625rem 1rem;
+      font-size: 0.8125rem;
+    }
+
+    .col-status {
+      font-size: 0.75rem;
+    }
+
+    .results-body {
+      max-height: 300px;
+    }
+  }
+</style>

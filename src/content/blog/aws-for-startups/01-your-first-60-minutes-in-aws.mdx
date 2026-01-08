@@ -1,0 +1,626 @@
+---
+title: "Your First 60 Minutes in AWS: Startup Security Guide"
+description: "Learn how to set up your AWS account securely in 60 minutes. Prevent surprise bills by enabling MFA, CloudTrail, and billing alerts from day one."
+excerpt: "What everyone skips and regrets later. Set up your AWS account the right way—secure enough to sleep at night, without the enterprise overhead that kills velocity."
+date: "2026-01-08"
+author: "works-on-my.cloud"
+tags: ["aws", "security", "iam", "devops", "startup"]
+series: "AWS From Zero to Production"
+seriesPart: 1
+---
+
+import GuideStep from '../../../components/shared/GuideStep.astro';
+import Command from '../../../components/shared/Command.astro';
+import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
+import EnvVars from '../../../components/shared/EnvVars.astro';
+import EnvVar from '../../../components/shared/EnvVar.astro';
+import Alert from '../../../components/shared/Alert.astro';
+import AwsRegionLatency from '../../../components/shared/AwsRegionLatency.astro';
+import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
+
+
+*What everyone skips and regrets later*
+
+---
+
+## Why This Matters
+
+Picture this: You create an AWS account, generate root access keys, and share them on Slack so everyone can deploy. You're moving fast.
+
+Three months later, you wake up to a $47,000 bill. Cryptominers have been running on your account for weeks. The worst part? CloudTrail wasn't enabled, so you can't even see how they got in.
+
+This happens constantly. Not because engineers are careless, but because AWS security docs assume you have a compliance team and six months to implement everything. You don't. You have a product to ship.
+
+This guide is the middle path: **enough security to sleep at night, without the enterprise overhead that kills velocity.**
+
+AWS operates on a shared responsibility model. They secure the infrastructure—the physical data centers, the hypervisors, the network. You secure your account, your data, and your configurations.
+
+<Alert type="important" title="AWS Shared Responsibility Model">
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    YOUR RESPONSIBILITY                  │
+├─────────────────────────────────────────────────────────┤
+│  • Customer Data & Encryption                           │
+│  • Identity & Access Management (IAM)                   │
+│  • Application Security                                 │
+│  • OS & Network Configuration                           │
+│  • Firewall & Security Group Rules                      │
+├─────────────────────────────────────────────────────────┤
+│                   AWS RESPONSIBILITY                    │
+├─────────────────────────────────────────────────────────┤
+│  • Physical Security of Data Centers                    │
+│  • Hardware & Infrastructure                            │
+│  • Network Infrastructure                               │
+│  • Virtualization Layer                                 │
+│  • Managed Service Security (S3, RDS, Lambda)           │
+└─────────────────────────────────────────────────────────┘
+```
+
+</Alert>
+
+---
+
+## What We're Preventing
+
+By the end of this post, your AWS account will be protected against:
+
+- **Credential theft** — Root keys floating around in Slack, `.env` files, or GitHub commits
+- **Bill shock** — Waking up to charges you didn't expect
+- **Invisible breaches** — Attackers operating without any audit trail
+- **Single point of failure** — One compromised password = total access
+
+This takes about 60 minutes. You'll never think about it again.
+
+---
+
+## Root Account Lockdown
+
+### What Root Is (And Why It's Dangerous)
+
+When you create an AWS account, you get a single identity: the root user. This account has **unlimited privileges**. It can:
+
+- Bypass every IAM policy you create
+- Delete CloudTrail logs (hiding evidence of breaches)
+- Close the entire AWS account
+- Do anything, to any resource, with no restrictions
+
+There is no way to limit root's power. That's by design it's the "break glass" account for emergencies. But that same unlimited power makes it the single most dangerous credential in your infrastructure.
+
+**The goal: Use root once to set up your account, then never again.**
+
+<Alert type="warning" title="The Fine Line">
+
+❌ **Under-engineering:** Using root for daily work, sharing root credentials
+
+✅ **Right-sized:** Root locked with MFA, used only for root-only tasks
+
+❌ **Over-engineering:** Hardware security keys in bank vaults, 3-person approval workflows (save this for when you're at scale)
+
+</Alert>
+
+### Delete Root Access Keys
+
+Root access keys are long-lived credentials that grant unlimited API access. If they exist, delete them immediately.
+
+<GuideStep title="Delete Root Access Keys" syncKey="root-access-keys">
+  1. Sign in to the [AWS Console](https://console.aws.amazon.com/) as root
+  2. Click your account name in the top-right corner
+  3. Select **Security credentials**
+  4. In the **Access keys** section, check if any keys exist
+  5. If keys exist, click **Actions** → **Delete**
+</GuideStep>
+
+<Alert type="caution">
+
+If you're using these keys somewhere, you have a bigger problem. Stop, figure out where they're used, and replace them with IAM role credentials. We'll cover proper credential management in Part 3.
+
+</Alert>
+
+### Enable MFA on Root
+
+MFA adds a second authentication factor. Even if someone steals your password, they can't sign in without physical access to your MFA device.
+
+**Your options:**
+
+| Type | Security | Convenience | Recommendation |
+|------|----------|-------------|----------------|
+| Passkey (FIDO2) | Highest | High | Best for most |
+| Authenticator app | High | High | Good alternative |
+| Hardware TOTP token | Highest | Low | High-security orgs only |
+
+For most startups, a passkey or authenticator app (1Password, Authy, Google Authenticator) works fine.
+
+**To enable MFA:** Follow the [AWS guide to enable MFA on root](https://docs.aws.amazon.com/IAM/latest/UserGuide/enable-mfa-for-root.html).
+
+<Alert type="important">
+
+**Critical:** Store your MFA recovery codes somewhere safe. If you lose access to your MFA device and don't have recovery codes, you'll go through AWS support hell to regain access.
+
+</Alert>
+
+### When You'll Actually Need Root
+
+After setup, you'll rarely need root. But these tasks require it:
+
+- Close your AWS account
+- Change your account name or root email
+- Activate IAM access to Billing (one-time setup)
+- Restore IAM permissions if completely locked out
+- Sign up for GovCloud
+- Change your AWS Support plan
+- Edit/delete certain resource policies that deny all principals (S3, SQS edge cases)
+
+Full list: [Tasks requiring root credentials](https://docs.aws.amazon.com/IAM/latest/UserGuide/root-user-tasks.html)
+
+For everything else, use an IAM admin user—which we'll create next.
+
+---
+
+## Your First IAM Admin User
+
+### Why Not Just Use Root with MFA?
+
+MFA protects against password theft, but it doesn't reduce root's power. A mistake made while signed in as root—deleting the wrong resource, misconfiguring a policy—has no safety net.
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    ROOT USER                         │
+│  ⚠️  Unlimited Power • No Audit Trail • No Limits   │
+│  ✓  MFA Enabled • Locked Away • Emergency Only      │
+└──────────────────────────────────────────────────────┘
+                        │
+                        │ Creates
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│                  IAM ADMIN USER                      │
+│  ✓  Full Practical Access                           │
+│  ✓  Actions Logged in CloudTrail                    │
+│  ✓  Can Be Revoked Without Losing Account           │
+│  ✓  Can Add Restrictions Later                      │
+│  ✓  Daily Operations                                │
+└──────────────────────────────────────────────────────┘
+                        │
+                        │ Creates (Later)
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│              TEAM MEMBERS (IAM Users)                │
+│  Limited Permissions • Specific Roles                │
+└──────────────────────────────────────────────────────┘
+```
+
+An IAM admin user has the same practical capabilities for daily work, but with key differences:
+
+- Actions are logged in CloudTrail with the specific user identity
+- You can revoke access without losing account control
+- You can add restrictions later if needed
+- It creates separation: root for emergencies, admin for everything else
+
+### Create the Admin Group
+
+Create a group first, then add users to it. This pattern scales when you add team members later.
+
+<GuideStep title="Create Admin Group" syncKey="admin-user-created">
+  1. Sign in to the [IAM console](https://console.aws.amazon.com/iam/)
+  2. In the left navigation, click **User groups**
+  3. Click **Create group**
+  4. For **Group name**, enter `Administrators`
+  5. In the **Attach permissions policies** section, search for `AdministratorAccess`
+  6. Select the checkbox next to **AdministratorAccess**
+  7. Click **Create group**
+</GuideStep>
+
+<GuideStep title="Create Your Admin User">
+  1. In the IAM console, click **Users** in the left navigation
+  2. Click **Create user**
+  3. Enter a username (e.g., `yourname-admin` use your name, not a generic "admin")
+  4. Select **Provide user access to the AWS Management Console**
+  5. Choose **I want to create an IAM user** (not Identity Center for now we'll cover that in Part 2)
+  6. Set a strong password
+  7. Uncheck **Users must create a new password at next sign-in** (you're the only user)
+  8. Click **Next**
+  9. Select the **Administrators** group you created
+  10. Click **Next**, then **Create user**
+</GuideStep>
+
+<GuideStep title="Enable MFA on Your Admin User" syncKey="admin-mfa">
+  1. In the IAM console, click **Users**
+  2. Click your new admin username
+  3. Select the **Security credentials** tab
+  4. In the **Multi-factor authentication (MFA)** section, click **Assign MFA device**
+  5. Follow the prompts to set up your authenticator app or passkey
+</GuideStep>
+
+<GuideStep title="Switch to Your Admin User">
+  1. Sign out of root
+  2. Go to your AWS sign-in URL: `https://YOUR_ACCOUNT_ID.signin.aws.amazon.com/console`
+  3. Sign in with your new IAM admin credentials
+  
+  **Bookmark this URL.** You'll use it daily.
+</GuideStep>
+
+<GuideStep title="Set an Account Alias" syncKey="account-alias">
+  1. In the IAM console, find **AWS Account** on the right side of the dashboard
+  2. Next to **Account Alias**, click **Create**
+  3. Enter something memorable (e.g., `mycompany-prod`)
+  4. Click **Save changes**
+  
+  Your new sign-in URL: `https://mycompany-prod.signin.aws.amazon.com/console`
+</GuideStep>
+
+<Alert type="tip" title="The Fine Line">
+
+❌ **Under-engineering:** Everyone shares one IAM user, no MFA
+
+✅ **Right-sized:** One admin user per person, MFA required
+
+❌ **Over-engineering:** Full IAM Identity Center + SSO setup before you have paying customers (we'll cover this in Part 2)
+
+</Alert>
+
+---
+
+## Billing Protection
+
+AWS bills are post-paid. You find out what you owe 30 days after you've spent it. Without alerts, a misconfiguration or attack can run up thousands of dollars before you notice.
+
+### The $10,000 Surprise
+
+```
+┌────────────────────────────────────────────────────┐
+│         AWS BILLING ALERT ARCHITECTURE             │
+└────────────────────────────────────────────────────┘
+
+   AWS Services Running
+          │
+          ▼
+   ┌──────────────┐
+   │ Cost Accrues │
+   └──────┬───────┘
+          │
+          ▼
+   ┌─────────────────────────────────────┐
+   │      CloudWatch Billing Alarm       │
+   │  Threshold: $10 (or your limit)     │
+   └──────┬──────────────────────────────┘
+          │
+          ▼ (When threshold exceeded)
+   ┌─────────────────────────────────────┐
+   │         SNS Topic                   │
+   │  Sends notification                 │
+   └──────┬──────────────────────────────┘
+          │
+          ▼
+   ┌─────────────────────────────────────┐
+   │      📧 Email Alert                 │
+   │  "Your AWS bill is approaching $10" │
+   └─────────────────────────────────────┘
+```
+
+### Activate IAM Billing Access
+
+By default, only root can view billing information. That's a problem—you want to avoid using root. Fix this now:
+
+<GuideStep title="Activate IAM Billing Access" syncKey="billing-access">
+  1. Sign in as **root** (last time for a while)
+  2. Click your account name → **Account**
+  3. Scroll to **IAM user and role access to Billing information**
+  4. Click **Edit** → Select **Activate IAM Access**
+  5. Click **Update**
+</GuideStep>
+  Now your IAM admin user can view and manage billing.
+
+### Create a Budget Alert
+
+AWS Budgets notifies you before costs spiral.
+
+<GuideStep title="Create Budget Alert" syncKey="budget-alert">
+  1. Sign in as your IAM admin user
+  2. Go to **Billing and Cost Management** → **Budgets**
+  3. Click **Create budget**
+  4. Select **Customize (advanced)**
+  5. Choose **Cost budget**, click **Next**
+  6. Configure your budget:
+     - **Name:** `Monthly spend alert`
+     - **Period:** Monthly
+     - **Budget amount:** Fixed, `$50` (adjust based on expected spend)
+  7. Click **Next**
+  8. Add alert thresholds (see table below)
+  9. For each threshold, add your email address
+  10. Click **Next**, then **Create budget**
+</GuideStep>
+
+**Recommended Alert Thresholds:**
+
+| Threshold | What It Means |
+|-----------|---------------|
+| 50% | Halfway through your budget—normal check-in |
+| 80% | Investigate if this is unexpected |
+| 100% | You've hit your limit |
+| 150% | Something is probably wrong |
+
+<Alert type="warning">
+
+**Important:** AWS Budgets don't *stop* spending. They only notify you. If you need hard spending limits, look into AWS Organizations SCPs we'll cover that in Part 2.
+
+</Alert>
+
+### Enable Free Tier Alerts
+
+AWS Free Tier gives you limited free usage of many services. It's easy to accidentally exceed these limits.
+
+**Free Tier Limits (Common Gotchas):**
+
+| Service | Free Tier Limit | Gotcha |
+|---------|-----------------|--------|
+| EC2 | 750 hrs/month t2.micro (or t3.micro) | 1 instance = fine, 2 instances = 💸 |
+| RDS | 750 hrs/month db.t2 or db.t3.micro | Multi-AZ doubles the hours |
+| S3 | 5 GB storage | Logs accumulate fast |
+| Data Transfer | 100 GB/month outbound | Video and images add up quickly |
+| Lambda | 1M requests/month | Usually fine |
+| NAT Gateway | ⚠️ NOT FREE | $0.045/hr ≈ $32/mo |
+
+<GuideStep title="Enable Free Tier Alerts" syncKey="free-tier-alerts">
+  1. Go to **Billing and Cost Management** → **Billing preferences**
+  2. Select **Receive Free Tier Usage Alerts**
+  3. Enter your email address
+  4. Click **Save preferences**
+</GuideStep>
+
+<Alert type="note">
+
+**Coming in Part 4:** We'll manage budgets with Terraform and add Slack notifications for real-time cost alerts.
+
+</Alert>
+
+---
+
+## CloudTrail: Your Audit Log
+
+### Why You Need This
+
+CloudTrail records every API call made in your AWS account. When something goes wrong a resource gets deleted, a security group opens to the internet, costs spike CloudTrail is how you figure out what happened.
+
+```
+┌─────────────┐
+│   AWS API   │  Every action in AWS = API call
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────────────────────────────────────┐
+│              CLOUDTRAIL                         │
+│  Records: Who, What, When, Where, How           │
+└──────┬──────────────────────────────────────────┘
+       │
+       ▼
+┌─────────────────────────────────────────────────┐
+│           S3 Bucket (Encrypted)                 │
+│  • Log File Validation Enabled                  │
+│  • Tamper Proof Audit Trail                     │
+│  • 90-day retention (or longer)                 │
+└─────────────────────────────────────────────────┘
+       │
+       ▼
+┌─────────────────────────────────────────────────┐
+│         When Things Go Wrong...                 │
+│  Query logs to find:                            │
+│  • Who deleted that EC2 instance?               │
+│  • What changed in the security group?          │
+│  • When did costs start spiking?                │
+└─────────────────────────────────────────────────┘
+```
+
+Without it, you're flying blind. With it, you have a complete audit log:
+
+- **Who** made the change
+- **What** they changed
+- **When** it happened
+- **Where** they were (IP address)
+- **How** they authenticated
+
+### What CloudTrail Logs
+
+- Console sign-ins (successful and failed)
+- API calls from CLI, SDK, and console actions
+- Resource changes (create, modify, delete)
+- IAM permission changes
+
+### What CloudTrail Doesn't Log by Default
+
+- S3 object-level access (reads/writes to individual files)
+- Lambda function invocations
+- Data events in general
+
+These cost extra and generate massive log volumes. For now, the default management events are enough. We'll add data events when you have something worth protecting.
+
+### Create a Trail
+
+<GuideStep title="Create CloudTrail" syncKey="cloudtrail">
+  1. Go to the [CloudTrail console](https://console.aws.amazon.com/cloudtrail/)
+  2. Click **Create trail**
+  3. Configure the trail:
+     - **Trail name:** `management-events`
+     - **Storage location:** Create new S3 bucket (let AWS generate the name)
+     - **Log file SSE-KMS encryption:** Enabled (use AWS managed key for now)
+  4. Under **Additional settings:**
+     - **Log file validation:** Enabled (this detects tampering)
+  5. Click **Next**
+  6. For **Events:**
+     - Keep **Management events** selected
+     - **API activity:** Both Read and Write
+  7. Click **Next**, then **Create trail**
+  
+  Your account is now recording everything. This log is your forensic evidence if anything ever goes wrong.
+</GuideStep>
+
+<Alert type="note">
+
+**Coming in Part 2:** After setting up AWS Organizations, we'll extend this to an organization wide trail that covers all accounts.
+
+</Alert>
+
+---
+
+## Quick Wins
+
+A few more items that take 5 minutes but save headaches later.
+
+### Region Selection
+
+AWS has 30+ regions worldwide. For your first project, pick **one primary region** and stick with it.
+
+**Recommendation: `us-east-1` (N. Virginia)**
+
+Why:
+- Gets new AWS features first
+- Most tutorials and documentation use it as the example
+- Generally cheapest for most services
+- Best SDK and tooling support
+
+**But shouldn't I pick the closest region for latency?**
+
+For development and learning no, stick with `us-east-1`. The 
+benefits (features first, most documentation, lowest friction) 
+outweigh the latency difference you won't notice anyway.
+
+For production, it's a different conversation. Before deploying 
+your first user-facing workload, answer two questions:
+
+1. **Where are your users?** If 80% are in Europe, `eu-west-1` 
+   (Ireland) will serve them better than Virginia.
+
+2. **What does compliance require?** GDPR may require EU data 
+   residency. Healthcare and finance have their own rules. 
+   Check before you deploy, not after.
+
+The pattern: develop in `us-east-1`, deploy production where 
+your users and lawyers tell you to.
+
+**Test your latency to AWS regions:**
+
+<AwsRegionLatency client:load />
+
+**Region Selection Factors:**
+
+| Factor | Consideration |
+|--------|---------------|
+| User latency | Where are your users? (matters later) |
+| Compliance | GDPR requires EU regions for EU data |
+| Service availability | Not all services exist in all regions |
+| Pricing | Can vary 10-20% between regions |
+| Feature releases | us-east-1 gets features first |
+
+<Alert type="tip">
+
+**Coming later:** Multi-region deployments are a future topic. Don't over-engineer until you have users complaining about latency.
+
+</Alert>
+
+### Tagging Strategy
+
+Tags are key-value labels on AWS resources. They seem optional until you have 200 resources and can't tell which project they belong to or whether they're safe to delete.
+
+**Start with these three tags on everything:**
+
+| Tag | Example Values | Why You Need It |
+|-----|----------------|-----------------|
+| Environment | prod / staging / dev / sandbox | Know what's safe to delete or modify |
+| Project | website / api / ml-pipeline | Track costs per project, find related resources |
+| Owner | yourname / platform-team | Know who to ask about this resource |
+
+<Alert type="note">
+
+For now, remember to add these manually when creating resources. In Part 4, we'll enforce required tags with Terraform and catch untagged resources automatically.
+
+</Alert>
+
+---
+
+## What's Coming
+
+This post gave you a secure foundation. The next four posts build on it:
+
+**[Part 2: IAM — The Key to Everything](/guides/aws/part-2-iam)**  
+Users, groups, roles, and policies done right. Plus AWS Organizations and IAM Identity Center for when your team grows.
+
+**[Part 3: Your Local AWS Setup](/guides/aws/part-3-local-setup)**  
+AWS CLI, named profiles, and aws-vault for credential security. Stop hardcoding access keys forever.
+
+**[Part 4: Terraform Fundamentals](/guides/aws/part-4-terraform)**  
+Codify everything we did manually. Infrastructure as Code means you can recreate this setup with a single command—and review changes before they happen.
+
+**[Part 5: Otel Setup](/guides/aws/part-5-signoz)**  
+Observability from day one. See what's happening in your infrastructure before users tell you it's broken.
+
+By Part 5, you'll have a production-ready AWS foundation that most startups don't achieve until their Series A.
+
+---
+
+## Validation Checklist
+
+Before moving on, verify your setup:
+
+**ROOT ACCOUNT**
+- [ ] MFA enabled on root
+Use this checklist to verify you've completed all the security steps:
+
+<ValidationChecklist 
+  items={[
+    {
+      category: "SECURITY",
+      tasks: [
+        { text: "Root account MFA enabled", syncKey: "root-mfa" },
+        { text: "Root access keys deleted", syncKey: "root-access-keys" },
+        { text: "IAM admin user created", syncKey: "admin-user-created" },
+        { text: "IAM admin MFA enabled", syncKey: "admin-mfa" }
+      ]
+    },
+    {
+      category: "BILLING",
+      tasks: [
+        { text: "Billing alerts enabled in preferences", syncKey: "billing-access" },
+        { text: "CloudWatch billing alarm created", syncKey: "budget-alert" },
+        { text: "Free Tier usage alerts enabled", syncKey: "free-tier-alerts" }
+      ]
+    },
+    {
+      category: "AUDIT",
+      tasks: [
+        { text: "CloudTrail enabled for all regions", syncKey: "cloudtrail" },
+        { text: "Log file validation enabled", syncKey: "cloudtrail-validation" }
+      ]
+    },
+    {
+      category: "HOUSEKEEPING",
+      tasks: [
+        { text: "Account alias set", syncKey: "account-alias" },
+        { text: "Primary region selected", syncKey: "primary-region" },
+        { text: "IAM sign-in URL bookmarked", syncKey: "iam-url" }
+      ]
+    }
+  ]}
+/>
+
+<Alert type="note">
+
+**Coming in Part 4:** We'll provide a script that automatically validates this checklist against your AWS account.
+
+</Alert>
+
+---
+
+## Key Takeaways
+
+1. **Root is for emergencies only.** Lock it with MFA, delete access keys, and use an IAM admin for daily work.
+
+2. **Billing alerts are insurance.** $0 to set up, saves you from $10,000 surprises.
+
+3. **CloudTrail is your black box.** When something goes wrong (and it will), you'll need those logs.
+
+4. **Start simple, layer complexity.** One region, basic tags, minimal IAM. We'll add sophistication as your needs grow.
+
+You now have a more secure AWS setup than 90% of startups. Next up: [Part 2 — IAM deep dive](/guides/aws/part-2-iam).
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

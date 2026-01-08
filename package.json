@@ -5,8 +5,20 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
-    "preview": "astro preview",
+    "preview": "wrangler dev",
+    "preview:remote": "wrangler dev --remote",
+    "deploy": "npm run build && wrangler deploy",
+    "deploy:preview": "npm run build && wrangler versions upload",
+    "deploy:dry-run": "npm run build && wrangler deploy --dry-run",
+    "cf:login": "wrangler login",
+    "cf:logout": "wrangler logout",
+    "cf:whoami": "wrangler whoami",
+    "cf:tail": "wrangler tail",
+    "cf:versions": "wrangler versions list",
+    "cf:rollback": "wrangler versions deploy",
+    "cf:types": "wrangler types",
     "astro": "astro",
+    "check": "astro check",
     "lint": "eslint --ext .js,.ts,.astro src/",
     "lint:fix": "eslint --ext .js,.ts,.astro src/ --fix",
     "format": "prettier --write \"src/**/*.{js,ts,astro,css}\"",
@@ -45,6 +57,7 @@
     "prettier-plugin-astro": "^0.14.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.51.0",
+    "wrangler": "^4.54.0",
     "zod": "^4.3.4"
   }
 }

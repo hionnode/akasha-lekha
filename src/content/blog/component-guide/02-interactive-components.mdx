@@ -1,0 +1,540 @@
+---
+title: "Part 2: Interactive Components - TerminalOutput, Command & Step"
+excerpt: "Create engaging tutorials with interactive terminal outputs, copyable commands, and numbered step-by-step guides. Learn the patterns that keep readers engaged."
+date: "2026-01-08"
+tags: ["mdx", "components", "interactive", "tutorial"]
+series: "component-guide"
+seriesPart: 2
+seriesTotal: 3
+---
+
+import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
+import Command from '../../../components/shared/Command.astro';
+import Step from '../../../components/shared/Step.astro';
+import PanelSwitcher from '../../../components/shared/PanelSwitcher.astro';
+import Panel from '../../../components/shared/Panel.astro';
+import FileTree from '../../../components/shared/FileTree.astro';
+
+# Part 2: Interactive Components
+
+In Part 1, we covered code display components. Now let's explore the interactive components that make your tutorials engaging and easy to follow: **TerminalOutput**, **Command**, and **Step**.
+
+## Table of Contents
+
+1. [TerminalOutput - Realistic Console Views](#terminaloutput)
+2. [Command - Copyable CLI Commands](#command)
+3. [Step - Sequential Tutorials](#step)
+4. [Building Complete Tutorials](#building-complete-tutorials)
+
+---
+
+## TerminalOutput
+
+### What is it?
+
+The `TerminalOutput` component displays terminal/console output exactly as readers will see it, complete with search functionality and copy buttons.
+
+### When to use it
+
+✅ **Perfect for:**
+- Build outputs
+- Test results
+- Deployment logs
+- Error messages
+- Command execution results
+- Server logs
+
+❌ **Not ideal for:**
+- Commands to run (use `Command` instead)
+- Short single-line outputs (just use inline code)
+- Code examples (use code blocks)
+
+### Basic Usage
+
+<TerminalOutput title="Build Output">
+```
+$ npm run build
+
+> my-app@1.0.0 build
+> astro build
+
+12:30:45 [build] output: "static"
+12:30:45 [build] directory: /dist/
+12:30:45 [build] Collecting build info...
+12:30:46 [build] ✓ Completed in 1.2s.
+```
+</TerminalOutput>
+
+**Code:**
+```mdx
+<TerminalOutput title="Build Output">
+\`\`\`
+$ npm run build
+> Building...
+✓ Done!
+\`\`\`
+</TerminalOutput>
+```
+
+### Props Reference
+
+- `title` (optional): Terminal window title
+- `searchable` (optional): Enable search box (default: false)
+- `copyable` (optional): Show copy button (default: true)
+
+### Features
+
+- ✅ **Functional search**: Type to find text, regex supported
+- ✅ **Match highlighting**: Yellow background for search matches
+- ✅ **Match count**: Shows "X matches" in placeholder
+- ✅ **Copy button**: One-click copy entire output
+- ✅ **Terminal styling**: Colored dots, realistic appearance
+
+### Advanced Example: With Search
+
+<TerminalOutput title="Test Results" searchable={true}>
+```
+$ npm test
+
+PASS  src/components/Button.test.tsx
+  Button Component
+    ✓ renders with text (12ms)
+    ✓ handles click events (8ms)
+    ✓ applies variant styles (5ms)
+
+PASS  src/components/Input.test.tsx
+  Input Component
+    ✓ renders with placeholder (10ms)
+    ✓ handles onChange events (7ms)
+    ✓ validates input (15ms)
+
+FAIL  src/components/Form.test.tsx
+  Form Component
+    ✓ renders form fields (9ms)
+    ✗ submits form data (25ms)
+    
+    Expected: { success: true }
+    Received: { success: false, error: "Validation failed" }
+
+Test Suites: 2 passed, 1 failed, 3 total
+Tests:       7 passed, 1 failed, 8 total
+Time:        2.341s
+```
+</TerminalOutput>
+
+**Try searching for "PASS" or "FAIL" in the terminal above!**
+
+### Pro Tips
+
+1. **Enable search for long outputs**: Use `searchable={true}` for outputs >20 lines
+2. **Include prompts**: Add `$` or `>` to show commands vs output
+3. **Use realistic formatting**: Match actual terminal output
+4. **Show timestamps**: Include them for logs and build outputs
+5. **Highlight errors**: Use ANSI-style formatting (colors work!)
+
+---
+
+## Command
+
+### What is it?
+
+The `Command` component displays CLI commands with copy buttons and optional descriptions. It makes commands stand out and easy to copy.
+
+### When to use it
+
+✅ **Perfect for:**
+- Installation instructions
+- Setup commands
+- Deployment scripts
+- Git commands
+- Any CLI operation
+- Quick reference commands
+
+❌ **Not ideal for:**
+- Command output (use `TerminalOutput`)
+- Multi-line scripts (use code blocks)
+- Explanatory text (use regular paragraphs)
+
+### Basic Usage
+
+<Command 
+  command="npm install express cors dotenv" 
+  description="Install required dependencies for the API server"
+/>
+
+**Code:**
+```mdx
+<Command 
+  command="npm install express" 
+  description="Install Express.js"
+/>
+```
+
+### Props Reference
+
+- `command` (required): The command to display
+- `description` (optional): Explanation of what it does
+
+### Features
+
+- ✅ **Copy button**: One-click copy
+- ✅ **Syntax highlighting**: Automatic
+- ✅ **Description**: Optional tooltip/text
+- ✅ **Consistent styling**: Matches theme
+
+### Multiple Commands
+
+<Command command="git init" description="Initialize a new Git repository" />
+
+<Command command="git add ." description="Stage all changes" />
+
+<Command command="git commit -m 'Initial commit'" description="Create first commit" />
+
+<Command command="git remote add origin https://github.com/user/repo.git" description="Add remote repository" />
+
+<Command command="git push -u origin main" description="Push to remote" />
+
+### Pro Tips
+
+1. **One command per component**: Don't combine multiple commands
+2. **Include flags**: Show full commands with all options
+3. **Add descriptions**: Explain what each command does
+4. **Use realistic examples**: Real URLs, actual package names
+5. **Order matters**: Show commands in execution order
+
+---
+
+## Step
+
+### What is it?
+
+The `Step` component creates numbered, sequential tutorials. It's perfect for guides, setup instructions, and workflows.
+
+### When to use it
+
+✅ **Perfect for:**
+- Tutorials
+- Setup guides
+- Installation instructions
+- Deployment workflows
+- Migration guides
+- Troubleshooting steps
+
+❌ **Not ideal for:**
+- Unordered lists (use regular lists)
+- Single-step processes (just use headings)
+- Non-sequential information (use sections)
+
+### Basic Usage
+
+<Step number={1} title="Install Dependencies">
+  First, install the required packages:
+  
+  <Command command="npm install react react-dom" />
+</Step>
+
+<Step number={2} title="Create Component">
+  Create a new file `src/App.jsx`:
+  
+  ```jsx
+  function App() {
+    return <h1>Hello World!</h1>;
+  }
+  
+  export default App;
+  ```
+</Step>
+
+<Step number={3} title="Run Development Server">
+  Start the dev server:
+  
+  <Command command="npm run dev" />
+</Step>
+
+**Code:**
+```mdx
+<Step number={1} title="Install Dependencies">
+  Content here...
+</Step>
+
+<Step number={2} title="Next Step">
+  More content...
+</Step>
+```
+
+### Props Reference
+
+- `number` (required): Step number (1, 2, 3...)
+- `title` (required): Step title/heading
+
+### Features
+
+- ✅ **Numbered badges**: Clear visual indicators
+- ✅ **Visual hierarchy**: Easy to scan
+- ✅ **Nested components**: Can contain any MDX content
+- ✅ **Consistent styling**: Matches theme
+
+### Advanced Example: Complete Setup
+
+<Step number={1} title="Create Project">
+  Choose your preferred package manager:
+  
+  <PanelSwitcher defaultActive="npm">
+    <Panel label="npm">
+      ```bash
+      npm create vite@latest my-app -- --template react-ts
+      cd my-app
+      npm install
+      ```
+    </Panel>
+    <Panel label="pnpm">
+      ```bash
+      pnpm create vite my-app --template react-ts
+      cd my-app
+      pnpm install
+      ```
+    </Panel>
+  </PanelSwitcher>
+</Step>
+
+<Step number={2} title="Verify Structure">
+  Your project should look like this:
+  
+  <FileTree>
+  my-app/
+    src/
+      App.tsx
+      main.tsx
+    public/
+    package.json
+    vite.config.ts
+  </FileTree>
+</Step>
+
+<Step number={3} title="Start Development">
+  <Command command="npm run dev" />
+  
+  You should see:
+  
+  <TerminalOutput title="Dev Server">
+  ```
+  VITE v5.0.0  ready in 234 ms
+  
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+  ```
+  </TerminalOutput>
+</Step>
+
+### Pro Tips
+
+1. **Number sequentially**: Always start at 1 and increment
+2. **Use imperative titles**: "Install", "Configure", "Deploy" (not "Installing")
+3. **Keep steps focused**: One task per step
+4. **Nest components**: Use Command, TerminalOutput, etc. inside steps
+5. **Add context**: Explain why each step is needed
+
+---
+
+## Building Complete Tutorials
+
+Let's combine all three components to create a complete, professional tutorial:
+
+## Tutorial: Deploy a Node.js App to Production
+
+<Step number={1} title="Prepare Your Application">
+  First, ensure your app is production-ready:
+  
+  <Command command="npm run build" description="Build production bundle" />
+  
+  <Command command="npm test" description="Run all tests" />
+  
+  Expected output:
+  
+  <TerminalOutput title="Test Results">
+  ```
+  $ npm test
+  
+  PASS  src/app.test.js
+  PASS  src/utils.test.js
+  
+  Test Suites: 2 passed, 2 total
+  Tests:       15 passed, 15 total
+  ✓ All tests passed!
+  ```
+  </TerminalOutput>
+</Step>
+
+<Step number={2} title="Configure Environment">
+  Create a `.env.production` file:
+  
+  ```env
+  NODE_ENV=production
+  PORT=3000
+  DATABASE_URL=postgresql://user:pass@host:5432/db
+  REDIS_URL=redis://host:6379
+  ```
+  
+  **Important:** Never commit this file to Git!
+</Step>
+
+<Step number={3} title="Build Docker Image">
+  <Command command="docker build -t my-app:latest ." description="Build Docker image" />
+  
+  <TerminalOutput title="Build Output" searchable={true}>
+  ```
+  $ docker build -t my-app:latest .
+  
+  [1/5] FROM docker.io/library/node:20-alpine
+  [2/5] WORKDIR /app
+  [3/5] COPY package*.json ./
+  [4/5] RUN npm ci --only=production
+  [5/5] COPY . .
+  
+  Successfully built abc123def456
+  Successfully tagged my-app:latest
+  ```
+  </TerminalOutput>
+</Step>
+
+<Step number={4} title="Deploy to Server">
+  <Command command="docker push my-registry/my-app:latest" description="Push to registry" />
+  
+  <Command command="ssh user@server 'docker pull my-registry/my-app:latest'" description="Pull on server" />
+  
+  <Command command="ssh user@server 'docker run -d -p 3000:3000 my-app:latest'" description="Start container" />
+</Step>
+
+<Step number={5} title="Verify Deployment">
+  <Command command="curl https://myapp.com/health" description="Check health endpoint" />
+  
+  <TerminalOutput title="Health Check">
+  ```
+  $ curl https://myapp.com/health
+  
+  {
+    "status": "healthy",
+    "uptime": 42,
+    "version": "1.0.0",
+    "timestamp": "2026-01-08T12:00:00Z"
+  }
+  ```
+  </TerminalOutput>
+  
+  ✅ Deployment successful!
+</Step>
+
+---
+
+## Real-World Patterns
+
+### Pattern 1: Troubleshooting Guide
+
+<Step number={1} title="Check Server Status">
+  <Command command="systemctl status nginx" />
+  
+  <TerminalOutput title="Status Output">
+  ```
+  ● nginx.service - A high performance web server
+     Loaded: loaded
+     Active: active (running)
+  ```
+  </TerminalOutput>
+</Step>
+
+<Step number={2} title="Check Logs">
+  <Command command="tail -f /var/log/nginx/error.log" />
+  
+  Look for errors in the output.
+</Step>
+
+<Step number={3} title="Restart Service">
+  <Command command="sudo systemctl restart nginx" />
+  
+  <Command command="sudo systemctl status nginx" />
+</Step>
+
+### Pattern 2: Git Workflow
+
+<Step number={1} title="Create Feature Branch">
+  <Command command="git checkout -b feature/new-feature" />
+</Step>
+
+<Step number={2} title="Make Changes">
+  Edit your files, then:
+  
+  <Command command="git add ." />
+  <Command command="git commit -m 'Add new feature'" />
+</Step>
+
+<Step number={3} title="Push and Create PR">
+  <Command command="git push origin feature/new-feature" />
+  
+  Then create a Pull Request on GitHub.
+</Step>
+
+---
+
+## Best Practices Summary
+
+### TerminalOutput
+- ✅ Enable search for long outputs
+- ✅ Include command prompts ($, >)
+- ✅ Use realistic formatting
+- ✅ Show timestamps for logs
+
+### Command
+- ✅ One command per component
+- ✅ Include all flags/options
+- ✅ Add descriptions
+- ✅ Use realistic examples
+
+### Step
+- ✅ Number sequentially
+- ✅ Use imperative titles
+- ✅ Keep focused (one task)
+- ✅ Nest other components
+
+---
+
+## Next Steps
+
+In **Part 3**, we'll explore **DevOps Components**: ApiEndpoint, EnvVars, K8sManifest, and more for documenting infrastructure.
+
+**Coming up:**
+- Part 3: DevOps & Infrastructure Components
+- Part 4: Advanced Patterns & Combinations
+
+---
+
+## Quick Reference
+
+### Import Statements
+
+```js
+import TerminalOutput from '@/components/shared/TerminalOutput.astro';
+import Command from '@/components/shared/Command.astro';
+import { Step } from '@/components/shared/Step.astro';
+```
+
+### Component Checklist
+
+**TerminalOutput:**
+- [ ] Added title
+- [ ] Enabled search if needed
+- [ ] Included command prompts
+- [ ] Realistic formatting
+
+**Command:**
+- [ ] Single command only
+- [ ] Added description
+- [ ] Full command with flags
+- [ ] Realistic example
+
+**Step:**
+- [ ] Sequential numbering
+- [ ] Imperative title
+- [ ] Focused content
+- [ ] Nested components
+
+Happy documenting! 🚀

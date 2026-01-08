@@ -1,0 +1,177 @@
+---
+interface Props {
+  type?: 'note' | 'tip' | 'important' | 'warning' | 'caution';
+  title?: string;
+}
+
+const { type = 'note', title } = Astro.props;
+
+const config = {
+  note: {
+    icon: 'ℹ️',
+    color: 'blue',
+    defaultTitle: 'Note',
+  },
+  tip: {
+    icon: '💡',
+    color: 'green',
+    defaultTitle: 'Tip',
+  },
+  important: {
+    icon: '❗',
+    color: 'purple',
+    defaultTitle: 'Important',
+  },
+  warning: {
+    icon: '⚠️',
+    color: 'yellow',
+    defaultTitle: 'Warning',
+  },
+  caution: {
+    icon: '🚨',
+    color: 'red',
+    defaultTitle: 'Caution',
+  },
+};
+
+const alertConfig = config[type];
+const displayTitle = title || alertConfig.defaultTitle;
+---
+
+<div class={`alert alert-${alertConfig.color}`}>
+  <div class="alert-header">
+    <span class="alert-icon">{alertConfig.icon}</span>
+    <span class="alert-title">{displayTitle}</span>
+  </div>
+  <div class="alert-content">
+    <slot />
+  </div>
+</div>
+
+<style>
+  .alert {
+    margin: 1.5rem 0;
+    padding: 1rem 1.25rem;
+    border-radius: 0.5rem;
+    border-left: 4px solid;
+    background: var(--bg-secondary);
+  }
+
+  .alert-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+  }
+
+  .alert-icon {
+    font-size: 1.25rem;
+    line-height: 1;
+  }
+
+  .alert-title {
+    font-size: 0.9375rem;
+  }
+
+  .alert-content {
+    color: var(--fg-secondary);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+  }
+
+  .alert-content :global(p:first-child) {
+    margin-top: 0;
+  }
+
+  .alert-content :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .alert-content :global(ul),
+  .alert-content :global(ol) {
+    margin: 0.5rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .alert-content :global(li) {
+    margin: 0.25rem 0;
+  }
+
+  /* Blue - Note */
+  .alert-blue {
+    border-left-color: #3b82f6;
+    background: rgba(59, 130, 246, 0.1);
+  }
+
+  .alert-blue .alert-title {
+    color: #3b82f6;
+  }
+
+  /* Green - Tip */
+  .alert-green {
+    border-left-color: #10b981;
+    background: rgba(16, 185, 129, 0.1);
+  }
+
+  .alert-green .alert-title {
+    color: #10b981;
+  }
+
+  /* Purple - Important */
+  .alert-purple {
+    border-left-color: #8b5cf6;
+    background: rgba(139, 92, 246, 0.1);
+  }
+
+  .alert-purple .alert-title {
+    color: #8b5cf6;
+  }
+
+  /* Yellow - Warning */
+  .alert-yellow {
+    border-left-color: #f59e0b;
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .alert-yellow .alert-title {
+    color: #f59e0b;
+  }
+
+  /* Red - Caution */
+  .alert-red {
+    border-left-color: #ef4444;
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  .alert-red .alert-title {
+    color: #ef4444;
+  }
+
+  /* Dark mode adjustments */
+  @media (prefers-color-scheme: dark) {
+    .alert {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .alert-blue {
+      background: rgba(59, 130, 246, 0.15);
+    }
+
+    .alert-green {
+      background: rgba(16, 185, 129, 0.15);
+    }
+
+    .alert-purple {
+      background: rgba(139, 92, 246, 0.15);
+    }
+
+    .alert-yellow {
+      background: rgba(245, 158, 11, 0.15);
+    }
+
+    .alert-red {
+      background: rgba(239, 68, 68, 0.15);
+    }
+  }
+</style>

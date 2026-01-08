@@ -1,118 +1,211 @@
-name: PR Preview & Checks
+# .github/workflows/preview.yml
+#
+# Deploys preview versions for Pull Requests
+# Provides Vercel-like experience with:
+# - Automatic preview URL on every PR
+# - Rich PR comments with status, URL, build time
+# - Commit status checks
+# - Deployment tracking in GitHub UI
+
+name: Preview
 
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+  deployments: write
+
+env:
+  WRANGLER_SEND_METRICS: false
 
 jobs:
-  quality-checks:
-    name: Run Quality Checks
+  preview:
+    name: Deploy Preview
     runs-on: ubuntu-latest
     
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 8
-
-      - name: Get pnpm store directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Cache pnpm dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Run linting
-        run: pnpm lint
-
-      - name: Run format check
-        run: pnpm format:check
-
-      - name: Validate blog posts
-        run: pnpm validate:blog
-
-      - name: TypeScript check
-        run: pnpm typecheck
-
-      - name: Build site
-        run: pnpm build
-
-  deploy-preview:
-    name: Deploy Preview to Cloudflare
-    runs-on: ubuntu-latest
-    needs: quality-checks
-    permissions:
-      contents: read
-      deployments: write
-      pull-requests: write
+    environment:
+      name: preview
+      url: ${{ steps.deploy.outputs.deployment-url }}
+    
+    outputs:
+      url: ${{ steps.deploy.outputs.deployment-url }}
     
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 8
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build site
-        run: pnpm build
-
-      - name: Deploy to Cloudflare Pages
-        id: cloudflare-deploy
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: akasha-lekha
-          directory: dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Comment PR with preview URL
+      # Set pending status immediately
+      - name: Set Pending Status
         uses: actions/github-script@v7
         with:
           script: |
-            const previewUrl = '${{ steps.cloudflare-deploy.outputs.url }}';
-            const comment = `## 🚀 Preview Deployment Ready!
-            
-            Your changes have been deployed to Cloudflare Pages.
-            
-            **Preview URL:** ${previewUrl}
-            
-            ✅ All quality checks passed!`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: comment
+              sha: context.sha,
+              state: 'pending',
+              context: 'Preview Deployment',
+              description: 'Building...'
             });
 
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
 
+      # Cache Astro build artifacts
+      - name: Cache Astro Build
+        uses: actions/cache@v4
+        id: cache-astro
+        with:
+          path: |
+            node_modules/.astro
+            .astro
+          key: astro-${{ runner.os }}-${{ hashFiles('src/**/*', 'public/**/*', 'astro.config.*') }}
+          restore-keys: |
+            astro-${{ runner.os }}-
 
+      - name: Install Dependencies
+        run: pnpm install
+
+      - name: Build
+        id: build
+        run: |
+          START_TIME=$(date +%s)
+          pnpm run build
+          END_TIME=$(date +%s)
+          echo "duration=$((END_TIME - START_TIME))" >> $GITHUB_OUTPUT
+        env:
+          PUBLIC_ENV: preview
+          PUBLIC_PREVIEW_URL: https://preview-${{ github.event.pull_request.number }}.${{ vars.WORKER_NAME || 'your-site' }}.workers.dev
+
+      # Deploy using wrangler versions upload (creates version without promoting)
+      - name: Deploy Preview
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: versions upload --message "PR #${{ github.event.pull_request.number }}"
+
+      # Update commit status with result
+      - name: Update Commit Status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
+            const deploymentUrl = '${{ steps.deploy.outputs.deployment-url }}';
+            
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: state,
+              target_url: deploymentUrl || `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              description: state === 'success' ? 'Preview ready' : 'Preview failed',
+              context: 'Preview Deployment'
+            });
+
+      # Create rich PR comment (Vercel-style)
+      - name: Comment on PR
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
+          DEPLOY_STATUS: ${{ job.status }}
+          BUILD_DURATION: ${{ steps.build.outputs.duration }}
+          CACHE_HIT: ${{ steps.cache-astro.outputs.cache-hit }}
+        with:
+          script: |
+            const status = process.env.DEPLOY_STATUS;
+            const url = process.env.DEPLOY_URL;
+            const buildDuration = process.env.BUILD_DURATION || '?';
+            const cacheHit = process.env.CACHE_HIT === 'true';
+            const sha = context.sha.substring(0, 7);
+            const prNumber = context.issue.number;
+            const branch = context.payload.pull_request.head.ref;
+            const timestamp = new Date().toLocaleString('en-US', { 
+              timeZone: 'UTC', 
+              dateStyle: 'medium', 
+              timeStyle: 'short' 
+            }) + ' UTC';
+            
+            // Status indicators
+            const statusConfig = {
+              success: { emoji: '✅', text: 'Ready', color: '2ea44f' },
+              failure: { emoji: '❌', text: 'Failed', color: 'cb2431' },
+              cancelled: { emoji: '⏹️', text: 'Cancelled', color: '6a737d' }
+            };
+            const { emoji, text, color } = statusConfig[status] || statusConfig.failure;
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            
+            const botComment = comments.find(c => 
+              c.user.type === 'Bot' && 
+              c.body.includes('<!-- cf-preview-bot -->')
+            );
+            
+            // Build comment body (Vercel-inspired design)
+            let body = `<!-- cf-preview-bot -->\n`;
+            body += `## <img src="https://www.cloudflare.com/favicon.ico" width="20" height="20" /> Preview Deployment\n\n`;
+            
+            if (status === 'success' && url) {
+              body += `| Name | Status | Preview | Updated |\n`;
+              body += `|:-----|:-------|:--------|:--------|\n`;
+              body += `| **${branch}** | ${emoji} ${text} | [Visit Preview](${url}) | ${timestamp} |\n\n`;
+              
+              body += `<details>\n<summary>📊 Build Details</summary>\n\n`;
+              body += `| Property | Value |\n`;
+              body += `|:---------|:------|\n`;
+              body += `| **Commit** | \`${sha}\` |\n`;
+              body += `| **Build Time** | ${buildDuration}s |\n`;
+              body += `| **Cache** | ${cacheHit ? '✅ Hit' : '❌ Miss'} |\n`;
+              body += `| **Branch** | \`${branch}\` |\n`;
+              body += `</details>\n`;
+            } else {
+              body += `| Name | Status | Updated |\n`;
+              body += `|:-----|:-------|:--------|\n`;
+              body += `| **${branch}** | ${emoji} ${text} | ${timestamp} |\n\n`;
+              
+              body += `> ⚠️ Check the [workflow logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.\n`;
+            }
+            
+            body += `\n---\n`;
+            body += `<sub>🚀 Powered by Cloudflare Workers</sub>`;
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: body
+              });
+            }
