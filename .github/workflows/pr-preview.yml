@@ -81,13 +81,13 @@ jobs:
             astro-${{ runner.os }}-
 
       - name: Install Dependencies
-        run: npm ci
+        run: pnpm ci
 
       - name: Build
         id: build
         run: |
           START_TIME=$(date +%s)
-          npm run build
+          pnpm run build
           END_TIME=$(date +%s)
           echo "duration=$((END_TIME - START_TIME))" >> $GITHUB_OUTPUT
         env:
