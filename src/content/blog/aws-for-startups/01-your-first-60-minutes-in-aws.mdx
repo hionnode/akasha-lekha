@@ -85,7 +85,7 @@ When you create an AWS account, you get a single identity: the root user. This a
 - Close the entire AWS account
 - Do anything, to any resource, with no restrictions
 
-There is no way to limit root's power. That's by design—it's the "break glass" account for emergencies. But that same unlimited power makes it the single most dangerous credential in your infrastructure.
+There is no way to limit root's power. That's by design it's the "break glass" account for emergencies. But that same unlimited power makes it the single most dangerous credential in your infrastructure.
 
 **The goal: Use root once to set up your account, then never again.**
 
@@ -213,9 +213,9 @@ Create a group first, then add users to it. This pattern scales when you add tea
 <GuideStep title="Create Your Admin User">
   1. In the IAM console, click **Users** in the left navigation
   2. Click **Create user**
-  3. Enter a username (e.g., `yourname-admin`—use your name, not a generic "admin")
+  3. Enter a username (e.g., `yourname-admin` use your name, not a generic "admin")
   4. Select **Provide user access to the AWS Management Console**
-  5. Choose **I want to create an IAM user** (not Identity Center for now—we'll cover that in Part 2)
+  5. Choose **I want to create an IAM user** (not Identity Center for now we'll cover that in Part 2)
   6. Set a strong password
   7. Uncheck **Users must create a new password at next sign-in** (you're the only user)
   8. Click **Next**
@@ -341,7 +341,7 @@ AWS Budgets notifies you before costs spiral.
 
 <Alert type="warning">
 
-**Important:** AWS Budgets don't *stop* spending. They only notify you. If you need hard spending limits, look into AWS Organizations SCPs—we'll cover that in Part 2.
+**Important:** AWS Budgets don't *stop* spending. They only notify you. If you need hard spending limits, look into AWS Organizations SCPs we'll cover that in Part 2.
 
 </Alert>
 
@@ -379,7 +379,7 @@ AWS Free Tier gives you limited free usage of many services. It's easy to accide
 
 ### Why You Need This
 
-CloudTrail records every API call made in your AWS account. When something goes wrong—a resource gets deleted, a security group opens to the internet, costs spike—CloudTrail is how you figure out what happened.
+CloudTrail records every API call made in your AWS account. When something goes wrong a resource gets deleted, a security group opens to the internet, costs spike CloudTrail is how you figure out what happened.
 
 ```
 ┌─────────────┐
@@ -396,7 +396,7 @@ CloudTrail records every API call made in your AWS account. When something goes 
 ┌─────────────────────────────────────────────────┐
 │           S3 Bucket (Encrypted)                 │
 │  • Log File Validation Enabled                  │
-│  • Tamper-Proof Audit Trail                     │
+│  • Tamper Proof Audit Trail                     │
 │  • 90-day retention (or longer)                 │
 └─────────────────────────────────────────────────┘
        │
@@ -455,7 +455,7 @@ These cost extra and generate massive log volumes. For now, the default manageme
 
 <Alert type="note">
 
-**Coming in Part 2:** After setting up AWS Organizations, we'll extend this to an organization-wide trail that covers all accounts.
+**Coming in Part 2:** After setting up AWS Organizations, we'll extend this to an organization wide trail that covers all accounts.
 
 </Alert>
 
@@ -479,7 +479,7 @@ Why:
 
 **But shouldn't I pick the closest region for latency?**
 
-For development and learning, no—stick with `us-east-1`. The 
+For development and learning no, stick with `us-east-1`. The 
 benefits (features first, most documentation, lowest friction) 
 outweigh the latency difference you won't notice anyway.
 
@@ -549,7 +549,7 @@ AWS CLI, named profiles, and aws-vault for credential security. Stop hardcoding 
 **[Part 4: Terraform Fundamentals](/guides/aws/part-4-terraform)**  
 Codify everything we did manually. Infrastructure as Code means you can recreate this setup with a single command—and review changes before they happen.
 
-**[Part 5: SigNoz Setup](/guides/aws/part-5-signoz)**  
+**[Part 5: Otel Setup](/guides/aws/part-5-signoz)**  
 Observability from day one. See what's happening in your infrastructure before users tell you it's broken.
 
 By Part 5, you'll have a production-ready AWS foundation that most startups don't achieve until their Series A.
@@ -623,4 +623,4 @@ You now have a more secure AWS setup than 90% of startups. Next up: [Part 2 — 
 
 ---
 
-*Have questions? Found an error? [Open an issue](https://github.com/yourrepo/issues) or reach out on [LinkedIn](https://linkedin.com/in/yourprofile).*
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
