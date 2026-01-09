@@ -120,17 +120,26 @@
 
   // Track if this is the initial page load
   let isInitialLoad = true;
+  const loaderStartTime = Date.now();
 
   // Hide loader on initial page load only
   function handleInitialLoad() {
     if (isInitialLoad) {
       isInitialLoad = false;
+
+      // Calculate how long the loader has been visible
+      const elapsedTime = Date.now() - loaderStartTime;
+      const minimumDisplayTime = 400; // Minimum 400ms to see the animation
+      const remainingTime = Math.max(0, minimumDisplayTime - elapsedTime);
+
       // Animate progress to completion
       const progressBar = document.querySelector('.loader-progress') as HTMLElement | null;
       if (progressBar) {
         progressBar.style.width = '100%';
       }
-      setTimeout(hideLoader, 500);
+
+      // Wait for remaining time before hiding
+      setTimeout(hideLoader, remainingTime + 500);
     }
   }
 

@@ -1,5 +1,5 @@
 ---
-title: "Your First 60 Minutes in AWS: Startup Security Guide"
+title: "Your First 60 Minutes in AWS: What Everyone Skips and Regrets Later"
 description: "Learn how to set up your AWS account securely in 60 minutes. Prevent surprise bills by enabling MFA, CloudTrail, and billing alerts from day one."
 excerpt: "What everyone skips and regrets later. Set up your AWS account the right way—secure enough to sleep at night, without the enterprise overhead that kills velocity."
 date: "2026-01-08"
@@ -93,15 +93,15 @@ There is no way to limit root's power. That's by design it's the "break glass" a
 
 ❌ **Under-engineering:** Using root for daily work, sharing root credentials
 
-✅ **Right-sized:** Root locked with MFA, used only for root-only tasks
+✅ **Right-sized:** Root locked with MFA, used only for root only tasks
 
-❌ **Over-engineering:** Hardware security keys in bank vaults, 3-person approval workflows (save this for when you're at scale)
+❌ **Over-engineering:** Hardware security keys in bank vaults, 3 person approval workflows (save this for when you're at scale)
 
 </Alert>
 
 ### Delete Root Access Keys
 
-Root access keys are long-lived credentials that grant unlimited API access. If they exist, delete them immediately.
+Root access keys are long lived credentials that grant unlimited API access. If they exist, delete them immediately.
 
 <GuideStep title="Delete Root Access Keys" syncKey="root-access-keys">
   1. Sign in to the [AWS Console](https://console.aws.amazon.com/) as root
@@ -369,7 +369,7 @@ AWS Free Tier gives you limited free usage of many services. It's easy to accide
 
 <Alert type="note">
 
-**Coming in Part 4:** We'll manage budgets with Terraform and add Slack notifications for real-time cost alerts.
+**Coming in Part 4:** We'll manage budgets with Terraform and add Slack notifications for realtime cost alerts.
 
 </Alert>
 
@@ -427,7 +427,7 @@ Without it, you're flying blind. With it, you have a complete audit log:
 
 ### What CloudTrail Doesn't Log by Default
 
-- S3 object-level access (reads/writes to individual files)
+- S3 object level access (reads/writes to individual files)
 - Lambda function invocations
 - Data events in general
 
@@ -484,7 +484,7 @@ benefits (features first, most documentation, lowest friction)
 outweigh the latency difference you won't notice anyway.
 
 For production, it's a different conversation. Before deploying 
-your first user-facing workload, answer two questions:
+your first user facing workload, answer two questions:
 
 1. **Where are your users?** If 80% are in Europe, `eu-west-1` 
    (Ireland) will serve them better than Virginia.
@@ -552,7 +552,7 @@ Codify everything we did manually. Infrastructure as Code means you can recreate
 **[Part 5: Otel Setup](/guides/aws/part-5-signoz)**  
 Observability from day one. See what's happening in your infrastructure before users tell you it's broken.
 
-By Part 5, you'll have a production-ready AWS foundation that most startups don't achieve until their Series A.
+By Part 5, you'll have a production ready AWS foundation that most startups don't achieve until their Series A.
 
 ---
 
