@@ -14,6 +14,10 @@ import Command from '../../../components/shared/Command.astro';
 import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
 import Alert from '../../../components/shared/Alert.astro';
 import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
+import CodeSwitcher from '../../../components/shared/CodeSwitcher.astro';
+import ComparisonTable from '../../../components/shared/ComparisonTable.astro';
+import PanelSwitcher from '../../../components/shared/PanelSwitcher.astro';
+import FileTree from '../../../components/shared/FileTree.astro';
 
 
 *Least privilege without losing your mind*
@@ -778,26 +782,49 @@ arn:aws:iam::123456789012:user/alice                # IAM user (no region — IA
 
 </Alert>
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                   MANAGED vs INLINE                             │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  AWS MANAGED          CUSTOMER MANAGED         INLINE           │
-│  ────────────         ────────────────         ──────           │
-│  Created by AWS       Created by you           Embedded in      │
-│  Can't modify         Full control             identity         │
-│  Good defaults        Your specific needs      Hard to audit    │
-│                                                                 │
-│  Examples:            Examples:                When to use:     │
-│  • ReadOnlyAccess     • DeveloperPolicy        • Rarely         │
-│  • PowerUserAccess    • CICDDeployRole         • Strict 1:1     │
-│  • ViewOnlyAccess     • LambdaOrderProcessor     relationship   │
-│                                                                 │
-│  START HERE ────────▶ GRADUATE TO ──────────▶ AVOID             │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+
+<ComparisonTable
+  headers={["AWS Managed", "Customer Managed", "Inline"]}
+  rows={[
+    {
+      label: "Created by",
+      left: "AWS",
+      middle: "You",
+      right: "You (embedded)"
+    },
+    {
+      label: "Can modify?",
+      left: "No",
+      middle: "Yes (full control)",
+      right: "Yes"
+    },
+    {
+      label: "Reusability",
+      left: "Attach to multiple identities",
+      middle: "Attach to multiple identities",
+      right: "Embedded in single identity"
+    },
+    {
+      label: "Use case",
+      left: "Good defaults for common scenarios",
+      middle: "Your specific business needs",
+      right: "Strict 1:1 relationship only"
+    },
+    {
+      label: "Examples",
+      left: "ReadOnlyAccess, PowerUserAccess, ViewOnlyAccess",
+      middle: "DeveloperPolicy, CICDDeployRole, LambdaOrderProcessor",
+      right: "Rarely used"
+    },
+    {
+      label: "Recommendation",
+      left: "✅ START HERE",
+      middle: "✅ GRADUATE TO",
+      right: "⚠️ AVOID"
+    }
+  ]}
+/>
+
 
 <Alert type="tip">
 
@@ -869,6 +896,29 @@ Policy pattern:
 For this guide, we'll use the naming pattern: `{company}-{env}-{resource}`
 
 </Alert>
+
+### Organizing Your Policy Files
+
+When managing IAM policies as code, organize them in a clear structure:
+
+<FileTree>
+- iam/
+  - policies/
+    - developer-policy.json
+    - lambda-order-processor-policy.json
+    - github-actions-deploy-policy.json
+    - terraform-policy.json
+  - trust-policies/
+    - lambda-trust-policy.json
+    - github-actions-trust-policy.json
+    - terraform-trust-policy.json
+  - README.md
+- terraform/
+  - iam.tf
+  - variables.tf
+</FileTree>
+
+This structure keeps policies version-controlled, reviewable, and easy to find.
 
 ---
 
@@ -1081,6 +1131,139 @@ aws iam add-user-to-group --group-name Developers --user-name bob
 - Wildcards on naming convention (`acme-dev-*`) scope without listing every resource
 - Read access to everything helps debugging; write access is limited
 
+<Alert type="tip" title="Terraform Alternative">
+
+If you're using Terraform (covered in Part 4), here's the equivalent setup:
+
+</Alert>
+
+<CodeSwitcher
+  tabs={[
+    { label: "AWS CLI", value: "cli" },
+    { label: "Terraform", value: "terraform" }
+  ]}
+  panels={[
+    {
+      value: "cli",
+      language: "bash",
+      content: `# Create group
+aws iam create-group --group-name Developers
+
+# Create policy
+aws iam create-policy \\
+  --policy-name DeveloperPolicy \\
+  --policy-document file://developer-policy.json
+
+# Attach policy to group
+aws iam attach-group-policy \\
+  --group-name Developers \\
+  --policy-arn arn:aws:iam::ACCOUNT_ID:policy/DeveloperPolicy
+
+# Add users
+aws iam add-user-to-group --group-name Developers --user-name alice
+aws iam add-user-to-group --group-name Developers --user-name bob`
+    },
+    {
+      value: "terraform",
+      language: "hcl",
+      content: `# Developer Group
+resource "aws_iam_group" "developers" {
+  name = "Developers"
+}
+
+# Developer Policy
+resource "aws_iam_policy" "developer_policy" {
+  name        = "DeveloperPolicy"
+  description = "Policy for developer group"
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadOnlyAccessAllEnvironments"
+        Effect = "Allow"
+        Action = [
+          "ec2:Describe*",
+          "ecs:Describe*",
+          "ecs:List*",
+          "lambda:Get*",
+          "lambda:List*",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "dynamodb:DescribeTable",
+          "dynamodb:Query",
+          "dynamodb:Scan",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
+          "logs:GetLogEvents",
+          "cloudwatch:GetMetricStatistics",
+          "cloudwatch:ListMetrics"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "DevStagingS3Write"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = [
+          "arn:aws:s3:::acme-dev-*/*",
+          "arn:aws:s3:::acme-staging-*/*"
+        ]
+      },
+      {
+        Sid    = "DenyProdWrite"
+        Effect = "Deny"
+        Action = [
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "lambda:UpdateFunctionCode"
+        ]
+        Resource = [
+          "arn:aws:s3:::acme-prod-*/*",
+          "arn:aws:dynamodb:*:*:table/acme-prod-*",
+          "arn:aws:lambda:*:*:function:acme-prod-*"
+        ]
+      },
+      {
+        Sid    = "DenyIAMAndDangerousActions"
+        Effect = "Deny"
+        Action = [
+          "iam:*",
+          "organizations:*",
+          "account:*"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Attach policy to group
+resource "aws_iam_group_policy_attachment" "developer_policy_attachment" {
+  group      = aws_iam_group.developers.name
+  policy_arn = aws_iam_policy.developer_policy.arn
+}
+
+# Add users to group
+resource "aws_iam_group_membership" "developers" {
+  name = "developers-membership"
+  group = aws_iam_group.developers.name
+  
+  users = [
+    "alice",
+    "bob"
+  ]
+}`
+    }
+  ]}
+/>
+
 ---
 
 ### Template 2: Lambda Service Role
@@ -1220,6 +1403,131 @@ aws lambda create-function \
 - Includes DynamoDB indexes (common oversight)
 - CloudWatch logs scoped to this function's log group
 - Trust policy only allows Lambda service — humans can't assume this role
+
+<CodeSwitcher
+  tabs={[
+    { label: "AWS CLI", value: "cli" },
+    { label: "Terraform", value: "terraform" }
+  ]}
+  panels={[
+    {
+      value: "cli",
+      language: "bash",
+      content: `# Create role with trust policy
+aws iam create-role \\
+  --role-name acme-prod-order-processor-role \\
+  --assume-role-policy-document file://lambda-trust-policy.json
+
+# Create and attach permission policy
+aws iam create-policy \\
+  --policy-name acme-prod-order-processor-policy \\
+  --policy-document file://lambda-order-processor-policy.json
+
+aws iam attach-role-policy \\
+  --role-name acme-prod-order-processor-role \\
+  --policy-arn arn:aws:iam::ACCOUNT_ID:policy/acme-prod-order-processor-policy
+
+# Create Lambda function with role
+aws lambda create-function \\
+  --function-name acme-prod-order-processor \\
+  --role arn:aws:iam::ACCOUNT_ID:role/acme-prod-order-processor-role \\
+  --runtime nodejs20.x \\
+  --handler index.handler \\
+  --zip-file fileb://function.zip`
+    },
+    {
+      value: "terraform",
+      language: "hcl",
+      content: `# Lambda Execution Role
+resource "aws_iam_role" "order_processor" {
+  name = "acme-prod-order-processor-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+# Permission Policy
+resource "aws_iam_policy" "order_processor" {
+  name        = "acme-prod-order-processor-policy"
+  description = "Permissions for order processor Lambda"
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadOrdersFromS3"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ]
+        Resource = "arn:aws:s3:::acme-prod-orders-incoming/*"
+      },
+      {
+        Sid    = "WriteToOrdersTable"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:GetItem",
+          "dynamodb:Query"
+        ]
+        Resource = [
+          "arn:aws:dynamodb:us-east-1:\${data.aws_caller_identity.current.account_id}:table/acme-prod-orders",
+          "arn:aws:dynamodb:us-east-1:\${data.aws_caller_identity.current.account_id}:table/acme-prod-orders/index/*"
+        ]
+      },
+      {
+        Sid    = "SendToNotificationQueue"
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:GetQueueUrl"
+        ]
+        Resource = "arn:aws:sqs:us-east-1:\${data.aws_caller_identity.current.account_id}:acme-prod-order-notifications"
+      },
+      {
+        Sid    = "CloudWatchLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:us-east-1:\${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/acme-prod-order-processor:*"
+      }
+    ]
+  })
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "order_processor" {
+  role       = aws_iam_role.order_processor.name
+  policy_arn = aws_iam_policy.order_processor.arn
+}
+
+# Lambda function using the role
+resource "aws_lambda_function" "order_processor" {
+  function_name = "acme-prod-order-processor"
+  role          = aws_iam_role.order_processor.arn
+  runtime       = "nodejs20.x"
+  handler       = "index.handler"
+  filename      = "function.zip"
+}
+
+# Get current AWS account ID
+data "aws_caller_identity" "current" {}`
+    }
+  ]}
+/>
 
 ---
 
@@ -1428,6 +1736,166 @@ jobs:
 - Branch restriction (`refs/heads/main`) = only main can deploy to prod
 - `iam:PassRole` with condition = can assign task roles during deployment but can't create new powerful roles
 - Scoped ECR access = can only push to your repositories
+
+<CodeSwitcher
+  tabs={[
+    { label: "AWS CLI", value: "cli" },
+    { label: "Terraform", value: "terraform" }
+  ]}
+  panels={[
+    {
+      value: "cli",
+      language: "bash",
+      content: `# Step 1: Create OIDC Provider (one-time per account)
+aws iam create-open-id-connect-provider \\
+  --url https://token.actions.githubusercontent.com \\
+  --client-id-list sts.amazonaws.com \\
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+
+# Step 2: Create role with trust policy
+aws iam create-role \\
+  --role-name github-actions-deploy \\
+  --assume-role-policy-document file://github-actions-trust-policy.json
+
+# Step 3: Create and attach permission policy
+aws iam create-policy \\
+  --policy-name GitHubActionsDeployPolicy \\
+  --policy-document file://github-actions-deploy-policy.json
+
+aws iam attach-role-policy \\
+  --role-name github-actions-deploy \\
+  --policy-arn arn:aws:iam::ACCOUNT_ID:policy/GitHubActionsDeployPolicy`
+    },
+    {
+      value: "terraform",
+      language: "hcl",
+      content: `# OIDC Provider for GitHub Actions (one-time per account)
+resource "aws_iam_openid_connect_provider" "github_actions" {
+  url = "https://token.actions.githubusercontent.com"
+  
+  client_id_list = ["sts.amazonaws.com"]
+  
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+}
+
+# GitHub Actions Deploy Role
+resource "aws_iam_role" "github_actions_deploy" {
+  name = "github-actions-deploy"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = aws_iam_openid_connect_provider.github_actions.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:YOUR_ORG/YOUR_REPO:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
+}
+
+# Deploy Policy
+resource "aws_iam_policy" "github_actions_deploy" {
+  name        = "GitHubActionsDeployPolicy"
+  description = "Permissions for GitHub Actions to deploy"
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ECRAuth"
+        Effect = "Allow"
+        Action = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "ECRPush"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:PutImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload"
+        ]
+        Resource = "arn:aws:ecr:us-east-1:\${data.aws_caller_identity.current.account_id}:repository/acme-*"
+      },
+      {
+        Sid    = "LambdaDeploy"
+        Effect = "Allow"
+        Action = [
+          "lambda:UpdateFunctionCode",
+          "lambda:GetFunction",
+          "lambda:UpdateFunctionConfiguration"
+        ]
+        Resource = "arn:aws:lambda:us-east-1:\${data.aws_caller_identity.current.account_id}:function:acme-prod-*"
+      },
+      {
+        Sid    = "ECSUpdate"
+        Effect = "Allow"
+        Action = [
+          "ecs:UpdateService",
+          "ecs:DescribeServices",
+          "ecs:DescribeTaskDefinition",
+          "ecs:RegisterTaskDefinition",
+          "ecs:ListTasks",
+          "ecs:DescribeTasks"
+        ]
+        Resource = "*"
+        Condition = {
+          ArnLike = {
+            "ecs:cluster" = "arn:aws:ecs:us-east-1:\${data.aws_caller_identity.current.account_id}:cluster/acme-prod-*"
+          }
+        }
+      },
+      {
+        Sid    = "ECSPassRole"
+        Effect = "Allow"
+        Action = "iam:PassRole"
+        Resource = [
+          "arn:aws:iam::\${data.aws_caller_identity.current.account_id}:role/acme-prod-*-task-role",
+          "arn:aws:iam::\${data.aws_caller_identity.current.account_id}:role/acme-prod-*-execution-role"
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "ecs-tasks.amazonaws.com"
+          }
+        }
+      },
+      {
+        Sid    = "CloudFrontInvalidation"
+        Effect = "Allow"
+        Action = [
+          "cloudfront:CreateInvalidation",
+          "cloudfront:GetInvalidation",
+          "cloudfront:ListInvalidations"
+        ]
+        Resource = "arn:aws:cloudfront::\${data.aws_caller_identity.current.account_id}:distribution/*"
+      }
+    ]
+  })
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "github_actions_deploy" {
+  role       = aws_iam_role.github_actions_deploy.name
+  policy_arn = aws_iam_policy.github_actions_deploy.arn
+}
+
+data "aws_caller_identity" "current" {}`
+    }
+  ]}
+/>
 
 ---
 
@@ -1672,6 +2140,192 @@ mfa_serial = arn:aws:iam::ACCOUNT_ID:mfa/alice
 - State backend permissions built-in
 - Can't touch billing, organizations, or audit logs
 
+<Alert type="note" title="Bootstrap Paradox">
+
+**Creating the Terraform role with Terraform** creates a chicken-and-egg problem. You'll need to create this role once using AWS CLI (or with admin credentials), then Terraform can manage it going forward.
+
+</Alert>
+
+<CodeSwitcher
+  tabs={[
+    { label: "AWS CLI (Bootstrap)", value: "cli" },
+    { label: "Terraform (After Bootstrap)", value: "terraform" }
+  ]}
+  panels={[
+    {
+      value: "cli",
+      language: "bash",
+      content: `# Create role with trust policy
+aws iam create-role \\
+  --role-name terraform-role \\
+  --assume-role-policy-document file://terraform-trust-policy.json
+
+# Create and attach permission policy
+aws iam create-policy \\
+  --policy-name TerraformPolicy \\
+  --policy-document file://terraform-policy.json
+
+aws iam attach-role-policy \\
+  --role-name terraform-role \\
+  --policy-arn arn:aws:iam::ACCOUNT_ID:policy/TerraformPolicy
+
+# Configure AWS CLI to use the role
+# Add to ~/.aws/config:
+[profile terraform]
+role_arn = arn:aws:iam::ACCOUNT_ID:role/terraform-role
+source_profile = default
+mfa_serial = arn:aws:iam::ACCOUNT_ID:mfa/alice`
+    },
+    {
+      value: "terraform",
+      language: "hcl",
+      content: `# Terraform Role (after initial bootstrap)
+resource "aws_iam_role" "terraform" {
+  name = "terraform-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowDevOpsUsers"
+        Effect = "Allow"
+        Principal = {
+          AWS = [
+            "arn:aws:iam::\${data.aws_caller_identity.current.account_id}:user/alice",
+            "arn:aws:iam::\${data.aws_caller_identity.current.account_id}:user/bob"
+          ]
+        }
+        Action = "sts:AssumeRole"
+        Condition = {
+          Bool = {
+            "aws:MultiFactorAuthPresent" = "true"
+          }
+        }
+      },
+      {
+        Sid    = "AllowGitHubActionsInfra"
+        Effect = "Allow"
+        Principal = {
+          Federated = "arn:aws:iam::\${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:YOUR_ORG/infrastructure:ref:refs/heads/main"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# Terraform Policy
+resource "aws_iam_policy" "terraform" {
+  name        = "TerraformPolicy"
+  description = "Permissions for Terraform to manage infrastructure"
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "FullAccessForInfrastructure"
+        Effect = "Allow"
+        Action = [
+          "ec2:*", "ecs:*", "eks:*", "lambda:*", "s3:*",
+          "dynamodb:*", "rds:*", "elasticache:*", "sqs:*",
+          "sns:*", "events:*", "cloudwatch:*", "logs:*",
+          "cloudfront:*", "route53:*", "acm:*",
+          "elasticloadbalancing:*", "autoscaling:*",
+          "secretsmanager:*", "ssm:*", "kms:*", "ecr:*"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "IAMForServiceRoles"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole", "iam:DeleteRole", "iam:GetRole",
+          "iam:PassRole", "iam:UpdateRole", "iam:TagRole",
+          "iam:UntagRole", "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies", "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy", "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy", "iam:GetRolePolicy",
+          "iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy",
+          "iam:GetPolicyVersion", "iam:ListPolicyVersions",
+          "iam:CreatePolicyVersion", "iam:DeletePolicyVersion",
+          "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
+          "iam:GetInstanceProfile", "iam:AddRoleToInstanceProfile",
+          "iam:RemoveRoleFromInstanceProfile",
+          "iam:ListInstanceProfilesForRole",
+          "iam:CreateServiceLinkedRole",
+          "iam:DeleteServiceLinkedRole"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "IAMReadOnly"
+        Effect = "Allow"
+        Action = ["iam:List*", "iam:Get*"]
+        Resource = "*"
+      },
+      {
+        Sid    = "TerraformStateBackend"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject", "s3:PutObject",
+          "s3:DeleteObject", "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::acme-terraform-state",
+          "arn:aws:s3:::acme-terraform-state/*"
+        ]
+      },
+      {
+        Sid    = "TerraformStateLock"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem"
+        ]
+        Resource = "arn:aws:dynamodb:us-east-1:\${data.aws_caller_identity.current.account_id}:table/acme-terraform-locks"
+      },
+      {
+        Sid    = "DenySelfEscalation"
+        Effect = "Deny"
+        Action = ["iam:*"]
+        Resource = [
+          "arn:aws:iam::\${data.aws_caller_identity.current.account_id}:role/terraform-role",
+          "arn:aws:iam::\${data.aws_caller_identity.current.account_id}:policy/TerraformPolicy"
+        ]
+      },
+      {
+        Sid    = "DenyDangerousActions"
+        Effect = "Deny"
+        Action = [
+          "organizations:*", "account:*", "budgets:*", "ce:*",
+          "cloudtrail:DeleteTrail", "cloudtrail:StopLogging"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "terraform" {
+  role       = aws_iam_role.terraform.name
+  policy_arn = aws_iam_policy.terraform.arn
+}
+
+data "aws_caller_identity" "current" {}`
+    }
+  ]}
+/>
+
 ---
 
 ## Least Privilege Without Paralysis
@@ -1840,7 +2494,7 @@ Set up Organizations early — it's free and makes everything easier later.
 - You already have an identity provider
 - You want one place to manage access
 
-We'll go deeper on these in Part 15 when we cover multi-account architecture.
+We'll go deeper on these in a future post on multi-account architecture.
 
 ---
 

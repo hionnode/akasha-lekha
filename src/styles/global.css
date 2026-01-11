@@ -372,7 +372,7 @@
   .blog-grid-center {
     grid-column: 2;
     min-width: 0; /* Prevent overflow */
-    max-width: 800px;
+    max-width: 1000px; /* Increased from 800px for ASCII diagrams */
     margin: 0 auto;
     width: 100%;
   }
@@ -572,7 +572,7 @@
     --tw-prose-bold: var(--fg-primary);
     --tw-prose-code: var(--accent-orange);
     --tw-prose-quotes: var(--fg-secondary);
-    max-width: 70ch; /* Slightly wider for larger font */
+    max-width: 90ch; /* Increased from 70ch to utilize wider column */
     font-size: 1.0625rem; /* 17px */
     line-height: 1.7;
   }
