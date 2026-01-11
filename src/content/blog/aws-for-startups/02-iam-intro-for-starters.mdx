@@ -1,0 +1,1400 @@
+---
+title: "IAM — The Key to Everything: Least Privilege Without Losing Your Mind"
+description: "Master AWS IAM for startups. Learn users, groups, roles, and policies with practical templates for developers, Lambda, CI/CD, and Terraform."
+excerpt: "Least privilege without losing your mind. Build a working IAM setup for your startup—not enterprise complexity, not 'just use AdministratorAccess.' The practical middle ground."
+date: "2026-01-11"
+author: "works-on-my.cloud"
+tags: ["aws", "iam", "security", "devops", "startup"]
+series: "AWS From Zero to Production"
+seriesPart: 2
+---
+
+import GuideStep from '../../../components/shared/GuideStep.astro';
+import Command from '../../../components/shared/Command.astro';
+import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
+
+
+*Least privilege without losing your mind*
+
+---
+
+Every AWS API call goes through IAM. Click a button in the console? IAM. Run `aws s3 ls`? IAM. Lambda reads from DynamoDB? IAM. Understanding IAM isn't optional — it's the foundation everything else sits on.
+
+This guide gives you a working IAM setup for a startup. Not enterprise complexity. Not "just use AdministratorAccess." The practical middle ground.
+
+---
+
+## The Mental Model
+
+IAM answers one question for every request: **Should this be allowed?**
+
+Every policy you write answers three things:
+
+```
+WHO          →    CAN DO WHAT    →    TO WHAT
+─────────────────────────────────────────────────
+Identities        Actions             Resources
+(Users,           (s3:GetObject,      (arn:aws:s3:::
+ Groups,           ec2:StartInstance,   my-bucket/*,
+ Roles)            dynamodb:Query)      arn:aws:ec2:...)
+```
+
+A policy connects these pieces. That's it. Everything else is details.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      IAM MENTAL MODEL                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   IDENTITY              POLICY              RESOURCE            │
+│   ────────              ──────              ────────            │
+│   ┌─────────┐          ┌─────────┐          ┌─────────┐        │
+│   │  User   │─────────▶│ Allow   │─────────▶│   S3    │        │
+│   │  Group  │          │ Deny    │          │   EC2   │        │
+│   │  Role   │          │         │          │ Lambda  │        │
+│   └─────────┘          └─────────┘          └─────────┘        │
+│                                                                 │
+│   Policies answer: Can THIS identity do THIS action             │
+│                    on THIS resource?                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Users, Groups, Roles — The Only Rule You Need
+
+Here's the rule: **Humans get users. Everything else gets roles.**
+
+That's it. Internalize this and you'll avoid 80% of IAM mistakes.
+
+### Users
+
+Users are permanent identities with long-term credentials. They're for humans who need to log into the console or use the CLI.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         IAM USER                                │
+├─────────────────────────────────────────────────────────────────┤
+│  • Has a username and password (console access)                 │
+│  • Can have access keys (CLI/API access)                        │
+│  • Credentials are long-lived (until rotated)                   │
+│  • Belongs to your AWS account                                  │
+│                                                                 │
+│  USE FOR: Humans on your team                                   │
+│  AVOID FOR: Applications, services, CI/CD                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Create users through the [IAM console](https://console.aws.amazon.com/iam/) or CLI:
+
+```bash
+aws iam create-user --user-name alice
+```
+
+### Groups
+
+Groups are collections of users. Attach policies to groups, then add users to groups. Never attach policies directly to users — it doesn't scale.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        IAM GROUP                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                    "Developers"                          │   │
+│  │                                                          │   │
+│  │    ┌───────┐  ┌───────┐  ┌───────┐  ┌───────┐          │   │
+│  │    │ Alice │  │  Bob  │  │ Carol │  │ Dave  │          │   │
+│  │    └───────┘  └───────┘  └───────┘  └───────┘          │   │
+│  │                                                          │   │
+│  │    Attached: DeveloperPolicy                             │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  All four users inherit DeveloperPolicy permissions.            │
+│  Add/remove users without touching policies.                    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Roles
+
+Roles are temporary identities. They don't have passwords or permanent access keys. Instead, something *assumes* the role and gets short-lived credentials (typically 1 hour).
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         IAM ROLE                                │
+├─────────────────────────────────────────────────────────────────┤
+│  • No permanent credentials                                     │
+│  • Issues temporary security tokens when assumed                │
+│  • Has a TRUST POLICY (who can assume it)                       │
+│  • Has a PERMISSION POLICY (what they can do once assumed)      │
+│                                                                 │
+│  USE FOR:                                                       │
+│  • AWS services (Lambda, EC2, ECS)                              │
+│  • CI/CD pipelines (GitHub Actions, GitLab)                     │
+│  • Cross-account access                                         │
+│  • Federated users (SSO from external IdP)                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Why roles over users for services? No credentials to leak. When Lambda assumes a role, it gets temporary tokens that expire. There's no access key sitting in a config file waiting to be committed to Git.
+
+<Alert type="important">
+
+**Critical:** Services should NEVER use IAM user access keys. Always use roles. If you find yourself creating access keys for a Lambda function, EC2 instance, or container, stop—you're doing it wrong.
+
+</Alert>
+
+---
+
+<Alert type="tip" title="The Fine Line: Users, Groups, Roles">
+
+| ❌ Under-engineering | ✅ Right | ❌ Over-engineering |
+|---------------------|----------|---------------------|
+| Everyone shares one IAM user | Users for humans, roles for services | Complex role chaining before you need it |
+| Policies attached directly to users | Permissions managed through groups | Separate role per developer |
+| Access keys for everything | OIDC federation for CI/CD | Custom IdP integration for 3-person team |
+
+</Alert>
+
+---
+
+## Policies: Reading and Writing Them
+
+Policies are JSON documents. Every policy has the same structure:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DescriptiveName",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::my-bucket/*",
+      "Condition": {
+        "IpAddress": {
+          "aws:SourceIp": "192.168.1.0/24"
+        }
+      }
+    }
+  ]
+}
+```
+
+Breaking it down:
+
+| Field | What it does | Example |
+|-------|--------------|---------|
+| `Version` | Policy language version. Always use `2012-10-17` | `"2012-10-17"` |
+| `Statement` | Array of permission rules | `[{...}, {...}]` |
+| `Sid` | Optional identifier for the statement | `"AllowS3Read"` |
+| `Effect` | `Allow` or `Deny` | `"Allow"` |
+| `Action` | What API calls this covers | `"s3:GetObject"` or `["s3:Get*", "s3:List*"]` |
+| `Resource` | What ARNs this applies to | `"arn:aws:s3:::bucket/*"` |
+| `Condition` | Optional constraints | IP ranges, tags, MFA, time |
+
+### ARNs (Amazon Resource Names)
+
+ARNs uniquely identify resources. Format:
+
+```
+arn:aws:service:region:account-id:resource-type/resource-id
+```
+
+Examples:
+
+```
+arn:aws:s3:::my-bucket                              # S3 bucket (no region — globally unique)
+arn:aws:s3:::my-bucket/*                            # All objects in bucket
+arn:aws:dynamodb:us-east-1:123456789012:table/users # DynamoDB table
+arn:aws:lambda:us-east-1:123456789012:function:*    # All Lambda functions
+arn:aws:iam::123456789012:user/alice                # IAM user (no region — IAM is global)
+```
+
+### Managed vs Inline Policies
+
+**Managed policies** exist independently and can be attached to multiple identities. AWS provides many ([full list](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_job-functions.html)), and you can create your own.
+
+**Inline policies** are embedded directly in a user, group, or role. They're deleted when the identity is deleted.
+
+<Alert type="note">
+
+**The startup answer:** Start with AWS managed policies. Create custom managed policies when you need more specific permissions. Avoid inline policies — they're harder to audit and don't scale.
+
+</Alert>
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   MANAGED vs INLINE                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  AWS MANAGED          CUSTOMER MANAGED         INLINE           │
+│  ────────────         ────────────────         ──────           │
+│  Created by AWS       Created by you           Embedded in      │
+│  Can't modify         Full control             identity         │
+│  Good defaults        Your specific needs      Hard to audit    │
+│                                                                 │
+│  Examples:            Examples:                When to use:     │
+│  • ReadOnlyAccess     • DeveloperPolicy        • Rarely         │
+│  • PowerUserAccess    • CICDDeployRole         • Strict 1:1     │
+│  • ViewOnlyAccess     • LambdaOrderProcessor     relationship   │
+│                                                                 │
+│  START HERE ────────▶ GRADUATE TO ──────────▶ AVOID             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+<Alert type="tip">
+
+Before attaching a policy, test it. The [IAM Policy Simulator](https://policysim.aws.amazon.com/) lets you check whether a policy allows or denies specific actions without actually making those calls.
+
+</Alert>
+
+---
+
+## Your First IAM Setup
+
+Let's build a real IAM structure. We'll create:
+
+1. A **Developer group** — for engineers who build features
+2. A **Lambda service role** — for a function that reads S3 and writes DynamoDB
+3. A **GitHub Actions role** — for CI/CD deployments
+4. A **Terraform role** — for infrastructure automation (we'll use this in Part 4)
+
+### Naming and Tagging Strategies
+
+Before creating resources, decide on a naming convention. Your IAM policies will use these patterns to scope permissions.
+
+**Option 1: Environment in Name (Simple)**
+
+```
+Resource naming: {project}-{environment}-{resource}
+Examples:
+  acme-dev-orders-bucket
+  acme-staging-orders-bucket
+  acme-prod-orders-bucket
+
+Policy pattern:
+  "Resource": "arn:aws:s3:::acme-dev-*/*"    # Dev only
+  "Resource": "arn:aws:s3:::acme-prod-*/*"   # Prod only
+```
+
+**Option 2: Tags (Flexible)**
+
+```
+Resource tagging:
+  Environment: dev | staging | prod
+  Team: backend | frontend | data
+  Project: orders | payments | inventory
+
+Policy pattern using conditions:
+  "Condition": {
+    "StringEquals": {
+      "aws:ResourceTag/Environment": "dev"
+    }
+  }
+```
+
+**Option 3: Separate Accounts (Robust)**
+
+```
+Account structure:
+  111111111111 - Development
+  222222222222 - Staging  
+  333333333333 - Production
+
+Policy pattern:
+  Different roles per account, no cross-environment risk
+```
+
+<Alert type="note">
+
+**The startup answer:** Start with Option 1 (environment in name). It's simple, works with wildcards, and doesn't require tag enforcement. Move to Option 3 (separate accounts) when you have a team >10 or handle sensitive data.
+
+For this guide, we'll use the naming pattern: `{company}-{env}-{resource}`
+
+</Alert>
+
+---
+
+### Template 1: Developer Group
+
+Developers need to read most things, write to dev/staging, and stay out of production data.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    DEVELOPER GROUP                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  WHO: Engineers who build features                              │
+│                                                                 │
+│  CAN:                                                           │
+│  ✓ Read logs, metrics, configs (all environments)               │
+│  ✓ Describe/list resources (EC2, Lambda, ECS, RDS, etc.)        │
+│  ✓ Write to dev and staging (S3, DynamoDB, invoke Lambda)       │
+│  ✓ Deploy to dev and staging (update Lambda code, ECS)          │
+│                                                                 │
+│  CANNOT:                                                        │
+│  ✗ Write to production resources                                │
+│  ✗ Modify IAM (no privilege escalation)                         │
+│  ✗ Change billing, account settings, or CloudTrail              │
+│  ✗ Create/delete infrastructure (that's Terraform's job)        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+<GuideStep title="Create the Developer Group" syncKey="developer-group">
+
+<Command>
+aws iam create-group --group-name Developers
+</Command>
+
+</GuideStep>
+
+**Create the policy** (`developer-policy.json`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOnlyAccessAllEnvironments",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ecs:Describe*",
+        "ecs:List*",
+        "eks:Describe*",
+        "eks:List*",
+        "lambda:Get*",
+        "lambda:List*",
+        "rds:Describe*",
+        "dynamodb:Describe*",
+        "dynamodb:List*",
+        "s3:GetBucketLocation",
+        "s3:ListAllMyBuckets",
+        "elasticache:Describe*",
+        "sqs:Get*",
+        "sqs:List*",
+        "sns:Get*",
+        "sns:List*",
+        "cloudwatch:Describe*",
+        "cloudwatch:Get*",
+        "cloudwatch:List*",
+        "logs:Describe*",
+        "logs:Get*",
+        "logs:FilterLogEvents",
+        "logs:StartQuery",
+        "logs:StopQuery",
+        "logs:GetQueryResults",
+        "xray:Get*",
+        "xray:BatchGet*",
+        "tag:GetResources"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3ReadAll",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-*",
+        "arn:aws:s3:::acme-*/*"
+      ]
+    },
+    {
+      "Sid": "DynamoDBReadAll",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan"
+      ],
+      "Resource": "arn:aws:dynamodb:*:*:table/acme-*"
+    },
+    {
+      "Sid": "DevStagingS3Write",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-dev-*/*",
+        "arn:aws:s3:::acme-staging-*/*"
+      ]
+    },
+    {
+      "Sid": "DevStagingDynamoDBWrite",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:BatchWriteItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:*:table/acme-dev-*",
+        "arn:aws:dynamodb:*:*:table/acme-staging-*"
+      ]
+    },
+    {
+      "Sid": "DevStagingLambdaDeploy",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:InvokeFunction"
+      ],
+      "Resource": [
+        "arn:aws:lambda:*:*:function:acme-dev-*",
+        "arn:aws:lambda:*:*:function:acme-staging-*"
+      ]
+    },
+    {
+      "Sid": "DenyProdWrite",
+      "Effect": "Deny",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:BatchWriteItem",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-prod-*/*",
+        "arn:aws:dynamodb:*:*:table/acme-prod-*",
+        "arn:aws:lambda:*:*:function:acme-prod-*"
+      ]
+    },
+    {
+      "Sid": "DenyIAMAndDangerousActions",
+      "Effect": "Deny",
+      "Action": [
+        "iam:*",
+        "organizations:*",
+        "account:*",
+        "budgets:*",
+        "ce:*",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:StopLogging",
+        "cloudtrail:UpdateTrail"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+<GuideStep title="Create and Attach the Policy" syncKey="developer-policy">
+
+<Command>
+# Create the policy
+aws iam create-policy \
+  --policy-name DeveloperPolicy \
+  --policy-document file://developer-policy.json
+
+# Attach to group (replace ACCOUNT_ID)
+aws iam attach-group-policy \
+  --group-name Developers \
+  --policy-arn arn:aws:iam::ACCOUNT_ID:policy/DeveloperPolicy
+</Command>
+
+</GuideStep>
+
+<GuideStep title="Add Users to the Group" syncKey="add-developers">
+
+<Command>
+aws iam add-user-to-group --group-name Developers --user-name alice
+aws iam add-user-to-group --group-name Developers --user-name bob
+</Command>
+
+</GuideStep>
+
+**Why this works:**
+
+- Explicit `Deny` on prod prevents accidents even if another policy allows
+- No IAM permissions = no privilege escalation
+- Wildcards on naming convention (`acme-dev-*`) scope without listing every resource
+- Read access to everything helps debugging; write access is limited
+
+---
+
+### Template 2: Lambda Service Role
+
+Every Lambda function needs an execution role. This role defines what the function can access. One role per function (or function group with identical needs).
+
+Let's create a role for a Lambda that:
+- Reads order files from S3
+- Writes order status to DynamoDB
+- Sends notifications to SQS
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              LAMBDA: ORDER PROCESSOR ROLE                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  SERVICE: Lambda function that processes incoming orders        │
+│                                                                 │
+│  NEEDS:                                                         │
+│  ✓ s3:GetObject on orders bucket                                │
+│  ✓ dynamodb:PutItem, UpdateItem, GetItem on orders table        │
+│  ✓ sqs:SendMessage to notification queue                        │
+│  ✓ logs:* for CloudWatch logging                                │
+│                                                                 │
+│  DOES NOT NEED:                                                 │
+│  ✗ Any other S3 bucket                                          │
+│  ✗ Any other DynamoDB table                                     │
+│  ✗ Any other SQS queue                                          │
+│  ✗ Any other AWS service                                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Trust policy** (`lambda-trust-policy.json`) — defines who can assume this role:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+**Permission policy** (`lambda-order-processor-policy.json`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOrdersFromS3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": "arn:aws:s3:::acme-prod-orders-incoming/*"
+    },
+    {
+      "Sid": "WriteToOrdersTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:GetItem",
+        "dynamodb:Query"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:ACCOUNT_ID:table/acme-prod-orders",
+        "arn:aws:dynamodb:us-east-1:ACCOUNT_ID:table/acme-prod-orders/index/*"
+      ]
+    },
+    {
+      "Sid": "SendToNotificationQueue",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage",
+        "sqs:GetQueueUrl"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:ACCOUNT_ID:acme-prod-order-notifications"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/lambda/acme-prod-order-processor:*"
+    }
+  ]
+}
+```
+
+<GuideStep title="Create the Lambda Service Role" syncKey="lambda-role">
+
+<Command>
+# Create role with trust policy
+aws iam create-role \
+  --role-name acme-prod-order-processor-role \
+  --assume-role-policy-document file://lambda-trust-policy.json
+
+# Create and attach permission policy
+aws iam create-policy \
+  --policy-name acme-prod-order-processor-policy \
+  --policy-document file://lambda-order-processor-policy.json
+
+aws iam attach-role-policy \
+  --role-name acme-prod-order-processor-role \
+  --policy-arn arn:aws:iam::ACCOUNT_ID:policy/acme-prod-order-processor-policy
+</Command>
+
+</GuideStep>
+
+**Assign to Lambda:**
+
+```bash
+aws lambda create-function \
+  --function-name acme-prod-order-processor \
+  --role arn:aws:iam::ACCOUNT_ID:role/acme-prod-order-processor-role \
+  --runtime nodejs20.x \
+  --handler index.handler \
+  --zip-file fileb://function.zip
+```
+
+**Why this works:**
+
+- Scoped to exact resources — not `s3:*` on `*`
+- Includes DynamoDB indexes (common oversight)
+- CloudWatch logs scoped to this function's log group
+- Trust policy only allows Lambda service — humans can't assume this role
+
+---
+
+### Template 3: GitHub Actions CI/CD Role
+
+CI/CD pipelines should never use access keys. Use [OIDC federation](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services) — GitHub proves its identity to AWS, AWS issues temporary credentials. No secrets to rotate or leak.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              GITHUB ACTIONS DEPLOY ROLE                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  WHO: GitHub Actions workflow (main branch only)                │
+│                                                                 │
+│  CAN:                                                           │
+│  ✓ Push images to ECR                                           │
+│  ✓ Update Lambda function code                                  │
+│  ✓ Update ECS services                                          │
+│  ✓ Invalidate CloudFront distributions                          │
+│                                                                 │
+│  CANNOT:                                                        │
+│  ✗ Create or delete infrastructure                              │
+│  ✗ Modify IAM roles or policies                                 │
+│  ✗ Access secrets directly (uses service roles)                 │
+│  ✗ Deploy from non-main branches                                │
+│                                                                 │
+│  SECURITY: OIDC federation — no access keys stored anywhere     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Step 1: Create OIDC Provider** (one-time setup)
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+```
+
+<Alert type="note">
+
+**One-time setup:** You only need to create the OIDC provider once per AWS account. After that, you can create multiple roles that trust it.
+
+</Alert>
+
+**Step 2: Trust policy** (`github-actions-trust-policy.json`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:YOUR_ORG/YOUR_REPO:ref:refs/heads/main"
+        }
+      }
+    }
+  ]
+}
+```
+
+**Step 3: Permission policy** (`github-actions-deploy-policy.json`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECRAuth",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRPush",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "ecr:PutImage",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:ACCOUNT_ID:repository/acme-*"
+    },
+    {
+      "Sid": "LambdaDeploy",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:UpdateFunctionCode",
+        "lambda:GetFunction",
+        "lambda:UpdateFunctionConfiguration"
+      ],
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:acme-prod-*"
+    },
+    {
+      "Sid": "ECSUpdate",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:DescribeServices",
+        "ecs:DescribeTaskDefinition",
+        "ecs:RegisterTaskDefinition",
+        "ecs:ListTasks",
+        "ecs:DescribeTasks"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnLike": {
+          "ecs:cluster": "arn:aws:ecs:us-east-1:ACCOUNT_ID:cluster/acme-prod-*"
+        }
+      }
+    },
+    {
+      "Sid": "ECSPassRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/acme-prod-*-task-role",
+        "arn:aws:iam::ACCOUNT_ID:role/acme-prod-*-execution-role"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "CloudFrontInvalidation",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateInvalidation",
+        "cloudfront:GetInvalidation",
+        "cloudfront:ListInvalidations"
+      ],
+      "Resource": "arn:aws:cloudfront::ACCOUNT_ID:distribution/*"
+    }
+  ]
+}
+```
+
+**Create the role:**
+
+```bash
+aws iam create-role \
+  --role-name github-actions-deploy \
+  --assume-role-policy-document file://github-actions-trust-policy.json
+
+aws iam create-policy \
+  --policy-name GitHubActionsDeployPolicy \
+  --policy-document file://github-actions-deploy-policy.json
+
+aws iam attach-role-policy \
+  --role-name github-actions-deploy \
+  --policy-arn arn:aws:iam::ACCOUNT_ID:policy/GitHubActionsDeployPolicy
+```
+
+**Use in GitHub Actions** (`.github/workflows/deploy.yml`):
+
+```yaml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::ACCOUNT_ID:role/github-actions-deploy
+          aws-region: us-east-1
+      
+      - name: Deploy
+        run: |
+          # Your deployment commands here
+          aws lambda update-function-code \
+            --function-name acme-prod-api \
+            --zip-file fileb://function.zip
+```
+
+**Why this works:**
+
+- OIDC = no access keys anywhere
+- Branch restriction (`refs/heads/main`) = only main can deploy to prod
+- `iam:PassRole` with condition = can assign task roles during deployment but can't create new powerful roles
+- Scoped ECR access = can only push to your repositories
+
+---
+
+### Template 4: Terraform Role
+
+Terraform needs broad permissions to create infrastructure, but should still be scoped. We'll create the role now and use it in Part 4.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TERRAFORM ROLE                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  WHO: Terraform (run locally or in CI/CD)                       │
+│                                                                 │
+│  CAN:                                                           │
+│  ✓ Create, modify, delete infrastructure resources              │
+│  ✓ Manage IAM roles and policies (for service roles)            │
+│  ✓ Read everything for state management                         │
+│                                                                 │
+│  CANNOT:                                                        │
+│  ✗ Modify its own role (no self-escalation)                     │
+│  ✗ Touch billing or organization settings                       │
+│  ✗ Delete CloudTrail or audit logs                              │
+│                                                                 │
+│  NOTE: This is powerful. Restrict who can assume it.            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Trust policy** (`terraform-trust-policy.json`):
+
+For local development, allow specific IAM users. For CI/CD, use OIDC.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowDevOpsUsers",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "arn:aws:iam::ACCOUNT_ID:user/alice",
+          "arn:aws:iam::ACCOUNT_ID:user/bob"
+        ]
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "Bool": {
+          "aws:MultiFactorAuthPresent": "true"
+        }
+      }
+    },
+    {
+      "Sid": "AllowGitHubActionsInfra",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:YOUR_ORG/infrastructure:ref:refs/heads/main"
+        }
+      }
+    }
+  ]
+}
+```
+
+**Permission policy** (`terraform-policy.json`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FullAccessForInfrastructure",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:*",
+        "ecs:*",
+        "eks:*",
+        "lambda:*",
+        "s3:*",
+        "dynamodb:*",
+        "rds:*",
+        "elasticache:*",
+        "sqs:*",
+        "sns:*",
+        "events:*",
+        "cloudwatch:*",
+        "logs:*",
+        "cloudfront:*",
+        "route53:*",
+        "acm:*",
+        "elasticloadbalancing:*",
+        "autoscaling:*",
+        "secretsmanager:*",
+        "ssm:*",
+        "kms:*",
+        "ecr:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAMForServiceRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:PassRole",
+        "iam:UpdateRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:ListInstanceProfilesForRole",
+        "iam:CreateServiceLinkedRole",
+        "iam:DeleteServiceLinkedRole"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAMReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:List*",
+        "iam:Get*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "TerraformStateBackend",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-terraform-state",
+        "arn:aws:s3:::acme-terraform-state/*"
+      ]
+    },
+    {
+      "Sid": "TerraformStateLock",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": "arn:aws:dynamodb:us-east-1:ACCOUNT_ID:table/acme-terraform-locks"
+    },
+    {
+      "Sid": "DenySelfEscalation",
+      "Effect": "Deny",
+      "Action": [
+        "iam:*"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/terraform-role",
+        "arn:aws:iam::ACCOUNT_ID:policy/TerraformPolicy"
+      ]
+    },
+    {
+      "Sid": "DenyDangerousActions",
+      "Effect": "Deny",
+      "Action": [
+        "organizations:*",
+        "account:*",
+        "budgets:*",
+        "ce:*",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:StopLogging"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+**Create the role:**
+
+```bash
+aws iam create-role \
+  --role-name terraform-role \
+  --assume-role-policy-document file://terraform-trust-policy.json
+
+aws iam create-policy \
+  --policy-name TerraformPolicy \
+  --policy-document file://terraform-policy.json
+
+aws iam attach-role-policy \
+  --role-name terraform-role \
+  --policy-arn arn:aws:iam::ACCOUNT_ID:policy/TerraformPolicy
+```
+
+**Use with Terraform** (in Part 4, we'll set up the full workflow):
+
+```bash
+# Assume the role before running Terraform
+aws sts assume-role \
+  --role-arn arn:aws:iam::ACCOUNT_ID:role/terraform-role \
+  --role-session-name terraform-session
+
+# Or configure in ~/.aws/config
+[profile terraform]
+role_arn = arn:aws:iam::ACCOUNT_ID:role/terraform-role
+source_profile = default
+mfa_serial = arn:aws:iam::ACCOUNT_ID:mfa/alice
+```
+
+**Why this works:**
+
+- MFA required for human users
+- OIDC for CI/CD (infrastructure repo, main branch only)
+- Explicit deny on self-modification prevents escalation
+- State backend permissions built-in
+- Can't touch billing, organizations, or audit logs
+
+---
+
+## Least Privilege Without Paralysis
+
+The theory is "grant minimum permissions needed." The reality is you don't always know what's needed until something breaks.
+
+**Practical approach:**
+
+1. **Start with AWS managed policies** — `ReadOnlyAccess`, `PowerUserAccess`, job-function policies. They're battle-tested.
+
+2. **Use Access Analyzer** — After workloads run for 30+ days, [IAM Access Analyzer](https://docs.aws.amazon.com/IAM/latest/UserGuide/what-is-access-analyzer.html) can generate policies based on actual usage.
+
+3. **Narrow over time** — Replace broad managed policies with specific custom policies as you understand usage patterns.
+
+4. **Use conditions** — Even broad action permissions become safe with the right conditions:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "ec2:*",
+  "Resource": "*",
+  "Condition": {
+    "StringEquals": {
+      "ec2:ResourceTag/Environment": "dev"
+    }
+  }
+}
+```
+
+This allows all EC2 actions but only on resources tagged `Environment: dev`.
+
+---
+
+<Alert type="tip" title="The Fine Line: Least Privilege">
+
+| ❌ Under-engineering | ✅ Right | ❌ Over-engineering |
+|---------------------|----------|---------------------|
+| `AdministratorAccess` for everyone | AWS managed policies + narrow custom policies | Hand-crafting every policy from scratch |
+| No conditions | Conditions for environment/team scoping | 50-line condition blocks |
+| Never reviewing permissions | Access Analyzer + quarterly reviews | Weekly permission audits for 5-person team |
+
+</Alert>
+
+---
+
+## Mistakes That Will Burn You
+
+### 1. Wildcards Everywhere
+
+```json
+// 🔴 Don't do this
+{
+  "Effect": "Allow",
+  "Action": "*",
+  "Resource": "*"
+}
+
+// 🔴 Or this
+{
+  "Effect": "Allow",
+  "Action": "s3:*",
+  "Resource": "*"
+}
+
+// 🟢 Do this
+{
+  "Effect": "Allow",
+  "Action": ["s3:GetObject", "s3:PutObject"],
+  "Resource": "arn:aws:s3:::my-bucket/*"
+}
+```
+
+### 2. Access Keys for Services
+
+```bash
+# 🔴 Don't do this
+# Lambda with hardcoded credentials
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+
+# 🟢 Do this
+# Lambda with execution role — no credentials in code
+aws lambda create-function \
+  --role arn:aws:iam::ACCOUNT_ID:role/my-lambda-role \
+  ...
+```
+
+### 3. Forgetting DynamoDB Index Permissions
+
+```json
+// 🔴 Doesn't work for GSI queries
+"Resource": "arn:aws:dynamodb:*:*:table/orders"
+
+// 🟢 Include indexes
+"Resource": [
+  "arn:aws:dynamodb:*:*:table/orders",
+  "arn:aws:dynamodb:*:*:table/orders/index/*"
+]
+```
+
+### 4. Missing iam:PassRole
+
+When a service creates resources that use roles (Lambda, ECS, EC2), the caller needs `iam:PassRole`:
+
+```json
+// Without this, "Access Denied" when creating Lambda
+{
+  "Effect": "Allow",
+  "Action": "iam:PassRole",
+  "Resource": "arn:aws:iam::ACCOUNT_ID:role/my-lambda-role",
+  "Condition": {
+    "StringEquals": {
+      "iam:PassedToService": "lambda.amazonaws.com"
+    }
+  }
+}
+```
+
+### 5. Copy-Pasting Without Understanding
+
+That Stack Overflow policy might:
+- Be for a different use case
+- Be outdated
+- Be overly permissive
+- Be missing required permissions
+
+Always use the [Policy Simulator](https://policysim.aws.amazon.com/) to test before attaching.
+
+<Alert type="warning">
+
+**Pro tip:** When you get an "Access Denied" error, check CloudTrail. It shows exactly which action was denied and which policy caused the denial. This is infinitely faster than guessing.
+
+</Alert>
+
+### 6. Not Using Conditions
+
+Conditions are underused. They let you:
+- Require MFA: `"Bool": {"aws:MultiFactorAuthPresent": "true"}`
+- Restrict by IP: `"IpAddress": {"aws:SourceIp": "203.0.113.0/24"}`
+- Enforce encryption: `"StringEquals": {"s3:x-amz-server-side-encryption": "AES256"}`
+- Scope by tag: `"StringEquals": {"aws:ResourceTag/Environment": "dev"}`
+- Limit time: `"DateLessThan": {"aws:CurrentTime": "2025-12-31T23:59:59Z"}`
+
+---
+
+## What's Ahead: Organizations and Identity Center
+
+Once your team grows past 5-10 people, individual IAM users become a management headache. Two services help:
+
+### AWS Organizations
+
+[AWS Organizations](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_introduction.html) lets you manage multiple AWS accounts as a unit. Benefits:
+
+- **Consolidated billing** — One bill, cost allocation by account
+- **Service Control Policies (SCPs)** — Guardrails that apply to entire accounts
+- **Account factory** — Spin up new accounts with consistent baselines
+
+Set up Organizations early — it's free and makes everything easier later.
+
+### IAM Identity Center (SSO)
+
+[IAM Identity Center](https://docs.aws.amazon.com/singlesignon/latest/userguide/what-is.html) replaces IAM users for humans. Instead of managing passwords and access keys in AWS, you connect your identity provider (Okta, Azure AD, Google Workspace) and manage access centrally.
+
+**When to adopt:**
+- More than 3 people need AWS access
+- You already have an identity provider
+- You want one place to manage access
+
+We'll go deeper on these in Part 15 when we cover multi-account architecture.
+
+---
+
+<Alert type="tip" title="The Fine Line: Organizations & Identity Center">
+
+| ❌ Under-engineering | ✅ Right | ❌ Over-engineering |
+|---------------------|----------|---------------------|
+| Single account forever, 20 IAM users | Organizations now (free), Identity Center when team grows | Full multi-account landing zone before product-market fit |
+| No SCPs | Basic SCPs (deny root, require encryption) | 50 custom SCPs for 3-person team |
+
+</Alert>
+
+---
+
+## Summary
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      IAM CHECKLIST                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  □ Users for humans, roles for everything else                  │
+│  □ Permissions assigned to groups, not users                    │
+│  □ Every service has its own role (Lambda, ECS, etc.)           │
+│  □ CI/CD uses OIDC federation, not access keys                  │
+│  □ Naming convention enables wildcard scoping                   │
+│  □ Explicit Deny on production for non-prod identities          │
+│  □ No IAM permissions for developers (prevents escalation)      │
+│  □ MFA required for privileged access                           │
+│  □ Terraform role ready (use in Part 4)                         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+<ValidationChecklist 
+  items={[
+    {
+      category: "IAM STRUCTURE",
+      tasks: [
+        { text: "Developer group created with appropriate policies", syncKey: "developer-group" },
+        { text: "Developer policy attached to group", syncKey: "developer-policy" },
+        { text: "Team members added to groups (not individual policies)", syncKey: "add-developers" }
+      ]
+    },
+    {
+      category: "SERVICE ROLES",
+      tasks: [
+        { text: "Lambda service role created with least privilege", syncKey: "lambda-role" },
+        { text: "Trust policy restricts to Lambda service only", syncKey: "lambda-trust" },
+        { text: "Permissions scoped to specific resources (no wildcards)", syncKey: "lambda-permissions" }
+      ]
+    },
+    {
+      category: "CI/CD",
+      tasks: [
+        { text: "OIDC provider created for GitHub Actions", syncKey: "github-oidc" },
+        { text: "GitHub Actions role created with deployment permissions", syncKey: "github-role" },
+        { text: "Trust policy restricts to main branch only", syncKey: "github-trust" }
+      ]
+    },
+    {
+      category: "INFRASTRUCTURE",
+      tasks: [
+        { text: "Terraform role created for IaC management", syncKey: "terraform-role" },
+        { text: "MFA required for human users to assume Terraform role", syncKey: "terraform-mfa" },
+        { text: "Self-escalation prevented with explicit Deny", syncKey: "terraform-deny" }
+      ]
+    },
+    {
+      category: "BEST PRACTICES",
+      tasks: [
+        { text: "Naming convention established for resource scoping", syncKey: "naming-convention" },
+        { text: "Production resources protected with explicit Deny", syncKey: "prod-deny" },
+        { text: "No IAM permissions granted to developer group", syncKey: "no-iam-dev" },
+        { text: "Tested policies with IAM Policy Simulator", syncKey: "policy-simulator" }
+      ]
+    }
+  ]}
+/>
+
+## Key Takeaways
+
+1. **Humans get users. Everything else gets roles.** Internalize this rule and you'll avoid 80% of IAM mistakes.
+
+2. **Groups are for permissions, not users.** Attach policies to groups, add users to groups. This scales.
+
+3. **Start broad, narrow over time.** AWS managed policies → custom managed policies → Access Analyzer refinement.
+
+4. **OIDC > Access keys.** CI/CD should never use long-lived credentials. GitHub Actions, GitLab, and others support OIDC.
+
+5. **Conditions are your friend.** Tag-based permissions, MFA requirements, and IP restrictions make broad permissions safe.
+
+You now have a production-ready IAM foundation. Next up: [Part 3 — Your Local AWS Setup](/guides/aws/part-3-local-setup).
+
+---
+
+## Further Reading
+
+- [IAM Identities (users, groups, roles)](https://docs.aws.amazon.com/IAM/latest/UserGuide/id.html)
+- [IAM Policies and Permissions](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html)
+- [IAM Security Best Practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)
+- [IAM Policy Simulator](https://policysim.aws.amazon.com/)
+- [IAM Access Analyzer](https://docs.aws.amazon.com/IAM/latest/UserGuide/what-is-access-analyzer.html)
+- [Configuring OIDC for GitHub Actions](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
