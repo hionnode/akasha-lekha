@@ -1,5 +1,5 @@
 ---
-// This component enhances all code blocks on the page with copy buttons, file headers, and terminal styling
+// This component enhances all code blocks on the page with copy buttons, file headers, terminal styling, and collapsible functionality
 ---
 
 <script>
@@ -15,6 +15,13 @@
       // Get code element
       const code = pre.querySelector('code');
       const codeText = code?.textContent || '';
+
+      // Count lines in code block
+      const lineCount = codeText.split('\n').length;
+
+      // Detect ASCII art/diagrams by checking for box-drawing characters
+      const hasBoxDrawing = /[┌┐└┘├┤┬┴┼─│╔╗╚╝╠╣╦╩╬═║▲▼◄►▶◀△▽◁▷┃━┏┓┗┛┣┫┳┻╋]/.test(codeText);
+      const isAsciiArt = hasBoxDrawing;
 
       // Check for data attributes added by remark plugins
       const title = code?.getAttribute('data-title');
@@ -60,33 +67,65 @@
         wrapper.insertBefore(header, pre);
       }
 
+      // Create collapse/expand button
+      const collapseButton = document.createElement('button');
+      collapseButton.className = 'collapse-button';
+      collapseButton.setAttribute('aria-label', 'Toggle code block');
+
+      // Auto-collapse only non-ASCII code blocks with >20 lines
+      const shouldAutoCollapse = lineCount > 20 && !isAsciiArt;
+      collapseButton.setAttribute('aria-expanded', shouldAutoCollapse ? 'false' : 'true');
+
+      // Set initial state based on line count and content type
+      if (shouldAutoCollapse) {
+        pre.classList.add('collapsed');
+      }
+
+      // Update button text
+      const updateCollapseButton = (isCollapsed: boolean) => {
+        collapseButton.innerHTML = isCollapsed
+          ? `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg><span>Expand (${lineCount} lines)</span>`
+          : `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg><span>Collapse</span>`;
+      };
+
+      updateCollapseButton(shouldAutoCollapse);
+
+      // Add collapse button click handler
+      collapseButton.addEventListener('click', () => {
+        const isCollapsed = pre.classList.toggle('collapsed');
+        collapseButton.setAttribute('aria-expanded', !isCollapsed ? 'true' : 'false');
+        updateCollapseButton(isCollapsed);
+      });
+
+      wrapper.appendChild(collapseButton);
+
       // Create copy button
-      const button = document.createElement('button');
-      button.className = 'copy-button';
-      button.textContent = 'Copy';
-      button.setAttribute('aria-label', 'Copy code to clipboard');
+      const copyButton = document.createElement('button');
+      copyButton.className = 'copy-button';
+      copyButton.textContent = 'Copy';
+      copyButton.setAttribute('aria-label', 'Copy code to clipboard');
 
       // Add click handler
-      button.addEventListener('click', async () => {
+      copyButton.addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(codeText);
-          button.textContent = 'Copied!';
-          button.classList.add('copied');
+          copyButton.textContent = 'Copied!';
+          copyButton.classList.add('copied');
 
           setTimeout(() => {
-            button.textContent = 'Copy';
-            button.classList.remove('copied');
+            copyButton.textContent = 'Copy';
+            copyButton.classList.remove('copied');
           }, 2000);
         } catch (err) {
           console.error('Failed to copy:', err);
-          button.textContent = 'Failed';
+          copyButton.textContent = 'Failed';
           setTimeout(() => {
-            button.textContent = 'Copy';
+            copyButton.textContent = 'Copy';
           }, 2000);
         }
       });
 
-      wrapper.appendChild(button);
+      wrapper.appendChild(copyButton);
     });
   }
 
