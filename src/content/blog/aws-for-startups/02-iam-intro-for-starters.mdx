@@ -20,9 +20,218 @@ import ValidationChecklist from '../../../components/shared/ValidationChecklist.
 
 ---
 
-Every AWS API call goes through IAM. Click a button in the console? IAM. Run `aws s3 ls`? IAM. Lambda reads from DynamoDB? IAM. Understanding IAM isn't optional — it's the foundation everything else sits on.
 
-This guide gives you a working IAM setup for a startup. Not enterprise complexity. Not "just use AdministratorAccess." The practical middle ground.
+## Why IAM Can't Go Down
+
+Every AWS service has two layers.
+
+**Data plane** handles the actual work — bytes flowing into S3, Lambda functions executing, DynamoDB returning query results. This is where your application lives. Data planes are fast, scalable, and occasionally have brief hiccups during regional issues.
+
+**Control plane** manages the infrastructure — creating buckets, configuring functions, setting permissions, deleting resources. When you click "Create" in the console or run `terraform apply`, you're talking to the control plane.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         HOW AWS SERVICES WORK                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                        ┌─────────────────────────┐                          │
+│                        │      CONTROL PLANE      │                          │
+│                        │                         │                          │
+│   You/Terraform ──────▶│  Create, Update, Delete │                          │
+│   "aws s3 mb ..."      │  Configure, Permissions │                          │
+│                        │                         │                          │
+│                        │  ┌─────────────────┐    │                          │
+│                        │  │      IAM        │◀─── Every request passes      │
+│                        │  │ (Authorization) │     through IAM first         │
+│                        │  └─────────────────┘    │                          │
+│                        └────────────┬────────────┘                          │
+│                                     │                                       │
+│                                     │ Infrastructure exists                 │
+│                                     ▼                                       │
+│                        ┌─────────────────────────┐                          │
+│                        │       DATA PLANE        │                          │
+│                        │                         │                          │
+│   Your App ───────────▶│  Read, Write, Execute   │                          │
+│   User traffic         │  Query, Stream, Process │                          │
+│                        │                         │                          │
+│                        └─────────────────────────┘                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Here's what most people don't realize: **IAM is embedded in the control plane of every AWS service.** It's not a standalone service you occasionally configure — it's the authorization layer that every single API call passes through.
+
+When you call `s3:CreateBucket`, IAM evaluates your permissions before S3 even sees the request. When your CI/CD pipeline deploys a Lambda function, IAM validates the credentials first. When one service calls another, IAM checks the role's permissions.
+
+Every. Single. API call.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        THE IAM CHECKPOINT                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                                                                             │
+│   ┌─────────┐      ┌─────────┐      ┌─────────────┐      ┌─────────────┐   │
+│   │         │      │         │      │             │      │             │   │
+│   │   You   │─────▶│ AWS API │─────▶│     IAM     │─────▶│   Service   │   │
+│   │         │      │         │      │             │      │             │   │
+│   └─────────┘      └─────────┘      └──────┬──────┘      └─────────────┘   │
+│                                            │                               │
+│                                            │                               │
+│                                    ┌───────┴───────┐                       │
+│                                    │               │                       │
+│                                    ▼               ▼                       │
+│                               ┌────────┐     ┌────────┐                    │
+│                               │ALLOWED │     │ DENIED │                    │
+│                               │Continue│     │  Stop  │                    │
+│                               └────────┘     └────────┘                    │
+│                                                                             │
+│   This happens for EVERY API call:                                         │
+│   • Console clicks                                                         │
+│   • CLI commands                                                           │
+│   • SDK calls from your application                                        │
+│   • Service-to-service calls (Lambda → DynamoDB)                           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+This is why IAM is architected to never go down. AWS has built IAM as the most resilient component in their infrastructure — globally replicated, aggressively cached, designed to survive failures that would cripple other services. If IAM fails, nothing in AWS works. Not because services break, but because nothing can prove it's allowed to do anything.
+
+**The implication:** IAM isn't something you learn "eventually." It's the foundation that determines whether your code runs, your deployments succeed, and your infrastructure stays secure.
+
+---
+
+Now that you understand IAM's critical role in AWS, let's clarify what IAM actually does—because many people confuse two related but distinct concepts.
+
+---
+
+## Authentication vs Authorization
+
+IAM handles two distinct jobs that people often conflate.
+
+**Authentication** answers: *"Who are you?"*
+
+When you make an AWS API call, you send credentials (access key, session token, or signed request). AWS verifies these credentials are valid and identifies which principal is making the request.
+
+**Authorization** answers: *"Are you allowed to do this?"*
+
+Once AWS knows who you are, IAM evaluates policies to determine if that principal can perform the requested action on the specified resource.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    AUTHENTICATION vs AUTHORIZATION                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   ┌─────────────┐      ┌──────────────────┐      ┌───────────────────┐     │
+│   │             │      │                  │      │                   │     │
+│   │   Request   │─────▶│  AUTHENTICATION  │─────▶│  AUTHORIZATION    │     │
+│   │             │      │                  │      │                   │     │
+│   └─────────────┘      └──────────────────┘      └───────────────────┘     │
+│                                │                          │                │
+│                                │                          │                │
+│                                ▼                          ▼                │
+│                        ┌──────────────┐          ┌──────────────┐          │
+│                        │  WHO are you │          │ Are you      │          │
+│                        │  proving it? │          │ ALLOWED?     │          │
+│                        └──────────────┘          └──────────────┘          │
+│                                │                          │                │
+│                                │                          │                │
+│                                ▼                          ▼                │
+│                        ┌──────────────┐          ┌──────────────┐          │
+│                        │ Credentials: │          │ Policies:    │          │
+│                        │ • Access Key │          │ • Identity   │          │
+│                        │ • Secret Key │          │ • Resource   │          │
+│                        │ • Session    │          │ • Boundaries │          │
+│                        │   Token      │          │ • SCPs       │          │
+│                        └──────────────┘          └──────────────┘          │
+│                                                                             │
+│                                                                             │
+│   AUTHENTICATION FAILURE          AUTHORIZATION FAILURE                    │
+│   ──────────────────────          ─────────────────────                    │
+│   "The security token             "User: arn:aws:iam::...                  │
+│    is invalid"                     is not authorized to                    │
+│                                    perform: s3:GetObject"                  │
+│   Your credentials are             Your credentials are valid,             │
+│   wrong or expired.                but you lack permission.                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+When debugging access issues, the error message tells you which failed. "Invalid token" = authentication. "Not authorized" = authorization.
+
+---
+
+## Principals: Who's Making the Request?
+
+In IAM, a **principal** is an entity that can make requests to AWS. Every API call comes from a principal, and IAM needs to know who that principal is before it can authorize the request.
+
+### Types of Principals
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       PRINCIPAL TYPES                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  IAM USER                                                       │
+│  ────────                                                       │
+│  A person or application with long-term credentials             │
+│  Example: alice@your-company                                    │
+│                                                                 │
+│  IAM ROLE                                                       │
+│  ────────                                                       │
+│  Temporary identity that can be assumed                         │
+│  Example: lambda-execution-role                                 │
+│                                                                 │
+│  AWS SERVICE                                                    │
+│  ───────────                                                    │
+│  AWS service acting on your behalf                              │
+│  Example: lambda.amazonaws.com                                  │
+│                                                                 │
+│  FEDERATED USER                                                 │
+│  ──────────────                                                 │
+│  External identity (Google, Okta, GitHub)                       │
+│  Example: user@google.com via OIDC                              │
+│                                                                 │
+│  AWS ACCOUNT                                                    │
+│  ───────────                                                    │
+│  Entire AWS account (for cross-account access)                  │
+│  Example: 123456789012                                          │
+│                                                                 │
+│  ANONYMOUS                                                      │
+│  ─────────                                                      │
+│  Unauthenticated requests (public S3 buckets)                   │
+│  Example: *                                                     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### How Principals Appear in Policies
+
+When you write a resource-based policy (like an S3 bucket policy), you specify principals using the `Principal` field:
+
+| Principal Type | Format | Example |
+|----------------|--------|---------|
+| AWS Account | `"AWS": "arn:aws:iam::ACCOUNT_ID:root"` | `"AWS": "arn:aws:iam::123456789012:root"` |
+| IAM User | `"AWS": "arn:aws:iam::ACCOUNT_ID:user/USERNAME"` | `"AWS": "arn:aws:iam::123456789012:user/alice"` |
+| IAM Role | `"AWS": "arn:aws:iam::ACCOUNT_ID:role/ROLENAME"` | `"AWS": "arn:aws:iam::123456789012:role/lambda-role"` |
+| AWS Service | `"Service": "SERVICE.amazonaws.com"` | `"Service": "lambda.amazonaws.com"` |
+| Federated User | `"Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/PROVIDER"` | `"Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"` |
+| Everyone | `"AWS": "*"` | `"AWS": "*"` (use with caution!) |
+
+<Alert type="important">
+
+**Identity-based policies don't have a Principal field** because the principal is implicit—whoever the policy is attached to. Only resource-based policies and trust policies specify principals explicitly.
+
+</Alert>
+
+### Principal vs Identity
+
+You'll hear both terms used interchangeably:
+- **Principal** = The entity making the request (broader term, includes services and anonymous)
+- **Identity** = Usually refers to IAM users, groups, and roles specifically
+
+In this guide, we use "principal" when talking about who's making a request, and "identity" when talking about IAM users/groups/roles specifically.
+
+---
+
+Now that you know who can make requests (principals) and how IAM decides to allow them (authentication + authorization), let's look at the simple mental model that ties everything together.
 
 ---
 
@@ -162,7 +371,349 @@ Why roles over users for services? No credentials to leak. When Lambda assumes a
 
 ---
 
+The most important concept in that table—roles for everything except humans—deserves deeper explanation. Let's see how roles actually work under the hood.
+
+---
+
+## How AssumeRole Actually Works
+
+Roles don't have passwords. They can't log in. Instead, something *assumes* the role and receives temporary credentials. This is the foundation of how services, CI/CD, and cross-account access work in AWS.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         THE ASSUME ROLE FLOW                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   STEP 1: Request to Assume                                                 │
+│   ─────────────────────────                                                 │
+│                                                                             │
+│   ┌──────────────┐         sts:AssumeRole          ┌───────────────────┐   │
+│   │              │ ───────────────────────────────▶│                   │   │
+│   │  Principal   │    "I want to become this role" │       STS         │   │
+│   │  (User/Role/ │                                 │ (Security Token   │   │
+│   │   Service)   │                                 │     Service)      │   │
+│   │              │                                 │                   │   │
+│   └──────────────┘                                 └─────────┬─────────┘   │
+│                                                              │             │
+│                                                              │             │
+│   STEP 2: STS Checks the Trust Policy                        │             │
+│   ───────────────────────────────────                        │             │
+│                                                              ▼             │
+│   ┌───────────────────────────────────────────────────────────────────┐   │
+│   │                         ROLE TRUST POLICY                         │   │
+│   │                                                                   │   │
+│   │   "Who is allowed to assume me?"                                  │   │
+│   │                                                                   │   │
+│   │   {                                                               │   │
+│   │     "Effect": "Allow",                                            │   │
+│   │     "Principal": { "Service": "lambda.amazonaws.com" },           │   │
+│   │     "Action": "sts:AssumeRole"                                    │   │
+│   │   }                                                               │   │
+│   │                                                                   │   │
+│   │   ✓ Lambda service? → Allowed                                     │   │
+│   │   ✗ Random user? → Denied                                         │   │
+│   │   ✗ EC2 service? → Denied (not in trust policy)                   │   │
+│   │                                                                   │   │
+│   └───────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│   STEP 3: Temporary Credentials Returned                                    │
+│   ──────────────────────────────────────                                    │
+│                                                                             │
+│   If trust policy allows, STS returns:                                      │
+│                                                                             │
+│   ┌───────────────────────────────────────────────────────────────────┐   │
+│   │                                                                   │   │
+│   │   {                                                               │   │
+│   │     "AccessKeyId": "ASIA...",      ◀── Temporary key              │   │
+│   │     "SecretAccessKey": "...",      ◀── Temporary secret           │   │
+│   │     "SessionToken": "...",         ◀── Required for temp creds    │   │
+│   │     "Expiration": "2025-01-11T12:00:00Z"  ◀── Usually 1 hour      │   │
+│   │   }                                                               │   │
+│   │                                                                   │   │
+│   └───────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                                                                             │
+│   STEP 4: Principal Uses Temporary Credentials                              │
+│   ────────────────────────────────────────────                              │
+│                                                                             │
+│   ┌──────────────┐    temp credentials    ┌────────────────────────────┐   │
+│   │              │ ──────────────────────▶│                            │   │
+│   │  Principal   │                        │      Any AWS Service       │   │
+│   │  (now acting │    s3:GetObject        │                            │   │
+│   │   as role)   │    dynamodb:Query      │   Checks role's PERMISSION │   │
+│   │              │    etc.                │   POLICY (not trust policy)│   │
+│   └──────────────┘                        └────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Two Policies, Two Questions
+
+Every role has two policies that answer different questions:
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│   ┌─────────────────────────────┐     ┌─────────────────────────────────┐  │
+│   │       TRUST POLICY          │     │      PERMISSION POLICY          │  │
+│   │                             │     │                                 │  │
+│   │  "WHO can become this role?"│     │  "WHAT can this role do?"       │  │
+│   │                             │     │                                 │  │
+│   │  • Lambda service           │     │  • s3:GetObject on bucket X     │  │
+│   │  • GitHub Actions OIDC      │     │  • dynamodb:Query on table Y    │  │
+│   │  • Specific IAM users       │     │  • logs:PutLogEvents            │  │
+│   │  • Another AWS account      │     │                                 │  │
+│   │                             │     │                                 │  │
+│   │  Checked ONCE when          │     │  Checked on EVERY API call      │  │
+│   │  assuming the role          │     │  made with the role             │  │
+│   │                             │     │                                 │  │
+│   └─────────────────────────────┘     └─────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Common Trust Policy Patterns
+
+**Allow a specific AWS service:**
+```json
+{
+  "Effect": "Allow",
+  "Principal": { "Service": "lambda.amazonaws.com" },
+  "Action": "sts:AssumeRole"
+}
+```
+
+**Allow users from another AWS account:**
+```json
+{
+  "Effect": "Allow",
+  "Principal": { "AWS": "arn:aws:iam::999888777666:root" },
+  "Action": "sts:AssumeRole",
+  "Condition": {
+    "StringEquals": { "sts:ExternalId": "shared-secret-123" }
+  }
+}
+```
+
+**Allow GitHub Actions (OIDC federation):**
+```json
+{
+  "Effect": "Allow",
+  "Principal": { 
+    "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" 
+  },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": {
+      "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+    },
+    "StringLike": {
+      "token.actions.githubusercontent.com:sub": "repo:acme/app:ref:refs/heads/main"
+    }
+  }
+}
+```
+
+### Why This Matters
+
+AssumeRole is why you don't need access keys everywhere:
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│   WITHOUT AssumeRole (Bad)              WITH AssumeRole (Good)              │
+│   ────────────────────────              ──────────────────────              │
+│                                                                             │
+│   Lambda function has                   Lambda function assumes role        │
+│   hardcoded access keys                 → gets temp credentials             │
+│   → keys can leak                       → credentials expire in 1 hour      │
+│   → keys never expire                   → nothing to leak                   │
+│   → manual rotation                     → automatic rotation                │
+│                                                                             │
+│   CI/CD has access keys                 CI/CD uses OIDC federation          │
+│   stored in secrets                     → proves identity to AWS            │
+│   → secrets can leak                    → gets temp credentials             │
+│   → broad access window                 → scoped to specific repo/branch    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+When you see a well-architected AWS environment, you'll find access keys almost nowhere. Everything uses roles.
+```
+
+---
+
+You've seen how roles get assumed and receive temporary credentials. Now let's look at what happens when those credentials are used—how IAM decides whether to allow or deny any given request.
+
+---
+
+## How IAM Evaluates Every Request
+
+When any principal (user, role, service) makes an AWS API call, IAM runs through an evaluation flow. Understanding this flow explains why your permissions sometimes work and sometimes don't.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     IAM POLICY EVALUATION FLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   REQUEST COMES IN                                                          │
+│         │                                                                   │
+│         ▼                                                                   │
+│   ┌─────────────────────────────────────────┐                               │
+│   │  1. EXPLICIT DENY CHECK                 │                               │
+│   │     Is there any policy that says       │                               │
+│   │     Deny for this action?               │                               │
+│   └──────────────────┬──────────────────────┘                               │
+│                      │                                                      │
+│            ┌─────────┴─────────┐                                            │
+│            │                   │                                            │
+│           YES                  NO                                           │
+│            │                   │                                            │
+│            ▼                   ▼                                            │
+│       ┌────────┐    ┌─────────────────────────────────┐                     │
+│       │ DENIED │    │  2. EXPLICIT ALLOW CHECK        │                     │
+│       │  STOP  │    │     Is there any policy that    │                     │
+│       └────────┘    │     says Allow for this action? │                     │
+│                     └────────────────┬────────────────┘                     │
+│                                      │                                      │
+│                            ┌─────────┴─────────┐                            │
+│                            │                   │                            │
+│                           YES                  NO                           │
+│                            │                   │                            │
+│                            ▼                   ▼                            │
+│                       ┌─────────┐         ┌────────┐                        │
+│                       │ ALLOWED │         │ DENIED │                        │
+│                       └─────────┘         │(default│                        │
+│                                           └────────┘                        │
+│                                                                             │
+│   KEY INSIGHT: Deny ALWAYS wins.                                            │
+│   If any policy says Deny, it doesn't matter how many say Allow.            │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+The default answer is always **Deny**. You must have an explicit Allow, and no Deny, for a request to succeed.
+
+This is why you'll sometimes see this pattern:
+```json
+{
+  "Statement": [
+    {
+      "Sid": "AllowS3ReadWrite",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::my-bucket/*"
+    },
+    {
+      "Sid": "DenyProductionDelete",
+      "Effect": "Deny",
+      "Action": "s3:DeleteObject",
+      "Resource": "arn:aws:s3:::*-prod-*/*"
+    }
+  ]
+}
+```
+
+Even if another policy grants `s3:*`, the explicit Deny on production buckets blocks deletion. Deny is your safety net.
+
+---
+
+Understanding the evaluation flow is critical, but you also need to know how to write the policies that flow evaluates. First, let's understand that policies can be attached in two different ways.
+
+---
+
 ## Policies: Reading and Writing Them
+
+### Two Directions of Permissions
+
+Permissions can be granted from two directions:
+
+**Identity-based policies** attach to a principal (user, group, role) and define what that principal can do.
+
+**Resource-based policies** attach to a resource (S3 bucket, SQS queue, KMS key) and define who can access that resource.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              IDENTITY-BASED vs RESOURCE-BASED POLICIES                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│                                                                             │
+│   IDENTITY-BASED                         RESOURCE-BASED                     │
+│   ──────────────                         ──────────────                     │
+│                                                                             │
+│   Attached to:                           Attached to:                       │
+│   Users, Groups, Roles                   S3, SQS, SNS, KMS, Lambda, etc.    │
+│                                                                             │
+│   Answers:                               Answers:                           │
+│   "What can THIS identity do?"           "Who can access THIS resource?"    │
+│                                                                             │
+│                                                                             │
+│   ┌──────────────┐                           ┌──────────────┐               │
+│   │              │    "I can access          │              │               │
+│   │     ROLE     │     buckets A and B"      │   S3 BUCKET  │               │
+│   │              │ ─────────────────────▶    │              │               │
+│   └──────────────┘                           └──────────────┘               │
+│         │                                           │                       │
+│         │                                           │                       │
+│         ▼                                           ▼                       │
+│   ┌──────────────┐                           ┌──────────────┐               │
+│   │   POLICY:    │                           │   POLICY:    │               │
+│   │   Allow      │                           │   Allow      │               │
+│   │   s3:Get*    │                           │   Principal: │               │
+│   │   on A and B │                           │   role-arn   │               │
+│   └──────────────┘                           │   s3:Get*    │               │
+│                                              └──────────────┘               │
+│   No Principal field                         Principal field                │
+│   (implicit — whoever                        required — specifies           │
+│   this is attached to)                       WHO can access                 │
+│                                                                             │
+│                                                                             │
+│   WHEN TO USE WHICH?                                                        │
+│   ──────────────────                                                        │
+│                                                                             │
+│   Same-account access      Identity-based policy is usually enough.         │
+│                            Attach to role, specify resource ARN.            │
+│                                                                             │
+│   Cross-account access     Need BOTH: identity-based on the role AND        │
+│                            resource-based on the resource.                  │
+│                            (Or: role assumption with trust policy)          │
+│                                                                             │
+│   Public access            Resource-based only. Principal: "*"              │
+│                            (No identity to attach a policy to)              │
+│                                                                             │
+│   AWS service access       Often resource-based. The service                │
+│                            (CloudFront, SNS) needs permission               │
+│                            granted on the resource.                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Example: Same Action, Two Approaches**
+
+**Approach 1: Identity-based policy on Lambda role**
+```json
+{
+  "Effect": "Allow",
+  "Action": "s3:GetObject",
+  "Resource": "arn:aws:s3:::my-bucket/*"
+}
+```
+
+No `Principal` — this attaches to the Lambda's role. The role itself is the principal.
+
+**Approach 2: Resource-based policy on S3 bucket**
+```json
+{
+  "Effect": "Allow",
+  "Principal": { "AWS": "arn:aws:iam::123456789012:role/my-lambda-role" },
+  "Action": "s3:GetObject",
+  "Resource": "arn:aws:s3:::my-bucket/*"
+}
+```
+
+`Principal` specified — this attaches to the bucket, explicitly granting access to the Lambda role.
+
+For same-account access, either works. Most teams use identity-based policies because they're easier to manage — all permissions for a role are in one place.
+
+---
+
+### Policy Structure
 
 Policies are JSON documents. Every policy has the same structure:
 
@@ -1398,3 +1949,54 @@ You now have a production-ready IAM foundation. Next up: [Part 3 — Your Local 
 ---
 
 *Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
+
+
+---
+
+### How Credentials Work (The Short Version)
+
+When you make an AWS API call, your credentials create a **signature** that proves your identity without sending your secret key over the network.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CREDENTIAL TYPES                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   LONG-TERM CREDENTIALS (IAM Users)                                         │
+│   ─────────────────────────────────                                         │
+│                                                                             │
+│   Access Key ID        AKIAIOSFODNN7EXAMPLE        Public identifier        │
+│   Secret Access Key    wJalrXUtnFEMI/K7MDENG...    Never shared, never      │
+│                                                    sent over network        │
+│                                                                             │
+│   These don't expire. If leaked, attacker has access until you rotate.      │
+│                                                                             │
+│                                                                             │
+│   TEMPORARY CREDENTIALS (Roles)                                             │
+│   ─────────────────────────────                                             │
+│                                                                             │
+│   Access Key ID        ASIAIOSFODNN7EXAMPLE        Starts with ASIA         │
+│   Secret Access Key    wJalrXUtnFEMI/K7MDENG...    (not AKIA)               │
+│   Session Token        FwoGZXIvYXdzEBY...          Required for temp creds  │
+│   Expiration           2025-01-11T12:00:00Z        Usually 1 hour           │
+│                                                                             │
+│   These expire automatically. Even if leaked, damage is time-limited.       │
+│                                                                             │
+│                                                                             │
+│   WHY TEMPORARY IS BETTER                                                   │
+│   ───────────────────────                                                   │
+│                                                                             │
+│   Long-term keys:    • Can leak in git history, logs, env vars              │
+│                      • Must manually rotate                                 │
+│                      • Unlimited blast radius if compromised                │
+│                                                                             │
+│   Temporary creds:   • Expire automatically (usually 1 hour)                │
+│                      • No secrets to store or rotate                        │
+│                      • Limited damage window if compromised                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Rule of thumb:** If you're typing an access key into a config file, there's probably a better way. Services should use roles. CI/CD should use OIDC. Humans should use Identity Center.
+```
+
+---
