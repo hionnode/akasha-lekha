@@ -541,7 +541,7 @@ AssumeRole is why you don't need access keys everywhere:
 ```
 
 When you see a well-architected AWS environment, you'll find access keys almost nowhere. Everything uses roles.
-```
+
 
 ---
 
@@ -552,6 +552,7 @@ You've seen how roles get assumed and receive temporary credentials. Now let's l
 ## How IAM Evaluates Every Request
 
 When any principal (user, role, service) makes an AWS API call, IAM runs through an evaluation flow. Understanding this flow explains why your permissions sometimes work and sometimes don't.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                     IAM POLICY EVALUATION FLOW                              │
