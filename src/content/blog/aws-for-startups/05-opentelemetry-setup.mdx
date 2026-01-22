@@ -1,0 +1,1692 @@
+---
+title: "OpenTelemetry Setup: Observability That Grows With You"
+description: "Deploy OpenTelemetry infrastructure with Terraform. Choose SigNoz for simplicity or Grafana stack for flexibility. Your apps will send telemetry here for the rest of the series."
+excerpt: "Set up the OTel Collector once, choose your backend — SigNoz or Grafana stack. Your observability foundation for the entire series."
+date: "2026-01-22"
+author: "works-on-my.cloud"
+tags: ["aws", "opentelemetry", "observability", "signoz", "grafana", "terraform", "devops"]
+series: "AWS From Zero to Production"
+seriesPart: 5
+---
+
+import GuideStep from '../../../components/shared/GuideStep.astro';
+import Command from '../../../components/shared/Command.astro';
+import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
+import PanelSwitcher from '../../../components/shared/PanelSwitcher.astro';
+import Panel from '../../../components/shared/Panel.astro';
+import FileTree from '../../../components/shared/FileTree.astro';
+
+*Set up the OTel Collector once, choose your backend*
+
+---
+
+## Why This Matters
+
+You've built the foundation: AWS account secured, IAM configured, CLI ready, Terraform managing infrastructure. Now comes the question every startup eventually asks:
+
+**"What's happening in production?"**
+
+Without observability, you're flying blind. When something breaks at 2 AM, you're grepping through CloudWatch logs hoping to find a clue. When performance degrades, you're guessing which service is the bottleneck.
+
+**The three pillars of observability:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    THE THREE PILLARS                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   METRICS              TRACES               LOGS                │
+│   ────────             ──────               ────                │
+│   "How much?"          "What path?"         "What happened?"    │
+│                                                                  │
+│   • Request rate       • Request flow       • Error messages    │
+│   • Error rate         • Latency breakdown  • Stack traces      │
+│   • CPU/Memory         • Service calls      • Debug info        │
+│   • Queue depth        • Database queries   • Audit trail       │
+│                                                                  │
+│   Answers:             Answers:             Answers:            │
+│   "Is it slow?"        "Why is it slow?"    "What went wrong?"  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why OpenTelemetry?**
+
+OpenTelemetry (OTel) is the industry standard for instrumentation. It's:
+
+- **Vendor-neutral** — Switch backends without changing application code
+- **Future-proof** — CNCF graduated project, widely adopted
+- **Comprehensive** — One SDK for metrics, traces, and logs
+
+By the end of this part, you'll have observability infrastructure ready. The dashboards will be empty — that's intentional. They'll fill up as we deploy applications throughout the series.
+
+<Alert type="note" title="Magic First">
+
+We're not diving deep into OTel theory here. We'll deploy it, verify it works, and move on. You'll develop intuition by using it. In Part 60, we'll master the concepts — by then, you'll have context from 55 parts of experience.
+
+</Alert>
+
+---
+
+## OpenTelemetry Architecture
+
+Here's what we're building:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    OBSERVABILITY ARCHITECTURE                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   ┌─────────────┐                                               │
+│   │  Frontend   │──┐                                            │
+│   │  (Browser)  │  │                                            │
+│   └─────────────┘  │                                            │
+│                    │    ┌─────────────────┐                     │
+│   ┌─────────────┐  │    │                 │    ┌─────────────┐  │
+│   │  Backend    │──┼───▶│  OTel Collector │───▶│   Backend   │  │
+│   │  (API)      │  │    │                 │    │  (SigNoz or │  │
+│   └─────────────┘  │    │  • Receives     │    │   Grafana)  │  │
+│                    │    │  • Processes    │    └─────────────┘  │
+│   ┌─────────────┐  │    │  • Exports      │                     │
+│   │  Workers    │──┘    │                 │                     │
+│   │  (Lambda)   │       └─────────────────┘                     │
+│   └─────────────┘                                               │
+│                              OTLP                               │
+│                         (HTTP/gRPC)                             │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why a collector?** You could send telemetry directly to the backend, but a collector provides:
+
+| Benefit | Description |
+|---------|-------------|
+| **Buffering** | Handles backend downtime gracefully |
+| **Batching** | Reduces network overhead |
+| **Processing** | Sampling, filtering, enrichment |
+| **Routing** | Send to multiple backends |
+| **Decoupling** | Change backends without touching apps |
+
+**Collector modes:**
+
+- **Agent** — Runs alongside each application (sidecar in ECS/K8s)
+- **Gateway** — Centralized collector that multiple apps send to
+
+We'll use both patterns throughout the series.
+
+---
+
+## Choose Your Backend
+
+You have two solid options. Pick based on your team's needs.
+
+| Feature | SigNoz | Grafana Stack |
+|---------|--------|---------------|
+| **Setup complexity** | Low (all-in-one) | Medium (multiple components) |
+| **Learning curve** | Lower | Higher |
+| **Customization** | Moderate | Very high |
+| **Community** | Growing | Massive |
+| **Native OTel** | Yes | Yes (via Tempo, Mimir) |
+| **Best for** | Teams wanting simplicity | Teams with Grafana experience |
+
+<Alert type="tip" title="The Fine Line">
+
+| Under | Right | Over |
+|-------|-------|------|
+| No observability | Either SigNoz or Grafana stack | Both, plus Datadog, plus custom |
+| CloudWatch only | OTel + dedicated backend | Enterprise APM for 3-person team |
+| Check logs when broken | Dashboards + alerts | 500 metrics for simple CRUD app |
+
+</Alert>
+
+**Our recommendation:** Start with SigNoz for simplicity. You can always migrate to Grafana later — that's the beauty of OTel.
+
+---
+
+## Local Development Setup
+
+Before deploying to AWS, let's get observability running locally.
+
+<FileTree>
+terraform/
+  environments/
+    dev/
+      observability.tf
+docker/
+  observability/
+    docker-compose.yml
+    docker-compose.signoz.yml
+    docker-compose.grafana.yml
+    otel-collector/
+      config.yaml
+      config.signoz.yaml
+      config.grafana.yaml
+</FileTree>
+
+<GuideStep title="Create Directory Structure" syncKey="create-dirs">
+
+```bash
+mkdir -p docker/observability/otel-collector
+```
+
+</GuideStep>
+
+### OTel Collector Configuration
+
+The collector config is shared between backends — only the exporter changes.
+
+<details>
+<summary><strong>Base OTel Collector Config (docker/observability/otel-collector/config.yaml)</strong></summary>
+
+```yaml
+# docker/observability/otel-collector/config.yaml
+# Base configuration - exporters added by environment-specific configs
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+    send_batch_max_size: 1500
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  resource:
+    attributes:
+      - key: environment
+        value: ${ENVIRONMENT:-dev}
+        action: upsert
+
+# Service pipelines defined in environment-specific configs
+```
+
+</details>
+
+<PanelSwitcher defaultActive="signoz">
+  <Panel label="SigNoz" value="signoz">
+
+<details>
+<summary><strong>SigNoz Collector Config (docker/observability/otel-collector/config.signoz.yaml)</strong></summary>
+
+```yaml
+# docker/observability/otel-collector/config.signoz.yaml
+# Extends base config for SigNoz backend
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  resource:
+    attributes:
+      - key: environment
+        value: ${ENVIRONMENT:-dev}
+        action: upsert
+
+exporters:
+  otlp/signoz:
+    endpoint: signoz-otel-collector:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [otlp/signoz]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [otlp/signoz]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [otlp/signoz]
+```
+
+</details>
+
+<details>
+<summary><strong>SigNoz Docker Compose (docker/observability/docker-compose.signoz.yml)</strong></summary>
+
+```yaml
+# docker/observability/docker-compose.signoz.yml
+# SigNoz all-in-one for local development
+
+services:
+  signoz:
+    image: signoz/signoz:latest
+    container_name: signoz
+    ports:
+      - "3301:3301"      # SigNoz UI
+      - "4317:4317"      # OTLP gRPC (internal collector)
+      - "4318:4318"      # OTLP HTTP (internal collector)
+    volumes:
+      - signoz-data:/var/lib/signoz
+    environment:
+      - SIGNOZ_LOCAL_DB_PATH=/var/lib/signoz/signoz.db
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3301/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel-collector/config.signoz.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"      # OTLP gRPC (apps send here)
+      - "4318:4318"      # OTLP HTTP
+      - "8888:8888"      # Collector metrics
+    environment:
+      - ENVIRONMENT=dev
+    depends_on:
+      signoz:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  signoz-data:
+```
+
+</details>
+
+**Start SigNoz locally:**
+
+```bash
+cd docker/observability
+docker compose -f docker-compose.signoz.yml up -d
+```
+
+Open http://localhost:3301 — you'll see an empty dashboard.
+
+  </Panel>
+
+  <Panel label="Grafana Stack" value="grafana">
+
+<details>
+<summary><strong>Grafana Stack Collector Config (docker/observability/otel-collector/config.grafana.yaml)</strong></summary>
+
+```yaml
+# docker/observability/otel-collector/config.grafana.yaml
+# Extends base config for Grafana stack
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  resource:
+    attributes:
+      - key: environment
+        value: ${ENVIRONMENT:-dev}
+        action: upsert
+
+exporters:
+  # Traces to Tempo
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Metrics to Prometheus (via remote write)
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+
+  # Logs to Loki
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [loki]
+```
+
+</details>
+
+<details>
+<summary><strong>Grafana Stack Docker Compose (docker/observability/docker-compose.grafana.yml)</strong></summary>
+
+```yaml
+# docker/observability/docker-compose.grafana.yml
+# Grafana + Tempo + Loki + Prometheus for local development
+
+services:
+  # Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Traces
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"      # Tempo API
+      - "4317"           # OTLP gRPC (internal)
+    restart: unless-stopped
+
+  # Logs
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/var/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  # Metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-remote-write-receiver"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  # OTel Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel-collector/config.grafana.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"      # OTLP gRPC
+      - "4318:4318"      # OTLP HTTP
+      - "8888:8888"      # Collector metrics
+    environment:
+      - ENVIRONMENT=dev
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  grafana-data:
+  tempo-data:
+  loki-data:
+  prometheus-data:
+```
+
+</details>
+
+<details>
+<summary><strong>Tempo Configuration (docker/observability/tempo/tempo.yaml)</strong></summary>
+
+```yaml
+# docker/observability/tempo/tempo.yaml
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+
+compactor:
+  compaction:
+    block_retention: 48h
+```
+
+</details>
+
+<details>
+<summary><strong>Loki Configuration (docker/observability/loki/loki.yaml)</strong></summary>
+
+```yaml
+# docker/observability/loki/loki.yaml
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /var/loki
+  storage:
+    filesystem:
+      chunks_directory: /var/loki/chunks
+      rules_directory: /var/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 24h
+```
+
+</details>
+
+<details>
+<summary><strong>Prometheus Configuration (docker/observability/prometheus/prometheus.yml)</strong></summary>
+
+```yaml
+# docker/observability/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8888']
+
+# Remote write receiver enabled via command line flag
+```
+
+</details>
+
+<details>
+<summary><strong>Grafana Datasources (docker/observability/grafana/provisioning/datasources/datasources.yaml)</strong></summary>
+
+```yaml
+# docker/observability/grafana/provisioning/datasources/datasources.yaml
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      tracesToLogs:
+        datasourceUid: loki
+        tags: ['service.name']
+        mappedTags: [{ key: 'service.name', value: 'service_name' }]
+        mapTagNamesEnabled: true
+        filterByTraceID: true
+        filterBySpanID: true
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        - datasourceUid: tempo
+          matcherRegex: '"trace_id":"(\w+)"'
+          name: TraceID
+          url: '$${__value.raw}'
+```
+
+</details>
+
+**Start Grafana stack locally:**
+
+```bash
+cd docker/observability
+mkdir -p grafana/provisioning/datasources tempo loki prometheus
+
+# Create config files from templates above, then:
+docker compose -f docker-compose.grafana.yml up -d
+```
+
+Open http://localhost:3000 (admin/admin) — you'll see empty dashboards.
+
+  </Panel>
+</PanelSwitcher>
+
+---
+
+## AWS Overview Dashboard
+
+Before we deploy applications, let's create a dashboard that shows what we've built so far. This validates the observability setup works and gives immediate value.
+
+**What's been deployed (Parts 1-4):**
+
+| Part | Resources Created |
+|------|-------------------|
+| 1 | CloudTrail, Budget alerts |
+| 2 | IAM users, groups, roles, policies |
+| 3 | (Local setup — no AWS resources) |
+| 4 | S3 state bucket, Terraform-managed versions of Part 1-2 |
+| 5 | OTel Collector, Observability backend |
+
+This dashboard provides:
+
+1. **Validation** — Data is flowing, setup works
+2. **Cost awareness** — Reinforce billing protection from Part 1
+3. **Resource inventory** — See what Terraform created
+4. **Security posture** — IAM overview, CloudTrail activity
+5. **Foundation for growth** — Expands as you deploy more
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         AWS OVERVIEW DASHBOARD                                   │
+│                    Environment: dev | Region: us-east-1                         │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌─────────────────────────────────┐  ┌─────────────────────────────────────┐  │
+│  │         COST SUMMARY            │  │         BUDGET STATUS               │  │
+│  │  ┌─────────────────────────┐    │  │                                     │  │
+│  │  │    $12.47               │    │  │   Budget: $50/month                 │  │
+│  │  │    Month to Date        │    │  │   ████████░░░░░░░░░░░░  24.9%      │  │
+│  │  └─────────────────────────┘    │  │                                     │  │
+│  │                                  │  │   Forecast: $38.20                  │  │
+│  │  Forecast: $38.20 (76% of budget)│  │   Status: ✓ On Track               │  │
+│  │  vs Last Month: +$2.30 (+18%)   │  │                                     │  │
+│  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
+│                                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │                        DAILY COST TREND (Last 14 Days)                    │  │
+│  │                                                                           │  │
+│  │  $2.00 ┤                                                                  │  │
+│  │        │                                              ╭─╮                 │  │
+│  │  $1.50 ┤                                    ╭─╮  ╭───╯  ╰╮               │  │
+│  │        │              ╭──╮  ╭───╮  ╭───╮  ╭╯  ╰──╯       │               │  │
+│  │  $1.00 ┤    ╭────────╯   ╰──╯    ╰──╯   ╰─╯              ╰───            │  │
+│  │        │ ───╯                                                             │  │
+│  │  $0.50 ┤                                                                  │  │
+│  │        └──────────────────────────────────────────────────────────────    │  │
+│  │          Jan 8   10   12   14   16   18   20   22 (Today)                │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │                         COST BY SERVICE                                   │  │
+│  │                                                                           │  │
+│  │   S3                 ████████████████████████████████████████  $4.20     │  │
+│  │   CloudTrail         ██████████████████████████               $2.80     │  │
+│  │   KMS                ████████████████                         $1.90     │  │
+│  │   CloudWatch         ██████████                               $1.20     │  │
+│  │   Data Transfer      ████████                                 $1.02     │  │
+│  │   Other              ████                                     $0.35     │  │
+│  │                                                                           │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌─────────────────────────────────┐  ┌─────────────────────────────────────┐  │
+│  │      RESOURCE INVENTORY         │  │       RESOURCES BY TYPE             │  │
+│  │                                  │  │                                     │  │
+│  │   Total Resources: 23           │  │   S3 Buckets        ████████  4     │  │
+│  │   Managed by Terraform: 19      │  │   IAM Roles         ██████    3     │  │
+│  │   Unmanaged: 4                  │  │   IAM Policies      ████████  4     │  │
+│  │                                  │  │   IAM Groups        ██        1     │  │
+│  │   ┌─────────────────────────┐   │  │   CloudTrail        ██        1     │  │
+│  │   │ 82% IaC Coverage       │   │  │   Budgets           ██        1     │  │
+│  │   │ ████████████████░░░░   │   │  │   OIDC Providers    ██        1     │  │
+│  │   └─────────────────────────┘   │  │   Other             ████████  8     │  │
+│  │                                  │  │                                     │  │
+│  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
+│                                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │                    RECENTLY CREATED RESOURCES (Last 7 Days)               │  │
+│  │                                                                           │  │
+│  │  TIME          TYPE              NAME                      CREATED BY    │  │
+│  │  ─────────────────────────────────────────────────────────────────────── │  │
+│  │  2h ago        IAM Role          GitHubActionsRole-dev     terraform     │  │
+│  │  2h ago        IAM Policy        DenyDangerousActions      terraform     │  │
+│  │  3h ago        S3 Bucket         mycompany-cloudtrail-logs terraform     │  │
+│  │  3h ago        CloudTrail        mycompany-trail           terraform     │  │
+│  │  1d ago        S3 Bucket         mycompany-terraform-state terraform     │  │
+│  │  3d ago        IAM Group         Developers                terraform     │  │
+│  │                                                                           │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌─────────────────────────────────┐  ┌─────────────────────────────────────┐  │
+│  │       SECURITY OVERVIEW         │  │        IAM SUMMARY                  │  │
+│  │                                  │  │                                     │  │
+│  │   CloudTrail: ✓ Enabled         │  │   Users           2                 │  │
+│  │   MFA on Root: ✓ Enabled        │  │   Groups          1                 │  │
+│  │   Root Access Keys: ✓ None      │  │   Roles           5                 │  │
+│  │                                  │  │   Policies        8                 │  │
+│  │   ┌─────────────────────────┐   │  │                                     │  │
+│  │   │ Security Score: 85/100 │   │  │   Users with MFA:  2/2 (100%)       │  │
+│  │   │ █████████████████░░░   │   │  │   Unused Roles:    0                │  │
+│  │   └─────────────────────────┘   │  │   Overly Permissive: 1 (review)    │  │
+│  │                                  │  │                                     │  │
+│  │   Untagged Resources: 4         │  │                                     │  │
+│  │   (Click to view)               │  │                                     │  │
+│  └─────────────────────────────────┘  └─────────────────────────────────────┘  │
+│                                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │                   RECENT CLOUDTRAIL EVENTS (Last 24h)                     │  │
+│  │                                                                           │  │
+│  │  TIME        USER                    ACTION                    RESOURCE  │  │
+│  │  ───────────────────────────────────────────────────────────────────────  │  │
+│  │  10:23       alice@company.com       CreateRole               IAM        │  │
+│  │  10:22       alice@company.com       PutRolePolicy            IAM        │  │
+│  │  10:21       terraform               CreateBucket             S3         │  │
+│  │  10:20       terraform               PutBucketPolicy          S3         │  │
+│  │  09:45       bob@company.com         ConsoleLogin             IAM        │  │
+│  │  ...                                                                      │  │
+│  │                                                                           │  │
+│  │  Total Events: 127 | Errors: 2 (click to view)                           │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │                        FREE TIER USAGE                                    │  │
+│  │                                                                           │  │
+│  │   SERVICE          USAGE              LIMIT           STATUS              │  │
+│  │   ─────────────────────────────────────────────────────────────────────   │  │
+│  │   S3 Storage       2.1 GB             5 GB            ████████░░  42%    │  │
+│  │   S3 Requests      8,420              20,000          ████░░░░░░  42%    │  │
+│  │   CloudTrail       1 trail            1 trail         ██████████  100%   │  │
+│  │   Lambda           0 invocations      1M/month        ░░░░░░░░░░  0%     │  │
+│  │   CloudWatch       12 metrics         10 (free)       ██████████  120%*  │  │
+│  │                                                                           │  │
+│  │   * CloudWatch: 2 custom metrics beyond free tier (~$0.60/month)         │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │                     UPCOMING: WHAT'S NEXT                                 │  │
+│  │                                                                           │  │
+│  │   This dashboard will expand as you deploy:                              │  │
+│  │                                                                           │  │
+│  │   □ Frontend (Part 17)      → Web Vitals, page loads                     │  │
+│  │   □ Backend APIs (Part 29)  → Request traces, latency                    │  │
+│  │   □ Databases (Part 35)     → RDS connections, queries                   │  │
+│  │   □ Containers (Part 41)    → ECS tasks, CPU/memory                      │  │
+│  │   □ Lambda (Part 48)        → Invocations, cold starts                   │  │
+│  │                                                                           │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Dashboard panels breakdown:**
+
+| Panel | Data Source | Value |
+|-------|-------------|-------|
+| Cost Summary | AWS Cost Explorer / CloudWatch billing | Immediate visibility into spend |
+| Budget Status | AWS Budgets API | See budget from Part 1/4 in action |
+| Daily Cost Trend | CloudWatch billing metrics | Spot anomalies early |
+| Cost by Service | Cost Explorer | Understand where money goes |
+| Resource Inventory | AWS Config / Resource Explorer | See what Terraform created |
+| Recently Created | CloudTrail + metadata | Audit trail, verify Terraform worked |
+| Security Overview | IAM, CloudTrail, Security Hub | Peace of mind from Part 1-2 setup |
+| IAM Summary | IAM API | Overview of identity setup |
+| CloudTrail Events | CloudTrail logs | See who did what |
+| Free Tier Usage | AWS Budgets / Cost Explorer | Avoid surprise charges |
+
+<Alert type="note" title="Dashboard Code Coming">
+
+The actual dashboard JSON/configuration for both SigNoz and Grafana will be in the templates. The ASCII above shows the target layout.
+
+</Alert>
+
+---
+
+## Deploy to AWS with Terraform
+
+Now let's deploy the observability stack to AWS.
+
+<PanelSwitcher defaultActive="signoz">
+  <Panel label="SigNoz" value="signoz">
+
+### SigNoz on EC2
+
+For development and small teams, a single EC2 instance works well.
+
+<details>
+<summary><strong>Terraform: SigNoz EC2 Module (terraform/modules/signoz-ec2/main.tf)</strong></summary>
+
+```hcl
+# terraform/modules/signoz-ec2/main.tf
+
+variable "name_prefix" {
+  description = "Prefix for resource names"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "VPC ID"
+  type        = string
+}
+
+variable "subnet_id" {
+  description = "Subnet ID for EC2 instance"
+  type        = string
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.medium"
+}
+
+variable "allowed_cidr_blocks" {
+  description = "CIDR blocks allowed to access SigNoz UI"
+  type        = list(string)
+  default     = []
+}
+
+variable "key_name" {
+  description = "SSH key name (optional, SSM preferred)"
+  type        = string
+  default     = null
+}
+
+variable "tags" {
+  description = "Additional tags"
+  type        = map(string)
+  default     = {}
+}
+
+# Security Group
+resource "aws_security_group" "signoz" {
+  name        = "${var.name_prefix}-signoz"
+  description = "SigNoz security group"
+  vpc_id      = var.vpc_id
+
+  # SigNoz UI
+  ingress {
+    from_port   = 3301
+    to_port     = 3301
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+    description = "SigNoz UI"
+  }
+
+  # OTLP gRPC
+  ingress {
+    from_port   = 4317
+    to_port     = 4317
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+    description = "OTLP gRPC"
+  }
+
+  # OTLP HTTP
+  ingress {
+    from_port   = 4318
+    to_port     = 4318
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+    description = "OTLP HTTP"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-signoz"
+  })
+}
+
+# IAM Role for SSM
+resource "aws_iam_role" "signoz" {
+  name = "${var.name_prefix}-signoz-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.signoz.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "signoz" {
+  name = "${var.name_prefix}-signoz-profile"
+  role = aws_iam_role.signoz.name
+}
+
+# Get latest Amazon Linux 2023 AMI
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# EC2 Instance
+resource "aws_instance" "signoz" {
+  ami                    = data.aws_ami.al2023.id
+  instance_type          = var.instance_type
+  subnet_id              = var.subnet_id
+  vpc_security_group_ids = [aws_security_group.signoz.id]
+  iam_instance_profile   = aws_iam_instance_profile.signoz.name
+  key_name               = var.key_name
+
+  root_block_device {
+    volume_size = 50
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  user_data = base64encode(<<-EOF
+    #!/bin/bash
+    set -e
+
+    # Install Docker
+    dnf update -y
+    dnf install -y docker
+    systemctl enable docker
+    systemctl start docker
+
+    # Install Docker Compose
+    curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    chmod +x /usr/local/bin/docker-compose
+
+    # Create SigNoz directory
+    mkdir -p /opt/signoz
+    cd /opt/signoz
+
+    # Download SigNoz
+    git clone -b main https://github.com/SigNoz/signoz.git
+    cd signoz/deploy
+
+    # Start SigNoz
+    docker-compose -f docker/clickhouse-setup/docker-compose.yaml up -d
+  EOF
+  )
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-signoz"
+  })
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
+}
+
+# Outputs
+output "instance_id" {
+  description = "EC2 instance ID"
+  value       = aws_instance.signoz.id
+}
+
+output "private_ip" {
+  description = "Private IP address"
+  value       = aws_instance.signoz.private_ip
+}
+
+output "public_ip" {
+  description = "Public IP address (if applicable)"
+  value       = aws_instance.signoz.public_ip
+}
+
+output "signoz_url" {
+  description = "SigNoz UI URL"
+  value       = "http://${aws_instance.signoz.public_ip}:3301"
+}
+
+output "otlp_endpoint" {
+  description = "OTLP endpoint for applications"
+  value       = "${aws_instance.signoz.private_ip}:4317"
+}
+
+output "security_group_id" {
+  description = "Security group ID"
+  value       = aws_security_group.signoz.id
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Usage in Environment (terraform/environments/dev/observability.tf)</strong></summary>
+
+```hcl
+# terraform/environments/dev/observability.tf
+
+module "signoz" {
+  source = "../../modules/signoz-ec2"
+
+  name_prefix         = "${var.project_name}-${var.environment}"
+  vpc_id              = module.vpc.vpc_id
+  subnet_id           = module.vpc.public_subnets[0]
+  instance_type       = "t3.medium"
+  allowed_cidr_blocks = [var.my_ip_cidr]  # Your IP for UI access
+
+  tags = {
+    Component = "observability"
+  }
+}
+
+output "signoz_url" {
+  description = "SigNoz dashboard URL"
+  value       = module.signoz.signoz_url
+}
+
+output "otlp_endpoint" {
+  description = "OTLP endpoint for applications"
+  value       = module.signoz.otlp_endpoint
+}
+```
+
+</details>
+
+  </Panel>
+
+  <Panel label="Grafana Stack" value="grafana">
+
+### Grafana Stack on EC2
+
+For the Grafana stack, we deploy multiple components. For development, a single instance with Docker Compose works.
+
+<details>
+<summary><strong>Terraform: Grafana Stack EC2 Module (terraform/modules/grafana-stack-ec2/main.tf)</strong></summary>
+
+```hcl
+# terraform/modules/grafana-stack-ec2/main.tf
+
+variable "name_prefix" {
+  description = "Prefix for resource names"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "VPC ID"
+  type        = string
+}
+
+variable "subnet_id" {
+  description = "Subnet ID for EC2 instance"
+  type        = string
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.medium"
+}
+
+variable "allowed_cidr_blocks" {
+  description = "CIDR blocks allowed to access Grafana"
+  type        = list(string)
+  default     = []
+}
+
+variable "grafana_admin_password" {
+  description = "Grafana admin password"
+  type        = string
+  sensitive   = true
+}
+
+variable "tags" {
+  description = "Additional tags"
+  type        = map(string)
+  default     = {}
+}
+
+# Security Group
+resource "aws_security_group" "grafana" {
+  name        = "${var.name_prefix}-grafana"
+  description = "Grafana stack security group"
+  vpc_id      = var.vpc_id
+
+  # Grafana UI
+  ingress {
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+    description = "Grafana UI"
+  }
+
+  # OTLP gRPC
+  ingress {
+    from_port   = 4317
+    to_port     = 4317
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+    description = "OTLP gRPC"
+  }
+
+  # OTLP HTTP
+  ingress {
+    from_port   = 4318
+    to_port     = 4318
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+    description = "OTLP HTTP"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-grafana"
+  })
+}
+
+# IAM Role
+resource "aws_iam_role" "grafana" {
+  name = "${var.name_prefix}-grafana-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.grafana.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# CloudWatch read access for AWS metrics
+resource "aws_iam_role_policy" "cloudwatch_read" {
+  name = "cloudwatch-read"
+  role = aws_iam_role.grafana.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:DescribeAlarmsForMetric",
+          "cloudwatch:DescribeAlarmHistory",
+          "cloudwatch:DescribeAlarms",
+          "cloudwatch:ListMetrics",
+          "cloudwatch:GetMetricData",
+          "cloudwatch:GetInsightRuleReport"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:DescribeLogGroups",
+          "logs:GetLogGroupFields",
+          "logs:StartQuery",
+          "logs:StopQuery",
+          "logs:GetQueryResults",
+          "logs:GetLogEvents"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeTags",
+          "ec2:DescribeInstances",
+          "ec2:DescribeRegions"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "tag:GetResources"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "grafana" {
+  name = "${var.name_prefix}-grafana-profile"
+  role = aws_iam_role.grafana.name
+}
+
+# Get latest Amazon Linux 2023 AMI
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# EC2 Instance
+resource "aws_instance" "grafana" {
+  ami                    = data.aws_ami.al2023.id
+  instance_type          = var.instance_type
+  subnet_id              = var.subnet_id
+  vpc_security_group_ids = [aws_security_group.grafana.id]
+  iam_instance_profile   = aws_iam_instance_profile.grafana.name
+
+  root_block_device {
+    volume_size = 50
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  user_data = base64encode(<<-EOF
+    #!/bin/bash
+    set -e
+
+    # Install Docker
+    dnf update -y
+    dnf install -y docker git
+    systemctl enable docker
+    systemctl start docker
+
+    # Install Docker Compose
+    curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    chmod +x /usr/local/bin/docker-compose
+
+    # Create directories
+    mkdir -p /opt/observability/{grafana/provisioning/datasources,tempo,loki,prometheus,otel-collector}
+    cd /opt/observability
+
+    # Create docker-compose.yaml
+    cat > docker-compose.yaml << 'COMPOSE'
+    ${file("${path.module}/templates/docker-compose.yaml")}
+    COMPOSE
+
+    # Create config files
+    cat > tempo/tempo.yaml << 'TEMPO'
+    ${file("${path.module}/templates/tempo.yaml")}
+    TEMPO
+
+    cat > loki/loki.yaml << 'LOKI'
+    ${file("${path.module}/templates/loki.yaml")}
+    LOKI
+
+    cat > prometheus/prometheus.yml << 'PROM'
+    ${file("${path.module}/templates/prometheus.yml")}
+    PROM
+
+    cat > otel-collector/config.yaml << 'OTEL'
+    ${file("${path.module}/templates/otel-config.yaml")}
+    OTEL
+
+    cat > grafana/provisioning/datasources/datasources.yaml << 'DS'
+    ${file("${path.module}/templates/datasources.yaml")}
+    DS
+
+    # Set Grafana password
+    export GF_SECURITY_ADMIN_PASSWORD='${var.grafana_admin_password}'
+
+    # Start stack
+    docker-compose up -d
+  EOF
+  )
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-grafana"
+  })
+
+  lifecycle {
+    ignore_changes = [ami, user_data]
+  }
+}
+
+# Outputs
+output "instance_id" {
+  value = aws_instance.grafana.id
+}
+
+output "private_ip" {
+  value = aws_instance.grafana.private_ip
+}
+
+output "public_ip" {
+  value = aws_instance.grafana.public_ip
+}
+
+output "grafana_url" {
+  value = "http://${aws_instance.grafana.public_ip}:3000"
+}
+
+output "otlp_endpoint" {
+  value = "${aws_instance.grafana.private_ip}:4317"
+}
+
+output "security_group_id" {
+  value = aws_security_group.grafana.id
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Usage in Environment (terraform/environments/dev/observability.tf)</strong></summary>
+
+```hcl
+# terraform/environments/dev/observability.tf
+
+module "grafana_stack" {
+  source = "../../modules/grafana-stack-ec2"
+
+  name_prefix            = "${var.project_name}-${var.environment}"
+  vpc_id                 = module.vpc.vpc_id
+  subnet_id              = module.vpc.public_subnets[0]
+  instance_type          = "t3.medium"
+  allowed_cidr_blocks    = [var.my_ip_cidr]
+  grafana_admin_password = var.grafana_admin_password
+
+  tags = {
+    Component = "observability"
+  }
+}
+
+output "grafana_url" {
+  description = "Grafana dashboard URL"
+  value       = module.grafana_stack.grafana_url
+}
+
+output "otlp_endpoint" {
+  description = "OTLP endpoint for applications"
+  value       = module.grafana_stack.otlp_endpoint
+}
+```
+
+</details>
+
+  </Panel>
+</PanelSwitcher>
+
+---
+
+## OTel Collector Deployment Patterns
+
+For production, you'll deploy the OTel Collector in different patterns.
+
+<details>
+<summary><strong>Pattern 1: Sidecar (ECS Task Definition)</strong></summary>
+
+```json
+{
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "your-app:latest",
+      "essential": true,
+      "environment": [
+        {
+          "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+          "value": "http://localhost:4317"
+        },
+        {
+          "name": "OTEL_SERVICE_NAME",
+          "value": "your-service"
+        }
+      ],
+      "dependsOn": [
+        {
+          "containerName": "otel-collector",
+          "condition": "START"
+        }
+      ]
+    },
+    {
+      "name": "otel-collector",
+      "image": "otel/opentelemetry-collector-contrib:latest",
+      "essential": false,
+      "command": ["--config=/etc/otel/config.yaml"],
+      "portMappings": [
+        {
+          "containerPort": 4317,
+          "protocol": "tcp"
+        },
+        {
+          "containerPort": 4318,
+          "protocol": "tcp"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "SIGNOZ_ENDPOINT",
+          "valueFrom": "arn:aws:secretsmanager:region:account:secret:signoz-endpoint"
+        }
+      ]
+    }
+  ]
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Pattern 2: Gateway (Centralized Collector)</strong></summary>
+
+```hcl
+# terraform/modules/otel-gateway/main.tf
+
+resource "aws_ecs_service" "otel_gateway" {
+  name            = "${var.name_prefix}-otel-gateway"
+  cluster         = var.ecs_cluster_id
+  task_definition = aws_ecs_task_definition.otel_gateway.arn
+  desired_count   = 2  # HA
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.otel_grpc.arn
+    container_name   = "otel-collector"
+    container_port   = 4317
+  }
+
+  service_registries {
+    registry_arn = aws_service_discovery_service.otel.arn
+  }
+}
+
+resource "aws_service_discovery_service" "otel" {
+  name = "otel-collector"
+
+  dns_config {
+    namespace_id = var.service_discovery_namespace_id
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+  }
+}
+```
+
+Apps send to: `otel-collector.internal:4317`
+
+</details>
+
+---
+
+## Verification & Smoke Test
+
+Let's verify the setup works.
+
+<GuideStep title="Send Test Telemetry" syncKey="test-telemetry">
+
+```bash
+# Install telemetrygen (test tool)
+go install github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen@latest
+
+# Send test traces
+telemetrygen traces --otlp-insecure --otlp-endpoint localhost:4317 --traces 10
+
+# Send test metrics
+telemetrygen metrics --otlp-insecure --otlp-endpoint localhost:4317 --metrics 10
+
+# Send test logs
+telemetrygen logs --otlp-insecure --otlp-endpoint localhost:4317 --logs 10
+```
+
+</GuideStep>
+
+<TerminalOutput title="Expected Output">
+```
+2024-01-22T10:30:00.000Z  info  traces  {"traces": 10, "spans": 20}
+2024-01-22T10:30:01.000Z  info  metrics {"metrics": 10}
+2024-01-22T10:30:02.000Z  info  logs    {"logs": 10}
+```
+</TerminalOutput>
+
+<GuideStep title="Verify in Dashboard" syncKey="verify-dashboard">
+
+**SigNoz:** Open http://localhost:3301 → Services → Look for "telemetrygen"
+
+**Grafana:** Open http://localhost:3000 → Explore → Select Tempo → Search traces
+
+</GuideStep>
+
+<Alert type="warning" title="Troubleshooting">
+
+**No data appearing?**
+1. Check collector logs: `docker logs otel-collector`
+2. Verify endpoint: `curl -v http://localhost:4318/v1/traces`
+3. Check firewall/security groups allow 4317/4318
+
+**Connection refused?**
+- Ensure collector is running: `docker ps | grep otel`
+- Check the endpoint URL (localhost vs container name)
+
+</Alert>
+
+---
+
+## Quick Reference: Environment Variables
+
+Configure your applications with these standard OTel environment variables:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint | `http://localhost:4317` |
+| `OTEL_SERVICE_NAME` | Your service name | `user-api` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Additional attributes | `deployment.environment=dev,service.version=1.0.0` |
+| `OTEL_TRACES_SAMPLER` | Sampling strategy | `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | Sampler argument | `0.1` (10% sampling) |
+| `OTEL_LOG_LEVEL` | SDK log level | `info` |
+
+<details>
+<summary><strong>Complete Environment Template</strong></summary>
+
+```bash
+# .env.otel (source this or add to your .env)
+
+# Required
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+OTEL_SERVICE_NAME=your-service-name
+
+# Recommended
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=dev,service.version=1.0.0,service.namespace=mycompany
+
+# Traces
+OTEL_TRACES_EXPORTER=otlp
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=1.0
+
+# Metrics
+OTEL_METRICS_EXPORTER=otlp
+
+# Logs
+OTEL_LOGS_EXPORTER=otlp
+
+# SDK Behavior
+OTEL_LOG_LEVEL=info
+OTEL_PROPAGATORS=tracecontext,baggage
+```
+
+</details>
+
+---
+
+## Validation Checklist
+
+Verify your observability setup is complete:
+
+<ValidationChecklist
+  items={[
+    {
+      category: "LOCAL SETUP",
+      tasks: [
+        { text: "Docker Compose files created", syncKey: "compose-created" },
+        { text: "OTel Collector config ready", syncKey: "otel-config" },
+        { text: "Backend running (SigNoz or Grafana)", syncKey: "backend-running" },
+        { text: "Test telemetry sent successfully", syncKey: "test-sent" }
+      ]
+    },
+    {
+      category: "AWS DEPLOYMENT",
+      tasks: [
+        { text: "Terraform module created", syncKey: "tf-module" },
+        { text: "Security groups configured", syncKey: "sg-configured" },
+        { text: "EC2 instance running", syncKey: "ec2-running" },
+        { text: "Dashboard accessible", syncKey: "dashboard-accessible" }
+      ]
+    },
+    {
+      category: "VERIFICATION",
+      tasks: [
+        { text: "telemetrygen traces appear", syncKey: "traces-appear" },
+        { text: "telemetrygen metrics appear", syncKey: "metrics-appear" },
+        { text: "telemetrygen logs appear", syncKey: "logs-appear" },
+        { text: "AWS Overview Dashboard shows data", syncKey: "aws-dashboard" }
+      ]
+    }
+  ]}
+/>
+
+---
+
+## Key Takeaways
+
+1. **OpenTelemetry is the standard.** Instrument once, switch backends freely. Your apps don't care if you use SigNoz, Grafana, or Datadog.
+
+2. **The collector is your friend.** It buffers, batches, and routes telemetry. Deploy it as a sidecar or gateway based on your architecture.
+
+3. **Start simple.** SigNoz is easier to start with. You can always migrate to Grafana later — that's the whole point of OTel.
+
+4. **Empty dashboards are okay.** They'll fill up as we deploy applications. By Part 60, you'll have intuition from using observability daily.
+
+5. **The AWS Overview Dashboard** validates your setup works and gives immediate value — cost visibility, resource inventory, security posture.
+
+Your observability foundation is ready. Every application we deploy from now on will send telemetry here. Next up: [Part 6 — Git & GitHub: Professional Workflow](/blog/aws-for-startups/06-git-github-workflow), where we set up the developer workflow that ties everything together.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
