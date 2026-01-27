@@ -1,0 +1,1781 @@
+---
+title: "Terraform Fundamentals: Why Clicking Is Technical Debt"
+description: "Set up your Terraform project from scratch. Learn IaC fundamentals, remote state with S3 native locking, and get ready-to-use templates for everything we've built so far."
+excerpt: "Stop clicking through the AWS console. Set up your Terraform project from scratch with remote state, proper structure, and templates for everything we've built so far."
+date: "2026-01-21"
+author: "works-on-my.cloud"
+tags: ["aws", "terraform", "iac", "devops", "startup"]
+series: "AWS From Zero to Production"
+seriesPart: 4
+---
+
+import GuideStep from '../../../components/shared/GuideStep.astro';
+import Command from '../../../components/shared/Command.astro';
+import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
+import PanelSwitcher from '../../../components/shared/PanelSwitcher.astro';
+import Panel from '../../../components/shared/Panel.astro';
+import FileTree from '../../../components/shared/FileTree.astro';
+
+*Stop clicking through the AWS console*
+
+---
+
+## Why This Matters
+
+You've spent the last three parts setting up your AWS account through the console. You clicked through IAM, CloudTrail, billing alerts, and budget configurations. It works. But here's the problem:
+
+**Can you do it again?**
+
+What happens when you need a staging environment? A second AWS account? When a new team member asks "how is our infrastructure configured?" Do you screenshot the console? Write a wiki page that's outdated by Tuesday?
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              THE "I'LL DOCUMENT IT LATER" REALITY               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Console Setup                                                  │
+│        │                                                         │
+│        ▼                                                         │
+│   "I'll document this"                                          │
+│        │                                                         │
+│        ▼                                                         │
+│   (3 months pass)                                               │
+│        │                                                         │
+│        ▼                                                         │
+│   "How did we configure X?"                                     │
+│        │                                                         │
+│        ▼                                                         │
+│   Click through 47 console pages                                │
+│        │                                                         │
+│        ▼                                                         │
+│   Still not sure what's connected to what                       │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Infrastructure as Code (IaC)** solves this. Your infrastructure becomes:
+
+- **Reproducible** — Run `terraform apply` and get the exact same setup
+- **Reviewable** — Pull requests for infrastructure changes
+- **Auditable** — Git history shows who changed what and when
+- **Self-documenting** — The code *is* the documentation
+
+By the end of this part, you'll have a Terraform project that codifies everything we've built so far—and a foundation for everything we'll build next.
+
+---
+
+## IaC Philosophy
+
+Terraform is **declarative**. You describe the end state you want, and Terraform figures out how to get there.
+
+```hcl
+# You write this (what you want):
+resource "aws_s3_bucket" "logs" {
+  bucket = "mycompany-logs"
+}
+
+# Terraform figures out:
+# - Does this bucket exist?
+# - If not, create it
+# - If yes, is it configured correctly?
+# - If not, update it
+```
+
+**Plan before apply.** The `terraform plan` command shows you exactly what will change before you commit to it. No surprises.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TERRAFORM WORKFLOW                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   terraform plan                                                │
+│        │                                                         │
+│        ▼                                                         │
+│   Review changes ◄──── "2 to add, 1 to change, 0 to destroy"   │
+│        │                                                         │
+│        │  Looks good?                                           │
+│        ▼                                                         │
+│   terraform apply                                               │
+│        │                                                         │
+│        ▼                                                         │
+│   Infrastructure updated                                        │
+│        │                                                         │
+│        ▼                                                         │
+│   State file updated                                            │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+<Alert type="tip" title="The Fine Line">
+
+| Under | Right | Over |
+|-------|-------|------|
+| Everything in console | Terraform for persistent infrastructure | Terraform for one-off experiments |
+| Copy-paste configs everywhere | Modules for repeated patterns | Over-abstracting before you need it |
+| No state locking | S3 backend with native locking | Terraform Cloud for 2-person team |
+| No code review | PRs for infrastructure changes | 5 approvers for a tag change |
+
+</Alert>
+
+---
+
+## Installing Terraform
+
+Terraform requires version **1.10+** for native S3 state locking (no DynamoDB needed).
+
+<PanelSwitcher defaultActive="macos">
+  <Panel label="macOS" value="macos">
+    **Option 1: Homebrew**
+    ```bash
+    brew tap hashicorp/tap
+    brew install hashicorp/tap/terraform
+    ```
+
+    **Option 2: tfenv (version manager, recommended)**
+    ```bash
+    brew install tfenv
+    tfenv install 1.10.0
+    tfenv use 1.10.0
+    ```
+  </Panel>
+
+  <Panel label="Linux" value="linux">
+    **Option 1: Package manager (Ubuntu/Debian)**
+    ```bash
+    wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+    sudo apt update && sudo apt install terraform
+    ```
+
+    **Option 2: tfenv (version manager, recommended)**
+    ```bash
+    git clone https://github.com/tfutils/tfenv.git ~/.tfenv
+    echo 'export PATH="$HOME/.tfenv/bin:$PATH"' >> ~/.bashrc
+    source ~/.bashrc
+    tfenv install 1.10.0
+    tfenv use 1.10.0
+    ```
+  </Panel>
+
+  <Panel label="Windows" value="windows">
+    **Option 1: Chocolatey**
+    ```powershell
+    choco install terraform
+    ```
+
+    **Option 2: winget**
+    ```powershell
+    winget install HashiCorp.Terraform
+    ```
+  </Panel>
+</PanelSwitcher>
+
+### Verify Installation
+
+```bash
+terraform version
+```
+
+<TerminalOutput title="Expected Output">
+```
+Terraform v1.10.0
+on darwin_arm64
+```
+</TerminalOutput>
+
+### Editor Setup
+
+Install the **HashiCorp Terraform** extension for VS Code. It provides:
+- Syntax highlighting
+- Auto-completion
+- Format on save
+- Go to definition
+
+---
+
+## HCL Basics
+
+HashiCorp Configuration Language (HCL) is Terraform's syntax. Here's the essentials:
+
+<details>
+<summary><strong>HCL Syntax Reference</strong></summary>
+
+```hcl
+# Provider: How Terraform talks to AWS
+provider "aws" {
+  region  = "us-east-1"
+  profile = "dev-admin"
+}
+
+# Resource: Something you're creating
+resource "aws_s3_bucket" "logs" {
+  bucket = "mycompany-logs"
+
+  tags = {
+    Environment = "production"
+  }
+}
+
+# Data Source: Read existing infrastructure
+data "aws_caller_identity" "current" {}
+
+# Variable: Parameterize your config
+variable "environment" {
+  description = "Environment name"
+  type        = string
+  default     = "dev"
+}
+
+# Local: Computed value within the module
+locals {
+  bucket_prefix = "${var.project_name}-${var.environment}"
+}
+
+# Output: Expose values
+output "bucket_arn" {
+  description = "ARN of the logs bucket"
+  value       = aws_s3_bucket.logs.arn
+}
+```
+
+**References:**
+```hcl
+# Reference a resource attribute
+aws_s3_bucket.logs.id
+aws_s3_bucket.logs.arn
+
+# Reference a variable
+var.environment
+
+# Reference a local
+local.bucket_prefix
+
+# Reference a data source
+data.aws_caller_identity.current.account_id
+```
+
+</details>
+
+We'll learn more syntax as we use it. Let's set up your project.
+
+---
+
+## Project Setup: Directory Structure
+
+Create this structure for your Terraform project:
+
+<FileTree>
+terraform/
+  bootstrap/
+    main.tf
+    outputs.tf
+  modules/
+    s3-bucket/
+      main.tf
+      variables.tf
+      outputs.tf
+  environments/
+    dev/
+      main.tf
+      backend.tf
+      providers.tf
+      variables.tf
+      outputs.tf
+      terraform.tfvars
+      cloudtrail.tf
+      budgets.tf
+      iam.tf
+    prod/
+      (same structure)
+.gitignore
+</FileTree>
+
+<details>
+<summary><strong>Complete Project Structure Template</strong></summary>
+
+```bash
+# Create the structure
+mkdir -p terraform/{bootstrap,modules/s3-bucket,environments/{dev,prod}}
+
+# Create placeholder files
+touch terraform/bootstrap/{main.tf,outputs.tf}
+touch terraform/modules/s3-bucket/{main.tf,variables.tf,outputs.tf}
+touch terraform/environments/dev/{main.tf,backend.tf,providers.tf,variables.tf,outputs.tf,terraform.tfvars,cloudtrail.tf,budgets.tf,iam.tf}
+touch terraform/environments/prod/{main.tf,backend.tf,providers.tf,variables.tf,outputs.tf,terraform.tfvars}
+```
+
+**Why this structure?**
+- `bootstrap/` — One-time setup (state bucket). Run once, rarely touched.
+- `modules/` — Reusable components. Write once, use everywhere.
+- `environments/` — Environment-specific configs. Each environment is isolated.
+
+</details>
+
+<details>
+<summary><strong>Terraform .gitignore Template</strong></summary>
+
+```gitignore
+# terraform/.gitignore
+
+# Local .terraform directories
+**/.terraform/*
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Exclude all .tfvars files, which are likely to contain sensitive data
+*.tfvars
+*.tfvars.json
+
+# But keep example tfvars
+!*.tfvars.example
+
+# Ignore override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Ignore CLI configuration files
+.terraformrc
+terraform.rc
+
+# Keep the lock file (dependency versions)
+!.terraform.lock.hcl
+```
+
+</details>
+
+---
+
+## Step 1: Bootstrap — State Bucket
+
+Terraform tracks what it has created in a **state file**. By default, this is stored locally (`terraform.tfstate`), but that's problematic:
+
+- Lose your laptop? Lose your state.
+- Team members can't collaborate.
+- No locking — two people can corrupt state simultaneously.
+
+We'll store state in S3 with native locking (Terraform 1.10+).
+
+**The chicken-and-egg problem:** Terraform state needs S3, but we need Terraform to create S3. Solution: bootstrap with local state first, then migrate.
+
+<GuideStep title="Create Bootstrap Configuration" syncKey="bootstrap-config">
+
+Create `terraform/bootstrap/main.tf`:
+
+</GuideStep>
+
+<details>
+<summary><strong>Bootstrap Template (terraform/bootstrap/main.tf)</strong></summary>
+
+```hcl
+# terraform/bootstrap/main.tf
+# Run once to create the state bucket. Uses local state.
+
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region  = "us-east-1"
+  profile = "prod-admin"  # Use your SSO profile from Part 3
+}
+
+variable "project_name" {
+  description = "Project name (used for bucket naming)"
+  type        = string
+  default     = "mycompany"  # Change this
+}
+
+# S3 bucket for Terraform state
+resource "aws_s3_bucket" "terraform_state" {
+  bucket = "${var.project_name}-terraform-state"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  tags = {
+    Name      = "Terraform State"
+    ManagedBy = "terraform-bootstrap"
+  }
+}
+
+# Enable versioning (recover from bad state)
+resource "aws_s3_bucket_versioning" "terraform_state" {
+  bucket = aws_s3_bucket.terraform_state.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Encrypt state at rest
+resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" {
+  bucket = aws_s3_bucket.terraform_state.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "aws:kms"
+    }
+  }
+}
+
+# Block all public access
+resource "aws_s3_bucket_public_access_block" "terraform_state" {
+  bucket = aws_s3_bucket.terraform_state.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+```
+
+```hcl
+# terraform/bootstrap/outputs.tf
+
+output "state_bucket_name" {
+  description = "Name of the S3 bucket for Terraform state"
+  value       = aws_s3_bucket.terraform_state.id
+}
+
+output "state_bucket_arn" {
+  description = "ARN of the S3 bucket for Terraform state"
+  value       = aws_s3_bucket.terraform_state.arn
+}
+
+output "state_bucket_region" {
+  description = "Region of the S3 bucket"
+  value       = aws_s3_bucket.terraform_state.region
+}
+```
+
+</details>
+
+<GuideStep title="Run Bootstrap" syncKey="run-bootstrap">
+
+```bash
+cd terraform/bootstrap
+
+# Initialize (downloads AWS provider)
+terraform init
+
+# Preview what will be created
+terraform plan
+
+# Create the state bucket
+terraform apply
+```
+
+When prompted, type `yes` to confirm.
+
+</GuideStep>
+
+<TerminalOutput title="Bootstrap Output">
+```
+Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+state_bucket_arn = "arn:aws:s3:::mycompany-terraform-state"
+state_bucket_name = "mycompany-terraform-state"
+state_bucket_region = "us-east-1"
+```
+</TerminalOutput>
+
+**Save these outputs** — you'll need the bucket name for the backend configuration.
+
+<Alert type="note">
+
+The bootstrap directory uses local state (stored in `terraform/bootstrap/terraform.tfstate`). This is intentional — we can't store bootstrap state in a bucket that doesn't exist yet. Keep this file safe or commit it to a private repo.
+
+</Alert>
+
+---
+
+## Step 2: Configure Remote Backend
+
+Now configure your environment to use the S3 bucket for state.
+
+<GuideStep title="Create Backend Configuration" syncKey="backend-config">
+
+Create `terraform/environments/dev/backend.tf`:
+
+</GuideStep>
+
+<details>
+<summary><strong>Backend Configuration Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/backend.tf
+
+terraform {
+  backend "s3" {
+    bucket       = "mycompany-terraform-state"  # Your bucket name
+    key          = "environments/dev/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true  # Native S3 locking (Terraform 1.10+)
+  }
+}
+```
+
+**Key points:**
+- `key` — Path within the bucket. Use a clear naming convention.
+- `use_lockfile = true` — Enables native S3 locking. No DynamoDB needed!
+- Each environment gets its own state file (`dev/`, `prod/`, etc.)
+
+</details>
+
+---
+
+## Step 3: Provider Configuration
+
+Configure the AWS provider with sensible defaults.
+
+<details>
+<summary><strong>Provider Configuration Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/providers.tf
+
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region  = var.aws_region
+  profile = var.aws_profile  # Your SSO profile from Part 3
+
+  default_tags {
+    tags = {
+      Environment = var.environment
+      Project     = var.project_name
+      Owner       = var.owner
+      ManagedBy   = "terraform"
+    }
+  }
+}
+```
+
+**Default tags** are applied to every resource. No more forgetting to tag things.
+
+</details>
+
+<details>
+<summary><strong>Variables Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/variables.tf
+
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "aws_profile" {
+  description = "AWS CLI profile to use"
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "project_name" {
+  description = "Project name for resource naming and tagging"
+  type        = string
+}
+
+variable "owner" {
+  description = "Owner for tagging"
+  type        = string
+}
+
+variable "alert_email" {
+  description = "Email address for alerts and notifications"
+  type        = string
+}
+```
+
+```hcl
+# terraform/environments/dev/terraform.tfvars
+
+aws_region   = "us-east-1"
+aws_profile  = "dev-admin"  # Your SSO profile from Part 3
+environment  = "dev"
+project_name = "mycompany"
+owner        = "platform-team"
+alert_email  = "alerts@mycompany.com"
+```
+
+</details>
+
+<details>
+<summary><strong>Outputs Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/outputs.tf
+
+output "account_id" {
+  description = "AWS Account ID"
+  value       = data.aws_caller_identity.current.account_id
+}
+
+output "region" {
+  description = "AWS Region"
+  value       = var.aws_region
+}
+
+output "environment" {
+  description = "Environment name"
+  value       = var.environment
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Main Configuration Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/main.tf
+
+# Get current AWS account info
+data "aws_caller_identity" "current" {}
+
+# Additional resources will be added in the following files:
+# - cloudtrail.tf
+# - budgets.tf
+# - iam.tf
+```
+
+</details>
+
+<GuideStep title="Initialize the Environment" syncKey="init-env">
+
+```bash
+cd terraform/environments/dev
+
+# Initialize (configures S3 backend)
+terraform init
+
+# Verify state is configured correctly
+terraform state list
+```
+
+</GuideStep>
+
+<TerminalOutput title="Init Output">
+```
+Initializing the backend...
+
+Successfully configured the backend "s3"! Terraform will automatically
+use this backend unless the backend configuration changes.
+
+Initializing provider plugins...
+- Finding hashicorp/aws versions matching "~> 5.0"...
+- Installing hashicorp/aws v5.82.0...
+- Installed hashicorp/aws v5.82.0 (signed by HashiCorp)
+
+Terraform has been successfully initialized!
+```
+</TerminalOutput>
+
+---
+
+## Step 4: Codify Part 1 — CloudTrail & Budgets
+
+Now let's recreate what we did manually in Part 1.
+
+<details>
+<summary><strong>CloudTrail Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/cloudtrail.tf
+
+# S3 bucket for CloudTrail logs
+resource "aws_s3_bucket" "cloudtrail_logs" {
+  bucket = "${var.project_name}-cloudtrail-logs-${var.environment}"
+
+  tags = {
+    Name = "CloudTrail Logs"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "cloudtrail_logs" {
+  bucket = aws_s3_bucket.cloudtrail_logs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "cloudtrail_logs" {
+  bucket = aws_s3_bucket.cloudtrail_logs.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "aws:kms"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "cloudtrail_logs" {
+  bucket = aws_s3_bucket.cloudtrail_logs.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# Bucket policy for CloudTrail
+resource "aws_s3_bucket_policy" "cloudtrail_logs" {
+  bucket = aws_s3_bucket.cloudtrail_logs.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AWSCloudTrailAclCheck"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "s3:GetBucketAcl"
+        Resource = aws_s3_bucket.cloudtrail_logs.arn
+        Condition = {
+          StringEquals = {
+            "AWS:SourceArn" = "arn:aws:cloudtrail:${var.aws_region}:${data.aws_caller_identity.current.account_id}:trail/${var.project_name}-trail"
+          }
+        }
+      },
+      {
+        Sid    = "AWSCloudTrailWrite"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.cloudtrail_logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+        Condition = {
+          StringEquals = {
+            "s3:x-amz-acl"  = "bucket-owner-full-control"
+            "AWS:SourceArn" = "arn:aws:cloudtrail:${var.aws_region}:${data.aws_caller_identity.current.account_id}:trail/${var.project_name}-trail"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# CloudTrail
+resource "aws_cloudtrail" "main" {
+  name                          = "${var.project_name}-trail"
+  s3_bucket_name                = aws_s3_bucket.cloudtrail_logs.id
+  include_global_service_events = true
+  is_multi_region_trail         = true
+  enable_log_file_validation    = true
+
+  event_selector {
+    read_write_type           = "All"
+    include_management_events = true
+  }
+
+  tags = {
+    Name = "Main CloudTrail"
+  }
+
+  depends_on = [aws_s3_bucket_policy.cloudtrail_logs]
+}
+
+# Outputs
+output "cloudtrail_name" {
+  description = "Name of the CloudTrail"
+  value       = aws_cloudtrail.main.name
+}
+
+output "cloudtrail_logs_bucket" {
+  description = "S3 bucket for CloudTrail logs"
+  value       = aws_s3_bucket.cloudtrail_logs.id
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Budget Alerts Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/budgets.tf
+
+resource "aws_budgets_budget" "monthly" {
+  name              = "${var.project_name}-monthly-budget"
+  budget_type       = "COST"
+  limit_amount      = "50"  # Adjust based on your expected spend
+  limit_unit        = "USD"
+  time_unit         = "MONTHLY"
+  time_period_start = "2024-01-01_00:00"
+
+  # Alert at 50% (forecasted)
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 50
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = [var.alert_email]
+  }
+
+  # Alert at 80% (actual)
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.alert_email]
+  }
+
+  # Alert at 100% (actual)
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.alert_email]
+  }
+
+  # Alert at 150% (actual) - something is wrong
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 150
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = [var.alert_email]
+  }
+
+  tags = {
+    Name = "Monthly Cost Budget"
+  }
+}
+
+output "budget_name" {
+  description = "Name of the budget"
+  value       = aws_budgets_budget.monthly.name
+}
+```
+
+</details>
+
+<GuideStep title="Apply CloudTrail and Budgets" syncKey="apply-part1">
+
+```bash
+cd terraform/environments/dev
+
+# Preview changes
+terraform plan
+
+# Apply
+terraform apply
+```
+
+</GuideStep>
+
+<TerminalOutput title="Plan Output">
+```
+Terraform will perform the following actions:
+
+  # aws_budgets_budget.monthly will be created
+  # aws_cloudtrail.main will be created
+  # aws_s3_bucket.cloudtrail_logs will be created
+  # aws_s3_bucket_policy.cloudtrail_logs will be created
+  # aws_s3_bucket_public_access_block.cloudtrail_logs will be created
+  # aws_s3_bucket_server_side_encryption_configuration.cloudtrail_logs will be created
+  # aws_s3_bucket_versioning.cloudtrail_logs will be created
+
+Plan: 7 to add, 0 to change, 0 to destroy.
+```
+</TerminalOutput>
+
+---
+
+## Step 5: Codify Part 2 — IAM
+
+Now let's codify the IAM setup from Part 2.
+
+<details>
+<summary><strong>IAM Developer Group Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/iam.tf
+
+# =============================================================================
+# DEVELOPER GROUP
+# =============================================================================
+
+resource "aws_iam_group" "developers" {
+  name = "Developers"
+}
+
+# Attach PowerUserAccess (everything except IAM and Organizations)
+resource "aws_iam_group_policy_attachment" "developers_power_user" {
+  group      = aws_iam_group.developers.name
+  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
+}
+
+# Deny dangerous actions even for power users
+resource "aws_iam_group_policy" "developers_deny_dangerous" {
+  name  = "DenyDangerousActions"
+  group = aws_iam_group.developers.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DenyAccountLevelActions"
+        Effect = "Deny"
+        Action = [
+          "organizations:*",
+          "account:*",
+          "iam:CreateUser",
+          "iam:DeleteUser",
+          "iam:UpdateUser",
+          "iam:CreateGroup",
+          "iam:DeleteGroup",
+          "iam:UpdateGroup",
+          "iam:AttachUserPolicy",
+          "iam:DetachUserPolicy",
+          "iam:AttachGroupPolicy",
+          "iam:DetachGroupPolicy",
+          "iam:PutUserPolicy",
+          "iam:DeleteUserPolicy",
+          "iam:PutGroupPolicy",
+          "iam:DeleteGroupPolicy",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "DenyCloudTrailModification"
+        Effect = "Deny"
+        Action = [
+          "cloudtrail:DeleteTrail",
+          "cloudtrail:StopLogging",
+          "cloudtrail:UpdateTrail"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Allow developers to manage their own MFA
+resource "aws_iam_group_policy" "developers_self_service_mfa" {
+  name  = "SelfServiceMFA"
+  group = aws_iam_group.developers.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowManageOwnMFA"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateVirtualMFADevice",
+          "iam:DeleteVirtualMFADevice",
+          "iam:EnableMFADevice",
+          "iam:ResyncMFADevice",
+          "iam:ListMFADevices"
+        ]
+        Resource = [
+          "arn:aws:iam::*:mfa/$${aws:username}",
+          "arn:aws:iam::*:user/$${aws:username}"
+        ]
+      },
+      {
+        Sid    = "AllowViewAccountInfo"
+        Effect = "Allow"
+        Action = [
+          "iam:GetAccountPasswordPolicy",
+          "iam:ListVirtualMFADevices"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+output "developers_group_name" {
+  description = "Name of the developers IAM group"
+  value       = aws_iam_group.developers.name
+}
+
+output "developers_group_arn" {
+  description = "ARN of the developers IAM group"
+  value       = aws_iam_group.developers.arn
+}
+```
+
+</details>
+
+<details>
+<summary><strong>CI/CD Role Template (GitHub Actions OIDC)</strong></summary>
+
+```hcl
+# terraform/environments/dev/iam-cicd.tf
+
+# =============================================================================
+# GITHUB ACTIONS OIDC
+# =============================================================================
+
+# OIDC Provider for GitHub Actions
+resource "aws_iam_openid_connect_provider" "github" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
+
+  tags = {
+    Name = "GitHub Actions OIDC Provider"
+  }
+}
+
+# Role for GitHub Actions
+variable "github_org" {
+  description = "GitHub organization name"
+  type        = string
+  default     = "your-org"  # Change this
+}
+
+variable "github_repo" {
+  description = "GitHub repository name"
+  type        = string
+  default     = "your-repo"  # Change this
+}
+
+resource "aws_iam_role" "github_actions" {
+  name = "GitHubActionsRole-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.github.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            # Allow from any branch in your repo
+            "token.actions.githubusercontent.com:sub" = "repo:${var.github_org}/${var.github_repo}:*"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "GitHub Actions Role"
+  }
+}
+
+# Attach deployment permissions
+# Scope this down based on what your CI/CD actually needs
+resource "aws_iam_role_policy_attachment" "github_actions_deploy" {
+  role       = aws_iam_role.github_actions.name
+  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
+}
+
+output "github_actions_role_arn" {
+  description = "ARN of the GitHub Actions role"
+  value       = aws_iam_role.github_actions.arn
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Lambda Execution Role Template</strong></summary>
+
+```hcl
+# terraform/environments/dev/iam-lambda.tf
+
+# =============================================================================
+# LAMBDA EXECUTION ROLE (Reusable pattern)
+# =============================================================================
+
+resource "aws_iam_role" "lambda_execution" {
+  name = "${var.project_name}-lambda-execution-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "Lambda Execution Role"
+  }
+}
+
+# Basic execution (CloudWatch Logs)
+resource "aws_iam_role_policy_attachment" "lambda_basic" {
+  role       = aws_iam_role.lambda_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# Custom permissions - add as needed
+resource "aws_iam_role_policy" "lambda_custom" {
+  name = "CustomPermissions"
+  role = aws_iam_role.lambda_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "S3Access"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "arn:aws:s3:::${var.project_name}-*/*"
+      },
+      {
+        Sid    = "DynamoDBAccess"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*"
+      }
+    ]
+  })
+}
+
+output "lambda_execution_role_arn" {
+  description = "ARN of the Lambda execution role"
+  value       = aws_iam_role.lambda_execution.arn
+}
+
+output "lambda_execution_role_name" {
+  description = "Name of the Lambda execution role"
+  value       = aws_iam_role.lambda_execution.name
+}
+```
+
+</details>
+
+---
+
+## Step 6: Create Your First Module
+
+Modules are reusable Terraform components. When you find yourself copying similar resource blocks, it's time for a module.
+
+**Rule of three:** If you've written the same pattern three times, make it a module.
+
+<details>
+<summary><strong>S3 Bucket Module Template</strong></summary>
+
+```hcl
+# terraform/modules/s3-bucket/variables.tf
+
+variable "bucket_name" {
+  description = "Name of the S3 bucket"
+  type        = string
+}
+
+variable "versioning" {
+  description = "Enable versioning"
+  type        = bool
+  default     = true
+}
+
+variable "force_destroy" {
+  description = "Allow bucket to be destroyed even with objects"
+  type        = bool
+  default     = false
+}
+
+variable "tags" {
+  description = "Additional tags for the bucket"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```hcl
+# terraform/modules/s3-bucket/main.tf
+
+resource "aws_s3_bucket" "this" {
+  bucket        = var.bucket_name
+  force_destroy = var.force_destroy
+
+  tags = merge(
+    { Name = var.bucket_name },
+    var.tags
+  )
+}
+
+resource "aws_s3_bucket_versioning" "this" {
+  bucket = aws_s3_bucket.this.id
+  versioning_configuration {
+    status = var.versioning ? "Enabled" : "Disabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "aws:kms"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "this" {
+  bucket = aws_s3_bucket.this.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+```
+
+```hcl
+# terraform/modules/s3-bucket/outputs.tf
+
+output "bucket_id" {
+  description = "ID of the bucket"
+  value       = aws_s3_bucket.this.id
+}
+
+output "bucket_arn" {
+  description = "ARN of the bucket"
+  value       = aws_s3_bucket.this.arn
+}
+
+output "bucket_domain_name" {
+  description = "Domain name of the bucket"
+  value       = aws_s3_bucket.this.bucket_domain_name
+}
+
+output "bucket_regional_domain_name" {
+  description = "Regional domain name of the bucket"
+  value       = aws_s3_bucket.this.bucket_regional_domain_name
+}
+```
+
+**Using the module:**
+
+```hcl
+# In any environment file
+module "logs_bucket" {
+  source = "../../modules/s3-bucket"
+
+  bucket_name = "${var.project_name}-logs-${var.environment}"
+  versioning  = true
+
+  tags = {
+    Purpose = "Application Logs"
+  }
+}
+
+module "uploads_bucket" {
+  source = "../../modules/s3-bucket"
+
+  bucket_name   = "${var.project_name}-uploads-${var.environment}"
+  versioning    = false
+  force_destroy = var.environment == "dev"  # Only in dev
+
+  tags = {
+    Purpose = "User Uploads"
+  }
+}
+
+# Use outputs
+output "logs_bucket_arn" {
+  value = module.logs_bucket.bucket_arn
+}
+```
+
+</details>
+
+---
+
+## Essential Commands Reference
+
+<details>
+<summary><strong>Terraform Commands Cheatsheet</strong></summary>
+
+| Command | Description |
+|---------|-------------|
+| `terraform init` | Initialize working directory, download providers |
+| `terraform plan` | Preview changes without applying |
+| `terraform apply` | Apply changes (creates/updates/deletes resources) |
+| `terraform destroy` | Destroy all managed resources |
+| `terraform fmt` | Format code to canonical style |
+| `terraform fmt -check` | Check if code is formatted (CI use) |
+| `terraform validate` | Validate configuration syntax |
+| `terraform state list` | List all resources in state |
+| `terraform state show <resource>` | Show details of a specific resource |
+| `terraform output` | Show all outputs |
+| `terraform output <name>` | Show specific output |
+| `terraform refresh` | Sync state with actual infrastructure |
+| `terraform import <resource> <id>` | Import existing resource into state |
+| `terraform graph` | Generate dependency graph (DOT format) |
+
+**Common flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-auto-approve` | Skip confirmation prompt (use in CI) |
+| `-var="key=value"` | Set a variable |
+| `-var-file=file.tfvars` | Use a specific variables file |
+| `-target=resource` | Apply to specific resource only |
+| `-parallelism=n` | Limit concurrent operations |
+
+</details>
+
+---
+
+## Working with Existing Resources
+
+If you created resources manually in Part 1-3, you can bring them under Terraform management.
+
+<details>
+<summary><strong>Import Block Template (Terraform 1.5+)</strong></summary>
+
+Modern Terraform uses declarative imports in your config files:
+
+```hcl
+# Import an existing S3 bucket
+import {
+  to = aws_s3_bucket.existing_logs
+  id = "mycompany-existing-logs-bucket"
+}
+
+# Write the resource configuration
+resource "aws_s3_bucket" "existing_logs" {
+  bucket = "mycompany-existing-logs-bucket"
+}
+```
+
+Then run:
+
+```bash
+# Generate the full configuration
+terraform plan -generate-config-out=imported.tf
+
+# Review imported.tf and merge into your config
+# Then apply
+terraform apply
+```
+
+**Classic import (still works):**
+
+```bash
+# Import an IAM user
+terraform import aws_iam_user.admin your-admin-username
+
+# Import an S3 bucket
+terraform import aws_s3_bucket.logs my-existing-bucket
+```
+
+</details>
+
+<Alert type="caution">
+
+**When to import vs recreate:**
+- **Import** when the resource has data you can't lose (S3 buckets with objects, databases)
+- **Recreate** when it's easier to destroy and recreate (empty buckets, IAM roles)
+
+</Alert>
+
+---
+
+## Quick Reference: AWS CLI Profiles (from Part 3)
+
+<details>
+<summary><strong>AWS CLI SSO Profile Template</strong></summary>
+
+```ini
+# ~/.aws/config
+
+[sso-session my-sso]
+sso_start_url = https://d-xxxxxxxxxx.awsapps.com/start
+sso_region = us-east-1
+sso_registration_scopes = sso:account:access
+
+[profile dev-admin]
+sso_session = my-sso
+sso_account_id = 111111111111
+sso_role_name = AdministratorAccess
+region = us-east-1
+output = json
+
+[profile prod-admin]
+sso_session = my-sso
+sso_account_id = 222222222222
+sso_role_name = AdministratorAccess
+region = us-east-1
+output = json
+
+[profile prod-readonly]
+sso_session = my-sso
+sso_account_id = 222222222222
+sso_role_name = ViewOnlyAccess
+region = us-east-1
+output = json
+```
+
+**Usage with Terraform:**
+
+```hcl
+provider "aws" {
+  region  = "us-east-1"
+  profile = "dev-admin"  # Uses SSO profile
+}
+```
+
+```bash
+# Login before running Terraform
+aws sso login --profile dev-admin
+```
+
+</details>
+
+---
+
+## Quick Reference: IAM Policy Patterns (from Part 2)
+
+<details>
+<summary><strong>Common IAM Policy Patterns</strong></summary>
+
+```hcl
+# Pattern 1: Service-specific access
+{
+  "Effect": "Allow",
+  "Action": [
+    "s3:GetObject",
+    "s3:PutObject"
+  ],
+  "Resource": "arn:aws:s3:::bucket-name/*"
+}
+
+# Pattern 2: Resource tag-based conditions
+{
+  "Effect": "Allow",
+  "Action": "ec2:*",
+  "Resource": "*",
+  "Condition": {
+    "StringEquals": {
+      "aws:ResourceTag/Environment": "dev"
+    }
+  }
+}
+
+# Pattern 3: Deny with exceptions
+{
+  "Effect": "Deny",
+  "Action": "ec2:TerminateInstances",
+  "Resource": "*",
+  "Condition": {
+    "StringNotEquals": {
+      "aws:ResourceTag/Environment": "dev"
+    }
+  }
+}
+
+# Pattern 4: Require MFA
+{
+  "Effect": "Deny",
+  "Action": "*",
+  "Resource": "*",
+  "Condition": {
+    "BoolIfExists": {
+      "aws:MultiFactorAuthPresent": "false"
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>IAM Trust Policy Patterns</strong></summary>
+
+```hcl
+# AWS Service (Lambda, EC2, ECS)
+{
+  "Effect": "Allow",
+  "Principal": {
+    "Service": "lambda.amazonaws.com"
+  },
+  "Action": "sts:AssumeRole"
+}
+
+# Cross-account access
+{
+  "Effect": "Allow",
+  "Principal": {
+    "AWS": "arn:aws:iam::OTHER_ACCOUNT_ID:root"
+  },
+  "Action": "sts:AssumeRole",
+  "Condition": {
+    "StringEquals": {
+      "sts:ExternalId": "your-external-id"
+    }
+  }
+}
+
+# GitHub Actions OIDC
+{
+  "Effect": "Allow",
+  "Principal": {
+    "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+  },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": {
+      "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+    },
+    "StringLike": {
+      "token.actions.githubusercontent.com:sub": "repo:org/repo:*"
+    }
+  }
+}
+```
+
+</details>
+
+---
+
+## Quick Reference: Terraform Patterns
+
+<details>
+<summary><strong>Common Terraform Patterns</strong></summary>
+
+```hcl
+# Pattern: Conditional resource creation
+resource "aws_instance" "bastion" {
+  count = var.create_bastion ? 1 : 0
+  # ...
+}
+
+# Access conditional resource
+output "bastion_ip" {
+  value = var.create_bastion ? aws_instance.bastion[0].public_ip : null
+}
+
+# Pattern: For each from list
+variable "user_names" {
+  default = ["alice", "bob", "carol"]
+}
+
+resource "aws_iam_user" "users" {
+  for_each = toset(var.user_names)
+  name     = each.value
+}
+
+# Pattern: For each from map
+variable "buckets" {
+  default = {
+    logs    = { versioning = true }
+    uploads = { versioning = false }
+  }
+}
+
+resource "aws_s3_bucket" "buckets" {
+  for_each = var.buckets
+  bucket   = "${var.project_name}-${each.key}"
+}
+
+# Pattern: Dynamic blocks
+variable "ingress_rules" {
+  default = [
+    { port = 80, cidr = ["0.0.0.0/0"] },
+    { port = 443, cidr = ["0.0.0.0/0"] },
+  ]
+}
+
+resource "aws_security_group" "web" {
+  name = "web"
+
+  dynamic "ingress" {
+    for_each = var.ingress_rules
+    content {
+      from_port   = ingress.value.port
+      to_port     = ingress.value.port
+      protocol    = "tcp"
+      cidr_blocks = ingress.value.cidr
+    }
+  }
+}
+
+# Pattern: Data source lookup
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+}
+
+# Pattern: Moved block (refactoring without recreate)
+moved {
+  from = aws_s3_bucket.old_name
+  to   = aws_s3_bucket.new_name
+}
+
+# Pattern: Lifecycle rules
+resource "aws_instance" "critical" {
+  # ...
+
+  lifecycle {
+    prevent_destroy = true  # Can't be destroyed
+    ignore_changes  = [tags]  # Ignore external tag changes
+  }
+}
+```
+
+</details>
+
+---
+
+## Common Mistakes & Troubleshooting
+
+<details>
+<summary><strong>Common Errors and Fixes</strong></summary>
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Error acquiring state lock` | Someone else is running Terraform | Wait, or use `terraform force-unlock LOCK_ID` (careful!) |
+| `Resource already exists` | Resource created outside Terraform | Import it or delete manually first |
+| `Invalid provider configuration` | Wrong profile or region | Check `aws_profile` variable, run `aws sso login` |
+| `Cycle detected` | Resources depend on each other | Refactor to break the cycle, use `depends_on` carefully |
+| `Provider produced inconsistent result` | Provider bug or API issue | Run `terraform apply` again, or upgrade provider |
+
+**Debugging tips:**
+
+```bash
+# Enable verbose logging
+export TF_LOG=DEBUG
+terraform plan
+
+# Show state for a resource
+terraform state show aws_s3_bucket.logs
+
+# Check who's holding the lock
+aws s3 ls s3://your-state-bucket/environments/dev/ --recursive
+```
+
+</details>
+
+---
+
+## Validation Checklist
+
+Verify your Terraform setup is complete:
+
+<ValidationChecklist
+  items={[
+    {
+      category: "INSTALLATION",
+      tasks: [
+        { text: "Terraform 1.10+ installed", syncKey: "tf-installed" },
+        { text: "tfenv configured (optional)", syncKey: "tfenv" },
+        { text: "VS Code extension installed", syncKey: "vscode-ext" }
+      ]
+    },
+    {
+      category: "PROJECT SETUP",
+      tasks: [
+        { text: "Directory structure created", syncKey: "dir-structure" },
+        { text: ".gitignore configured", syncKey: "gitignore" },
+        { text: "Bootstrap complete (state bucket)", syncKey: "bootstrap" }
+      ]
+    },
+    {
+      category: "REMOTE STATE",
+      tasks: [
+        { text: "S3 backend configured", syncKey: "s3-backend" },
+        { text: "Native locking enabled (use_lockfile)", syncKey: "locking" },
+        { text: "terraform init successful", syncKey: "init" }
+      ]
+    },
+    {
+      category: "RESOURCES CODIFIED",
+      tasks: [
+        { text: "CloudTrail deployed via Terraform", syncKey: "cloudtrail-tf" },
+        { text: "Budget alerts deployed via Terraform", syncKey: "budgets-tf" },
+        { text: "IAM groups/policies deployed via Terraform", syncKey: "iam-tf" }
+      ]
+    },
+    {
+      category: "MODULES",
+      tasks: [
+        { text: "S3 bucket module created", syncKey: "s3-module" },
+        { text: "Module tested in environment", syncKey: "module-test" }
+      ]
+    }
+  ]}
+/>
+
+---
+
+## Key Takeaways
+
+1. **Terraform is declarative.** Describe what you want, not how to get there. Run `terraform plan` to see what will change before committing.
+
+2. **State is sacred.** Store it in S3 with versioning. Native locking (Terraform 1.10+) means no DynamoDB needed. Never edit state manually.
+
+3. **Modules reduce copy-paste.** When you write the same pattern three times, make it a module. Start simple, extract when needed.
+
+4. **Default tags save headaches.** Configure them in the provider once, and every resource gets tagged automatically.
+
+5. **Import existing resources.** Don't recreate what you already have. Use `import` blocks to bring manual resources under Terraform management.
+
+Your infrastructure is now code. You can recreate everything with `terraform apply`, review changes in PRs, and track history in Git. Next up: [Part 5 — SigNoz Setup](/blog/aws-for-startups/05-signoz-setup), where we'll deploy observability infrastructure with Terraform.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

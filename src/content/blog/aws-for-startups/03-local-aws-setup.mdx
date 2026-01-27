@@ -1,0 +1,1006 @@
+---
+title: "Your Local AWS Setup: Stop Hardcoding Access Keys Forever"
+description: "Configure your local AWS development environment the right way. Learn AWS CLI v2, IAM Identity Center (SSO), named profiles, and aws-vault for credential security that scales."
+excerpt: "Stop hardcoding access keys forever. Configure your local development environment the right way — AWS CLI, IAM Identity Center, and credential security that scales with your team."
+date: "2026-01-21"
+author: "works-on-my.cloud"
+tags: ["aws", "cli", "security", "devops", "startup"]
+series: "AWS From Zero to Production"
+seriesPart: 3
+---
+
+import GuideStep from '../../../components/shared/GuideStep.astro';
+import Command from '../../../components/shared/Command.astro';
+import TerminalOutput from '../../../components/shared/TerminalOutput.astro';
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
+import CodeSwitcher from '../../../components/shared/CodeSwitcher.astro';
+import PanelSwitcher from '../../../components/shared/PanelSwitcher.astro';
+import Panel from '../../../components/shared/Panel.astro';
+import FileTree from '../../../components/shared/FileTree.astro';
+import EnvVars from '../../../components/shared/EnvVars.astro';
+import EnvVar from '../../../components/shared/EnvVar.astro';
+
+*Stop hardcoding access keys forever*
+
+---
+
+## Why This Matters
+
+Open your terminal and run this:
+
+```bash
+grep -r "AKIA" ~/.aws ~/.bashrc ~/.zshrc ~/.bash_profile 2>/dev/null
+```
+
+If you see output, you have AWS access keys sitting in plain text on your machine. Now imagine what's in your team's Slack history, `.env` files, and git commits.
+
+**The access key lifecycle of doom:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              THE ACCESS KEY LIFECYCLE OF DOOM                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Day 1: "I'll just hardcode this key for now"                  │
+│                    │                                             │
+│                    ▼                                             │
+│   Day 7: Key ends up in .env file                               │
+│                    │                                             │
+│                    ▼                                             │
+│   Day 30: .env gets committed to git                            │
+│                    │                                             │
+│                    ▼                                             │
+│   Day 31: Bot scrapes GitHub, mines crypto on your account      │
+│                    │                                             │
+│                    ▼                                             │
+│   Day 32: $47,000 AWS bill                                      │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+This isn't hypothetical. GitHub's secret scanning blocks thousands of AWS keys daily—but only catches what gets pushed to public repos. Private repos, Slack messages, local files? You're on your own.
+
+**What we're building today:**
+
+- AWS CLI v2 configured properly
+- IAM Identity Center (SSO) for short-term, auto-rotating credentials
+- Named profiles for managing multiple accounts/environments
+- aws-vault as a fallback for accounts without SSO
+- A workflow where credentials never touch plain text files
+
+By the end, you'll have a setup that's both more secure *and* more convenient than hardcoded keys.
+
+---
+
+## Installing the AWS CLI v2
+
+The AWS CLI is your primary interface to AWS outside the console. Version 2 is required—it has SSO support that v1 lacks.
+
+<PanelSwitcher defaultActive="macos">
+  <Panel label="macOS" value="macos">
+    **Option 1: Homebrew (Recommended)**
+    ```bash
+    brew install awscli
+    ```
+
+    **Option 2: Official Installer**
+    ```bash
+    curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
+    sudo installer -pkg AWSCLIV2.pkg -target /
+    rm AWSCLIV2.pkg
+    ```
+  </Panel>
+
+  <Panel label="Linux" value="linux">
+    ```bash
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    unzip awscliv2.zip
+    sudo ./aws/install
+    rm -rf awscliv2.zip aws/
+    ```
+
+    **For ARM64 (Graviton, Apple Silicon VMs):**
+    ```bash
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+    unzip awscliv2.zip
+    sudo ./aws/install
+    rm -rf awscliv2.zip aws/
+    ```
+  </Panel>
+
+  <Panel label="Windows" value="windows">
+    **Option 1: MSI Installer**
+
+    Download and run: [AWS CLI MSI Installer](https://awscli.amazonaws.com/AWSCLIV2.msi)
+
+    **Option 2: winget**
+    ```powershell
+    winget install Amazon.AWSCLI
+    ```
+  </Panel>
+</PanelSwitcher>
+
+### Verify Installation
+
+```bash
+aws --version
+```
+
+<TerminalOutput title="Expected Output">
+```
+aws-cli/2.15.0 Python/3.11.6 Darwin/23.0.0 source/arm64
+```
+</TerminalOutput>
+
+The version should start with `2.`. If you see `1.x`, you have the old CLI—uninstall it and install v2.
+
+<Alert type="important">
+
+**Why CLI v2?** Version 2 includes built-in SSO support (`aws sso login`), credential caching, and automatic token refresh. These features don't exist in v1. If you're on v1, upgrade now.
+
+</Alert>
+
+---
+
+## Authentication Methods Compared
+
+Before diving into setup, understand your options:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    AWS AUTHENTICATION METHODS                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   METHOD              CREDENTIALS         ROTATION        BEST FOR          │
+│   ──────              ───────────         ────────        ────────          │
+│                                                                              │
+│   IAM Identity        Short-term          Automatic       Teams with        │
+│   Center (SSO)        (hours)             (seamless)      AWS Organizations │
+│   ✅ RECOMMENDED                                                             │
+│                                                                              │
+│   ──────────────────────────────────────────────────────────────────────────│
+│                                                                              │
+│   aws-vault +         Short-term          Per-command     Solo accounts,    │
+│   Access Keys         (via STS)           (manual)        legacy setups     │
+│   ⚠️  FALLBACK                                                               │
+│                                                                              │
+│   ──────────────────────────────────────────────────────────────────────────│
+│                                                                              │
+│   Plain Access        Long-term           Manual          CI/CD only        │
+│   Keys in files       (forever)           (never done)    (if no OIDC)      │
+│   ❌ AVOID                                                                   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Method | Security | Convenience | Setup Complexity | Team Size |
+|--------|----------|-------------|------------------|-----------|
+| IAM Identity Center | Highest | Highest | Medium | Any |
+| aws-vault + Access Keys | High | Medium | Low | Solo / Small |
+| Plain Access Keys | Low | Low | Lowest | Never for humans |
+
+**The recommendation is clear: use IAM Identity Center if you can.** It provides short-term credentials that rotate automatically, integrates with your browser for authentication, and scales from solo developers to enterprise teams.
+
+If you're on a solo AWS account without Organizations, aws-vault is your next best option—it wraps access keys with encryption and STS to provide similar security benefits.
+
+---
+
+## IAM Identity Center: The Modern Way
+
+IAM Identity Center (formerly AWS SSO) is AWS's solution for human access to AWS accounts. Instead of long-lived access keys, you authenticate through your browser and receive short-term credentials that auto-refresh.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    IAM IDENTITY CENTER FLOW                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌──────────┐     aws sso login     ┌──────────────────┐                   │
+│   │          │ ────────────────────▶ │                  │                   │
+│   │ Terminal │                       │  Browser Opens   │                   │
+│   │          │                       │  (SSO Portal)    │                   │
+│   └──────────┘                       └────────┬─────────┘                   │
+│                                               │                              │
+│                                               │ You authenticate             │
+│                                               │ (password + MFA)             │
+│                                               ▼                              │
+│                                      ┌──────────────────┐                   │
+│                                      │                  │                   │
+│                                      │ Identity Center  │                   │
+│                                      │ validates you    │                   │
+│                                      │                  │                   │
+│                                      └────────┬─────────┘                   │
+│                                               │                              │
+│                                               │ Issues temporary             │
+│                                               │ credentials                  │
+│                                               ▼                              │
+│   ┌──────────┐                       ┌──────────────────┐                   │
+│   │          │ ◀──────────────────── │                  │                   │
+│   │ Terminal │   Credentials cached  │ ~/.aws/sso/cache │                   │
+│   │          │   (auto-refresh)      │                  │                   │
+│   └──────────┘                       └──────────────────┘                   │
+│                                                                              │
+│   Credentials expire in 1-12 hours (configurable).                          │
+│   CLI auto-refreshes them when needed.                                      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Prerequisites
+
+IAM Identity Center requires:
+- **AWS Organizations** enabled (even for a single account)
+- **Identity Center** enabled in your management account
+
+If you set up your account following Part 1 of this series, you're ready. If not, you'll need to enable Organizations first.
+
+<GuideStep title="Enable AWS Organizations" syncKey="enable-orgs">
+  1. Sign in to AWS Console as your admin user
+  2. Go to **AWS Organizations**
+  3. Click **Create an organization**
+  4. Choose **Create organization** (with all features enabled)
+
+  Your single account becomes the "management account" of a one-account organization. You can add more accounts later.
+</GuideStep>
+
+<GuideStep title="Enable IAM Identity Center" syncKey="enable-identity-center">
+  1. Go to **IAM Identity Center** (search in console)
+  2. Click **Enable**
+  3. Choose your identity source:
+     - **Identity Center directory** (recommended for small teams)
+     - **Active Directory** (if you have one)
+     - **External IdP** (Okta, Google Workspace, etc.)
+  4. For now, select **Identity Center directory**
+</GuideStep>
+
+<GuideStep title="Create Your SSO User" syncKey="create-sso-user">
+  1. In Identity Center, go to **Users** → **Add user**
+  2. Fill in your details:
+     - **Username:** your email
+     - **Email:** your email
+     - **First/Last name:** your name
+  3. Click **Add user**
+  4. Check your email for the activation link
+  5. Set your password and MFA
+</GuideStep>
+
+<GuideStep title="Create a Permission Set" syncKey="permission-set">
+  1. Go to **Permission sets** → **Create permission set**
+  2. Choose **Predefined permission set**
+  3. Select **AdministratorAccess** (we'll create limited ones later)
+  4. Click **Next**, then **Create**
+</GuideStep>
+
+<GuideStep title="Assign Access to Your Account" syncKey="assign-access">
+  1. Go to **AWS accounts**
+  2. Select your account → **Assign users or groups**
+  3. Select your user
+  4. Click **Next**
+  5. Select the **AdministratorAccess** permission set
+  6. Click **Submit**
+</GuideStep>
+
+### Configure the AWS CLI for SSO
+
+Now configure your local CLI to use Identity Center:
+
+```bash
+aws configure sso
+```
+
+The CLI will prompt you for:
+
+<TerminalOutput title="SSO Configuration Prompts">
+```
+SSO session name (Recommended): my-sso
+SSO start URL [None]: https://d-xxxxxxxxxx.awsapps.com/start
+SSO region [None]: us-east-1
+SSO registration scopes [sso:account:access]:
+```
+</TerminalOutput>
+
+<Alert type="tip">
+
+**Find your SSO start URL:** In the Identity Center console, look at the **Settings** page. The "AWS access portal URL" is your start URL.
+
+</Alert>
+
+After entering these, your browser opens for authentication. Once authenticated, the CLI shows your available accounts and permission sets:
+
+<TerminalOutput title="Account Selection">
+```
+There are 2 AWS accounts available to you.
+> my-company-prod, account-id@email.com (123456789012)
+  my-company-dev, dev@email.com (987654321098)
+```
+</TerminalOutput>
+
+Select an account and permission set, then:
+
+<TerminalOutput title="Profile Configuration">
+```
+CLI default client Region [None]: us-east-1
+CLI default output format [None]: json
+CLI profile name [AdministratorAccess-123456789012]: prod-admin
+```
+</TerminalOutput>
+
+**Give it a memorable profile name.** `prod-admin` is better than `AdministratorAccess-123456789012`.
+
+### Your Config File
+
+After setup, your `~/.aws/config` looks like this:
+
+```ini
+[sso-session my-sso]
+sso_start_url = https://d-xxxxxxxxxx.awsapps.com/start
+sso_region = us-east-1
+sso_registration_scopes = sso:account:access
+
+[profile prod-admin]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = AdministratorAccess
+region = us-east-1
+output = json
+```
+
+<Alert type="note">
+
+**Notice:** No credentials in the config file. The credentials are obtained dynamically when you run `aws sso login`.
+
+</Alert>
+
+### Daily Workflow
+
+**First command of the day:**
+
+```bash
+aws sso login --profile prod-admin
+```
+
+Your browser opens, you authenticate (with MFA), and you're done. Credentials are cached and auto-refresh for the session duration.
+
+**Use the profile:**
+
+```bash
+# Explicit profile
+aws s3 ls --profile prod-admin
+
+# Or set the environment variable
+export AWS_PROFILE=prod-admin
+aws s3 ls
+```
+
+**Verify your identity:**
+
+```bash
+aws sts get-caller-identity --profile prod-admin
+```
+
+<TerminalOutput title="Identity Verification">
+```json
+{
+    "UserId": "AROAXXXXXXXXXXXXXXXXX:your.email@company.com",
+    "Account": "123456789012",
+    "Arn": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_AdministratorAccess_abc123/your.email@company.com"
+}
+```
+</TerminalOutput>
+
+### Multiple Accounts
+
+Add more profiles for other accounts or permission sets:
+
+```bash
+aws configure sso --profile dev-admin
+```
+
+Or manually add to `~/.aws/config`:
+
+```ini
+[profile dev-admin]
+sso_session = my-sso
+sso_account_id = 987654321098
+sso_role_name = AdministratorAccess
+region = us-east-1
+output = json
+
+[profile prod-readonly]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = ViewOnlyAccess
+region = us-east-1
+output = json
+```
+
+One `aws sso login` authenticates you to the SSO session—all profiles sharing that session work immediately.
+
+<Alert type="tip" title="The Fine Line: Identity Center">
+
+| ❌ Under-engineering | ✅ Right-sized | ❌ Over-engineering |
+|---------------------|----------------|---------------------|
+| Skip SSO, use access keys | Identity Center for all human access | Custom SAML IdP for a 2-person team |
+| Share one SSO user | One user per person | Separate SSO instance per environment |
+| No permission sets | Permission sets matching job functions | 50 granular permission sets before you need them |
+
+</Alert>
+
+---
+
+## Named Profiles: Managing Multiple Identities
+
+Whether you use SSO or access keys, profiles let you manage multiple AWS identities without confusion.
+
+### The Two Config Files
+
+AWS CLI uses two files:
+
+<FileTree>
+~/.aws/
+  config          # Profiles, regions, output format, SSO settings
+  credentials     # Access keys (only if using long-term credentials)
+</FileTree>
+
+**With SSO, you only need `config`.** The `credentials` file is for legacy access key storage.
+
+### Profile Structure
+
+```ini
+# ~/.aws/config
+
+# Default profile (used when no --profile specified)
+[default]
+region = us-east-1
+output = json
+
+# SSO-based profile
+[profile prod-admin]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = AdministratorAccess
+region = us-east-1
+
+# Role assumption profile (covered later)
+[profile deploy-role]
+source_profile = prod-admin
+role_arn = arn:aws:iam::123456789012:role/DeployRole
+region = us-east-1
+
+# Legacy access key profile (avoid for humans)
+[profile legacy-service]
+# credentials stored in ~/.aws/credentials
+region = us-east-1
+```
+
+### Using Profiles
+
+**Method 1: Flag**
+```bash
+aws s3 ls --profile prod-admin
+```
+
+**Method 2: Environment variable**
+```bash
+export AWS_PROFILE=prod-admin
+aws s3 ls  # Uses prod-admin
+```
+
+**Method 3: Default profile**
+
+If `[default]` is configured, commands without `--profile` use it. But explicit is better than implicit—use `AWS_PROFILE` or `--profile`.
+
+### Profile Naming Conventions
+
+Use a consistent naming scheme:
+
+```
+{environment}-{permission-level}
+```
+
+Examples:
+- `prod-admin` — Production account, admin access
+- `prod-readonly` — Production account, read-only
+- `dev-admin` — Development account, admin access
+- `staging-deploy` — Staging account, deployment permissions
+
+This makes it obvious what you're targeting before you run a command.
+
+---
+
+## Legacy Setup: Access Keys + aws-vault
+
+If you're on a solo AWS account without Organizations, or working with a legacy setup that doesn't have Identity Center, aws-vault provides similar security benefits.
+
+### Why aws-vault?
+
+Plain access keys in `~/.aws/credentials` are:
+- Stored in plain text
+- Never rotated automatically
+- Easily leaked via backups, screen shares, or dotfile repos
+
+aws-vault:
+- Stores keys in your OS keychain (encrypted)
+- Uses STS to issue short-term credentials
+- Never exposes long-term keys to your shell
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         aws-vault FLOW                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌──────────────────┐                                                      │
+│   │ Long-term keys   │  Stored encrypted in OS keychain                     │
+│   │ (Access Key ID + │  (macOS Keychain, Windows Credential Manager,        │
+│   │  Secret Key)     │   Linux secret-service)                              │
+│   └────────┬─────────┘                                                      │
+│            │                                                                 │
+│            │  aws-vault exec profile -- command                             │
+│            ▼                                                                 │
+│   ┌──────────────────┐                                                      │
+│   │                  │                                                      │
+│   │   aws-vault      │──────▶ Calls STS GetSessionToken                     │
+│   │                  │                                                      │
+│   └────────┬─────────┘                                                      │
+│            │                                                                 │
+│            │  Receives temporary credentials (1 hour)                        │
+│            ▼                                                                 │
+│   ┌──────────────────┐                                                      │
+│   │                  │                                                      │
+│   │  Your command    │  Runs with short-term credentials                    │
+│   │  runs            │  in environment variables                            │
+│   │                  │                                                      │
+│   └──────────────────┘                                                      │
+│                                                                              │
+│   Long-term keys NEVER appear in environment or plain files.                │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Installing aws-vault
+
+<PanelSwitcher defaultActive="macos">
+  <Panel label="macOS" value="macos">
+    ```bash
+    brew install aws-vault
+    ```
+  </Panel>
+
+  <Panel label="Linux" value="linux">
+    ```bash
+    # Download the latest release
+    sudo curl -L -o /usr/local/bin/aws-vault \
+      https://github.com/99designs/aws-vault/releases/latest/download/aws-vault-linux-amd64
+    sudo chmod 755 /usr/local/bin/aws-vault
+    ```
+
+    **Note:** On Linux, aws-vault needs a secrets backend. Install `pass` or `gnome-keyring`:
+    ```bash
+    # For pass (recommended)
+    sudo apt install pass
+    gpg --gen-key
+    pass init "your-gpg-key-id"
+
+    export AWS_VAULT_BACKEND=pass
+    ```
+  </Panel>
+
+  <Panel label="Windows" value="windows">
+    ```powershell
+    # Using Chocolatey
+    choco install aws-vault
+
+    # Or Scoop
+    scoop install aws-vault
+    ```
+  </Panel>
+</PanelSwitcher>
+
+### Adding Credentials
+
+First, create access keys for your IAM user (from Part 1):
+
+<GuideStep title="Create Access Keys" syncKey="create-access-keys">
+  1. Go to **IAM Console** → **Users** → Your admin user
+  2. Select **Security credentials** tab
+  3. Click **Create access key**
+  4. Select **Command Line Interface (CLI)**
+  5. Check the confirmation box
+  6. Click **Create access key**
+  7. **Copy both keys immediately** — you won't see the secret key again
+</GuideStep>
+
+Now add them to aws-vault (NOT to `~/.aws/credentials`):
+
+```bash
+aws-vault add prod-admin
+```
+
+<TerminalOutput title="aws-vault Prompts">
+```
+Enter Access Key ID: AKIAIOSFODNN7EXAMPLE
+Enter Secret Access Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+Added credentials to profile "prod-admin" in vault
+```
+</TerminalOutput>
+
+The keys are now encrypted in your OS keychain. Verify they're not in plain text:
+
+```bash
+cat ~/.aws/credentials  # Should be empty or not exist
+```
+
+### Using aws-vault
+
+**Run a single command:**
+```bash
+aws-vault exec prod-admin -- aws s3 ls
+```
+
+**Open a subshell with credentials:**
+```bash
+aws-vault exec prod-admin
+# Now in a subshell with temporary credentials
+aws s3 ls
+aws ec2 describe-instances
+exit  # Credentials gone
+```
+
+**Check what's in your vault:**
+```bash
+aws-vault list
+```
+
+<TerminalOutput title="Vault Contents">
+```
+Profile                  Credentials              Sessions
+=======                  ===========              ========
+prod-admin               prod-admin               sts.GetSessionToken:12h0m0s
+dev-admin                dev-admin                -
+```
+</TerminalOutput>
+
+### Configuring Profiles for aws-vault
+
+Even with aws-vault, you still use `~/.aws/config` for profile settings:
+
+```ini
+# ~/.aws/config
+
+[profile prod-admin]
+region = us-east-1
+output = json
+mfa_serial = arn:aws:iam::123456789012:mfa/your-username
+
+[profile dev-admin]
+region = us-east-1
+output = json
+```
+
+With `mfa_serial` set, aws-vault prompts for your MFA code when getting credentials:
+
+```bash
+aws-vault exec prod-admin -- aws s3 ls
+Enter MFA code for arn:aws:iam::123456789012:mfa/your-username: 123456
+```
+
+<Alert type="tip">
+
+**MFA + aws-vault is powerful.** Every command requires MFA, and credentials last only 1 hour by default. Even if someone accesses your machine, they can't use your AWS access without your MFA device.
+
+</Alert>
+
+---
+
+## Assuming Roles Locally
+
+Sometimes you need to assume a different role—for deployment, cross-account access, or elevated permissions. Both SSO and aws-vault support this.
+
+### Role Assumption with SSO Profiles
+
+If your Identity Center permission set maps to a role, you're already assuming that role. But for additional role chaining:
+
+```ini
+# ~/.aws/config
+
+[profile prod-admin]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = AdministratorAccess
+region = us-east-1
+
+[profile prod-deploy]
+source_profile = prod-admin
+role_arn = arn:aws:iam::123456789012:role/DeployRole
+region = us-east-1
+```
+
+When you use `prod-deploy`, the CLI:
+1. Gets credentials from `prod-admin` (via SSO)
+2. Calls `sts:AssumeRole` on `DeployRole`
+3. Returns temporary credentials for `DeployRole`
+
+```bash
+aws sts get-caller-identity --profile prod-deploy
+```
+
+### Role Assumption with aws-vault
+
+```ini
+# ~/.aws/config
+
+[profile prod-admin]
+region = us-east-1
+mfa_serial = arn:aws:iam::123456789012:mfa/your-username
+
+[profile prod-deploy]
+source_profile = prod-admin
+role_arn = arn:aws:iam::123456789012:role/DeployRole
+mfa_serial = arn:aws:iam::123456789012:mfa/your-username
+```
+
+```bash
+aws-vault exec prod-deploy -- aws sts get-caller-identity
+```
+
+aws-vault handles the MFA prompt and role assumption automatically.
+
+### Cross-Account Role Assumption
+
+For accessing resources in another AWS account:
+
+```ini
+[profile other-account-admin]
+source_profile = prod-admin
+role_arn = arn:aws:iam::999888777666:role/CrossAccountAdmin
+region = us-east-1
+```
+
+This assumes:
+1. You have a role `CrossAccountAdmin` in account `999888777666`
+2. That role's trust policy allows your identity to assume it
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::123456789012:root"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+---
+
+## The Credential Chain: How AWS Finds Your Credentials
+
+When you run an AWS command, the SDK looks for credentials in this order:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    AWS CREDENTIAL RESOLUTION ORDER                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   1. Environment Variables                                                   │
+│      AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN            │
+│                              │                                               │
+│                              ▼ (if not found)                                │
+│   2. Shared Credentials File                                                 │
+│      ~/.aws/credentials [profile] or [default]                              │
+│                              │                                               │
+│                              ▼ (if not found)                                │
+│   3. Shared Config File                                                      │
+│      ~/.aws/config (for SSO, role assumption)                               │
+│                              │                                               │
+│                              ▼ (if not found)                                │
+│   4. Container Credentials                                                   │
+│      ECS task role, EKS pod identity                                        │
+│                              │                                               │
+│                              ▼ (if not found)                                │
+│   5. Instance Profile                                                        │
+│      EC2 instance metadata service (IMDS)                                   │
+│                              │                                               │
+│                              ▼ (if not found)                                │
+│   6. Error: Unable to locate credentials                                    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why This Matters
+
+**Environment variables override everything.** If you have `AWS_ACCESS_KEY_ID` set from an old session, it wins over your carefully configured SSO profile.
+
+Debug credential issues with:
+
+```bash
+# What profile is active?
+echo $AWS_PROFILE
+
+# Any credentials in environment?
+env | grep AWS
+
+# Who does the CLI think you are?
+aws sts get-caller-identity
+```
+
+### Common Pitfalls
+
+| Problem | Symptom | Fix |
+|---------|---------|-----|
+| Stale env vars | Wrong account/user | `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN` |
+| Wrong profile | "Access denied" for resources you own | Check `AWS_PROFILE` or use `--profile` |
+| SSO session expired | "Token has expired" | Run `aws sso login --profile xxx` |
+| Mixed auth methods | Unpredictable behavior | Pick one method, clean up the others |
+
+<Alert type="caution">
+
+**Clean up old credentials.** If you previously used access keys, remove them from `~/.aws/credentials` and environment variables after switching to SSO or aws-vault. Mixed authentication causes confusion.
+
+</Alert>
+
+---
+
+## Quick Wins
+
+### Shell Aliases
+
+Add to your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+# Quick profile switching
+alias awsp='export AWS_PROFILE=$(aws configure list-profiles | fzf)'
+
+# Show current identity
+alias awswho='aws sts get-caller-identity'
+
+# SSO login shortcut
+alias awslogin='aws sso login --profile'
+
+# aws-vault shortcuts (if using)
+alias ave='aws-vault exec'
+alias avl='aws-vault list'
+```
+
+With `fzf` installed, `awsp` gives you an interactive profile picker.
+
+### Auto-Completion
+
+<PanelSwitcher defaultActive="bash">
+  <Panel label="Bash" value="bash">
+    ```bash
+    # Add to ~/.bashrc
+    complete -C '/usr/local/bin/aws_completer' aws
+    ```
+  </Panel>
+
+  <Panel label="Zsh" value="zsh">
+    ```bash
+    # Add to ~/.zshrc
+    autoload bashcompinit && bashcompinit
+    autoload -Uz compinit && compinit
+    complete -C '/usr/local/bin/aws_completer' aws
+    ```
+  </Panel>
+</PanelSwitcher>
+
+Now `aws s3<tab>` shows available subcommands.
+
+### Output Formats
+
+Configure default output format per profile:
+
+```ini
+[profile prod-admin]
+output = json    # Default: verbose, parseable
+# output = table # Human-readable tables
+# output = text  # Tab-separated, good for scripting
+# output = yaml  # YAML format
+```
+
+Or override per command:
+
+```bash
+aws ec2 describe-instances --output table
+```
+
+### Useful CLI Options
+
+```bash
+# Dry run (see what would happen)
+aws ec2 run-instances --dry-run ...
+
+# Query specific fields with JMESPath
+aws ec2 describe-instances --query 'Reservations[*].Instances[*].InstanceId' --output text
+
+# Filter results
+aws ec2 describe-instances --filters "Name=instance-state-name,Values=running"
+
+# Pagination for large results
+aws s3api list-objects-v2 --bucket my-bucket --max-items 100
+```
+
+---
+
+## Validation Checklist
+
+Verify your local AWS setup is complete:
+
+<ValidationChecklist
+  items={[
+    {
+      category: "AWS CLI",
+      tasks: [
+        { text: "AWS CLI v2 installed", syncKey: "cli-installed" },
+        { text: "CLI version verified (2.x)", syncKey: "cli-version" },
+        { text: "Auto-completion configured", syncKey: "cli-autocomplete" }
+      ]
+    },
+    {
+      category: "AUTHENTICATION",
+      tasks: [
+        { text: "IAM Identity Center configured OR aws-vault set up", syncKey: "auth-configured" },
+        { text: "MFA enabled on your identity", syncKey: "auth-mfa" },
+        { text: "No plain text credentials in ~/.aws/credentials", syncKey: "auth-no-plaintext" }
+      ]
+    },
+    {
+      category: "PROFILES",
+      tasks: [
+        { text: "Named profiles created for each environment", syncKey: "profiles-created" },
+        { text: "Profile naming convention established", syncKey: "profiles-naming" },
+        { text: "aws sts get-caller-identity works", syncKey: "profiles-verified" }
+      ]
+    },
+    {
+      category: "CLEANUP",
+      tasks: [
+        { text: "Old environment variables removed", syncKey: "cleanup-env" },
+        { text: "No AWS keys in shell config files", syncKey: "cleanup-shell" },
+        { text: "No AWS keys in .env files", syncKey: "cleanup-dotenv" }
+      ]
+    }
+  ]}
+/>
+
+### Verification Commands
+
+Run these to confirm your setup:
+
+```bash
+# CLI version
+aws --version
+
+# Current identity
+aws sts get-caller-identity --profile your-profile
+
+# Check for leaked credentials
+grep -r "AKIA" ~ --include="*.env" --include=".*rc" --include=".*profile" 2>/dev/null
+
+# List your profiles
+aws configure list-profiles
+```
+
+---
+
+## Key Takeaways
+
+1. **IAM Identity Center is the modern standard.** Short-term credentials, automatic rotation, browser-based auth. Use it if you have AWS Organizations (even with one account).
+
+2. **aws-vault is your fallback.** If you must use access keys, never store them in plain text. aws-vault encrypts them and issues short-term credentials via STS.
+
+3. **Named profiles prevent disasters.** Explicit `--profile` flags or `AWS_PROFILE` make it obvious which account you're targeting. No more "I thought I was in dev."
+
+4. **Clean up old credentials.** Environment variables, `~/.aws/credentials`, `.env` files—audit them all. Mixed authentication methods cause unpredictable behavior.
+
+5. **The credential chain has an order.** Environment variables win. Know the order, debug with `env | grep AWS` and `aws sts get-caller-identity`.
+
+Your local environment is now secure. No more access keys in Slack, no more plain text credentials, no more "which account am I in?" Next up: [Part 4 — Terraform Fundamentals](/blog/aws-for-startups/04-terraform-fundamentals), where we codify everything we've done manually.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
