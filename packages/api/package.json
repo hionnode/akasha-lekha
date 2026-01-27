@@ -1,0 +1,24 @@
+{
+  "name": "@akasha/api",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@akasha/types": "workspace:*",
+    "@aws-sdk/client-dynamodb": "^3.750.0",
+    "@aws-sdk/lib-dynamodb": "^3.750.0",
+    "jsonwebtoken": "^9.0.2",
+    "sst": "^3.10.10"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.147",
+    "@types/jsonwebtoken": "^9.0.9",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}
