@@ -183,8 +183,24 @@ Configure in **Settings → Secrets and variables → Actions**:
 |--------|---------|-------------|
 | `CLOUDFLARE_API_TOKEN` | Web workflows | Cloudflare API token |
 | `CLOUDFLARE_ACCOUNT_ID` | Web workflows | Cloudflare account ID |
-| `AWS_ACCESS_KEY_ID` | API workflow | AWS IAM access key |
-| `AWS_SECRET_ACCESS_KEY` | API workflow | AWS IAM secret key |
+| `AWS_ROLE_ARN` | API workflow | IAM role ARN for OIDC |
+
+### AWS Authentication (OIDC)
+
+The API workflow uses **OIDC** (OpenID Connect) for keyless AWS authentication:
+
+- No long-lived credentials stored in GitHub
+- Short-lived tokens (auto-refresh)
+- Full CloudTrail audit trail
+- See **[AWS OIDC Setup Guide](../aws-oidc-setup.md)** for configuration
+
+```yaml
+# How it works in the workflow
+- uses: aws-actions/configure-aws-credentials@v4
+  with:
+    role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+    aws-region: ap-south-1
+```
 
 ### SST Secrets (per stage)
 

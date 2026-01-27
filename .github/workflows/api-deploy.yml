@@ -1,6 +1,8 @@
 # .github/workflows/api-deploy.yml
 #
 # Deploys API (SST) to AWS when API or infrastructure changes
+# Uses OIDC for secure, keyless AWS authentication
+#
 # Preview: Deploys to 'preview' stage on PR
 # Production: Deploys to 'prod' stage on merge to main
 
@@ -9,7 +11,7 @@ name: API Deploy
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, closed]
     paths:
       - 'packages/api/**'
       - 'packages/types/**'
@@ -42,7 +44,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
-  id-token: write  # For AWS OIDC
+  id-token: write  # Required for OIDC
 
 env:
   AWS_REGION: ap-south-1
@@ -51,6 +53,8 @@ jobs:
   deploy:
     name: Deploy API
     runs-on: ubuntu-latest
+    # Don't deploy on PR close (cleanup job handles that)
+    if: github.event.action != 'closed'
 
     environment:
       name: ${{ github.event_name == 'pull_request' && 'api-preview' || 'api-production' }}
@@ -85,11 +89,12 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
 
-      - name: Configure AWS Credentials
+      # OIDC authentication - no static credentials needed
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Install Dependencies
@@ -126,6 +131,7 @@ jobs:
           | **API URL** | ${{ steps.deploy.outputs.api_url || 'See SST output' }} |
           | **Commit** | \`${{ github.sha }}\` |
           | **Region** | ${{ env.AWS_REGION }} |
+          | **Auth** | OIDC (keyless) |
           | **Triggered by** | @${{ github.actor }} |
 
           ### Test the API
@@ -179,7 +185,7 @@ jobs:
               body += `[View logs](${runUrl})\n\n`;
             }
 
-            body += `---\n<sub>SST · Stage: ${stage} · [Logs](${runUrl})</sub>`;
+            body += `---\n<sub>SST · Stage: ${stage} · OIDC Auth · [Logs](${runUrl})</sub>`;
 
             if (botComment) {
               await github.rest.issues.updateComment({
@@ -202,6 +208,11 @@ jobs:
     name: Cleanup Preview
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -217,11 +228,11 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-cleanup-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Install Dependencies
