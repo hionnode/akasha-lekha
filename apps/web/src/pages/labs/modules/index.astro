@@ -1,0 +1,82 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import LabsHeader from '../../../components/labs/layout/LabsHeader.astro';
+import LabsSidebar from '../../../components/labs/layout/LabsSidebar.astro';
+import Footer from '../../../components/layout/Footer.astro';
+import ModuleCard from '../../../components/labs/ModuleCard.astro';
+import { mockModules } from '../../../utils/labs/mocks';
+
+// For MVP, use mock data
+const modules = mockModules;
+---
+
+<Layout
+  title="Learning Modules | Labs | works-on-my.cloud"
+  description="Browse all learning modules. Start with Linux fundamentals and progress through networking, containers, and Kubernetes."
+>
+  <div class="min-h-screen flex flex-col bg-bg-primary">
+    <LabsHeader currentPath="/labs/modules" />
+
+    <div class="flex-1 flex">
+      {/* Sidebar - hidden on mobile */}
+      <div class="hidden lg:block w-64 flex-shrink-0 border-r border-border p-4">
+        <LabsSidebar modules={modules} />
+      </div>
+
+      {/* Main content */}
+      <main class="flex-1 py-8">
+        <div class="container mx-auto px-4 max-w-4xl">
+          <div class="mb-8">
+            <h1 class="text-3xl font-bold text-fg-primary mb-2">
+              Learning Modules
+            </h1>
+            <p class="text-fg-secondary">
+              Follow the learning path or jump to any available module.
+              Complete exercises in order for the best learning experience.
+            </p>
+          </div>
+
+          {/* Module grid */}
+          <div class="space-y-4">
+            {modules.map((module) => (
+              <ModuleCard
+                id={module.id}
+                title={module.title}
+                description={module.description}
+                icon={module.icon}
+                exerciseCount={module.exerciseCount}
+                estimatedTime={module.estimatedTime}
+                status={module.status}
+              />
+            ))}
+          </div>
+
+          {/* Info box */}
+          <div class="mt-8 p-4 bg-bg-secondary border border-border rounded-lg">
+            <h3 class="flex items-center gap-2 text-sm font-semibold text-fg-primary mb-2">
+              <svg class="w-4 h-4 text-accent-cyan" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              New to Labs?
+            </h3>
+            <p class="text-sm text-fg-secondary mb-3">
+              Start by setting up the CLI, then work through the Linux Fundamentals module.
+              Each exercise builds on the previous one.
+            </p>
+            <a
+              href="/labs/setup"
+              class="inline-flex items-center gap-1 text-sm text-accent-blue hover:text-accent-cyan transition-colors"
+            >
+              Get started with setup
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+              </svg>
+            </a>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <Footer />
+  </div>
+</Layout>

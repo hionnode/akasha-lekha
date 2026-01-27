@@ -1,0 +1,140 @@
+---
+id: linux-03
+module: linux
+order: 3
+title: Create a systemd Service
+description: Learn how to create and manage a systemd service unit to run applications as system services.
+difficulty: beginner
+estimatedTime: "15m"
+objectives:
+  - Understand systemd service unit files
+  - Create a custom service unit
+  - Enable services to start on boot
+  - Check service status and logs
+  - Use systemctl for service management
+verificationCriteria:
+  - Unit file exists at /etc/systemd/system/myapp.service
+  - Service is enabled (starts on boot)
+  - Service is currently running
+  - Application responds on port 5000
+hints:
+  - "Start by creating a file at /etc/systemd/system/myapp.service"
+  - "Use 'systemctl daemon-reload' after creating the unit file"
+  - "The ExecStart should point to: /usr/bin/python3 /home/learner/myapp.py"
+  - "Don't forget to enable AND start the service"
+cliCommand: infra-learn launch linux-03
+---
+
+## Introduction
+
+**systemd** is the init system used by most modern Linux distributions (Ubuntu, Debian, CentOS, Fedora, etc.). It manages system services, handling everything from starting services at boot to monitoring their status.
+
+## Service Unit Files
+
+Service unit files define how systemd should manage a service. They're stored in `/etc/systemd/system/` for user-created services.
+
+### Basic Structure
+
+```ini
+[Unit]
+Description=My Application Service
+After=network.target
+
+[Service]
+Type=simple
+User=learner
+WorkingDirectory=/home/learner
+ExecStart=/usr/bin/python3 /home/learner/myapp.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Sections Explained
+
+**[Unit]**
+- `Description` - Human-readable description
+- `After` - Start after these units
+
+**[Service]**
+- `Type` - Service type (simple, forking, oneshot, etc.)
+- `User` - Run as this user
+- `WorkingDirectory` - Set working directory
+- `ExecStart` - Command to start the service
+- `Restart` - When to restart (always, on-failure, etc.)
+- `RestartSec` - Seconds to wait before restart
+
+**[Install]**
+- `WantedBy` - Target that wants this service
+
+## Managing Services with systemctl
+
+```bash
+# Reload systemd after adding/modifying unit files
+$ sudo systemctl daemon-reload
+
+# Enable service (start on boot)
+$ sudo systemctl enable myapp
+
+# Start service now
+$ sudo systemctl start myapp
+
+# Enable and start in one command
+$ sudo systemctl enable --now myapp
+
+# Check service status
+$ sudo systemctl status myapp
+
+# Stop service
+$ sudo systemctl stop myapp
+
+# Restart service
+$ sudo systemctl restart myapp
+
+# View logs
+$ sudo journalctl -u myapp -f
+```
+
+## Your Task
+
+A Python application is provided at `/home/learner/myapp.py`. Create a systemd service that:
+
+1. Runs the application as the `learner` user
+2. Starts automatically on boot
+3. Restarts if it crashes
+4. Listens on port 5000
+
+### Steps
+
+1. Create the unit file at `/etc/systemd/system/myapp.service`
+2. Reload systemd configuration
+3. Enable the service
+4. Start the service
+5. Verify it's running with `curl http://localhost:5000`
+
+### Template
+
+Use this as your starting point:
+
+```ini
+[Unit]
+Description=My Python App
+After=network.target
+
+[Service]
+Type=simple
+User=learner
+WorkingDirectory=/home/learner
+ExecStart=/usr/bin/python3 /home/learner/myapp.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Launch Your Sandbox
+
+Copy the command below to start this exercise:

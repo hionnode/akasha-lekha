@@ -1,0 +1,105 @@
+---
+id: linux-01
+module: linux
+order: 1
+title: File System Navigation
+description: Learn to navigate the Linux file system using essential command-line tools.
+difficulty: beginner
+estimatedTime: "10m"
+objectives:
+  - Use pwd to display the current working directory
+  - Navigate directories with cd
+  - List files and directories with ls
+  - Understand absolute vs relative paths
+  - Create directories with mkdir
+verificationCriteria:
+  - Created directory /home/learner/projects
+  - Created directory /home/learner/projects/webapp
+  - Created file /home/learner/projects/webapp/README.md
+hints:
+  - "Use mkdir -p to create nested directories in one command"
+  - "Use touch to create empty files"
+  - "Remember: absolute paths start with /, relative paths don't"
+cliCommand: infra-learn launch linux-01
+---
+
+## Introduction
+
+The Linux file system is organized as a hierarchical tree structure, starting from the root directory `/`. Understanding how to navigate this structure is fundamental to working with Linux.
+
+## Key Commands
+
+### `pwd` - Print Working Directory
+
+Shows your current location in the file system:
+
+```bash
+$ pwd
+/home/learner
+```
+
+### `ls` - List Directory Contents
+
+Lists files and directories:
+
+```bash
+$ ls           # Basic listing
+$ ls -l        # Long format with details
+$ ls -la       # Include hidden files (starting with .)
+$ ls -lh       # Human-readable file sizes
+```
+
+### `cd` - Change Directory
+
+Navigate to different directories:
+
+```bash
+$ cd /var/log        # Absolute path (starts with /)
+$ cd projects        # Relative path (from current directory)
+$ cd ..              # Go up one level
+$ cd ~               # Go to home directory
+$ cd -               # Go to previous directory
+```
+
+### `mkdir` - Make Directory
+
+Create new directories:
+
+```bash
+$ mkdir myproject              # Create single directory
+$ mkdir -p parent/child/grand  # Create nested directories
+```
+
+## File System Structure
+
+```
+/                    # Root directory
+├── home/            # User home directories
+│   └── learner/     # Your home directory
+├── etc/             # System configuration files
+├── var/             # Variable data (logs, etc.)
+├── usr/             # User programs
+└── tmp/             # Temporary files
+```
+
+## Your Task
+
+Create a project structure for a web application:
+
+1. Navigate to your home directory
+2. Create a `projects` directory
+3. Inside `projects`, create a `webapp` directory
+4. Create a `README.md` file inside `webapp`
+
+Your final structure should look like:
+
+```
+/home/learner/
+└── projects/
+    └── webapp/
+        └── README.md
+```
+
+## Launch Your Sandbox
+
+Copy the command below to start this exercise:

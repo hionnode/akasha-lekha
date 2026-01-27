@@ -15,12 +15,14 @@ import rehypeCodeSwitcherPOC from './src/utils/rehypeCodeSwitcher.poc.ts';
 
 import cloudflare from '@astrojs/cloudflare';
 
+import solidJs from '@astrojs/solid-js';
+
 // https://astro.build/config
 export default defineConfig({
   // Static site generation
   output: 'static',
 
-  integrations: [mdx()],
+  integrations: [mdx(), solidJs()],
 
   markdown: {
     shikiConfig: {

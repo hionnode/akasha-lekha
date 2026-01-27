@@ -1,0 +1,181 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import LabsHeader from '../../components/labs/layout/LabsHeader.astro';
+import Footer from '../../components/layout/Footer.astro';
+import ModuleCard from '../../components/labs/ModuleCard.astro';
+import { mockModules } from '../../utils/labs/mocks';
+
+// For MVP, use mock data. Later this will come from the API.
+const modules = mockModules;
+
+const featuredModule = modules.find((m) => m.status === 'available');
+---
+
+<Layout
+  title="Labs | works-on-my.cloud"
+  description="Learn infrastructure hands-on with interactive exercises. Master Linux, networking, containers, and Kubernetes."
+>
+  <div class="min-h-screen flex flex-col bg-bg-primary">
+    <LabsHeader currentPath="/labs" />
+
+    <main class="flex-1">
+      {/* Hero Section */}
+      <section class="relative py-20 overflow-hidden">
+        <div class="absolute inset-0 bg-gradient-to-br from-accent-blue/5 via-transparent to-accent-cyan/5" />
+
+        <div class="container mx-auto px-4 relative">
+          <div class="max-w-3xl">
+            <span class="inline-flex items-center gap-2 px-3 py-1 text-sm font-medium text-accent-cyan bg-accent-cyan/10 rounded-full mb-6">
+              <span class="w-2 h-2 bg-accent-cyan rounded-full animate-pulse" />
+              Now in Beta
+            </span>
+
+            <h1 class="text-4xl md:text-5xl font-bold text-fg-primary mb-6">
+              Learn Infrastructure
+              <span class="text-accent-blue"> Hands-On</span>
+            </h1>
+
+            <p class="text-xl text-fg-secondary mb-8 leading-relaxed">
+              Stop reading tutorials. Start building. Our interactive labs give you
+              real Linux environments to practice in, with instant verification of your work.
+            </p>
+
+            <div class="flex flex-wrap gap-4">
+              <a
+                href="/labs/setup"
+                class="inline-flex items-center gap-2 px-6 py-3 text-lg font-semibold text-bg-primary bg-accent-blue hover:bg-accent-blue/90 rounded-lg transition-colors"
+              >
+                Get Started
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                </svg>
+              </a>
+              <a
+                href="/labs/modules"
+                class="inline-flex items-center gap-2 px-6 py-3 text-lg font-semibold text-fg-primary bg-bg-tertiary hover:bg-bg-tertiary/80 border border-border rounded-lg transition-colors"
+              >
+                Browse Modules
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* How it Works */}
+      <section class="py-16 border-y border-border">
+        <div class="container mx-auto px-4">
+          <h2 class="text-2xl font-bold text-fg-primary mb-12 text-center">
+            How It Works
+          </h2>
+
+          <div class="grid md:grid-cols-3 gap-8 max-w-4xl mx-auto">
+            <div class="text-center">
+              <div class="w-16 h-16 mx-auto mb-4 flex items-center justify-center rounded-full bg-accent-blue/10 text-accent-blue">
+                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-fg-primary mb-2">1. Install the CLI</h3>
+              <p class="text-sm text-fg-secondary">
+                One command to install. Works with Docker locally or your AWS account.
+              </p>
+            </div>
+
+            <div class="text-center">
+              <div class="w-16 h-16 mx-auto mb-4 flex items-center justify-center rounded-full bg-accent-green/10 text-accent-green">
+                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-fg-primary mb-2">2. Launch a Sandbox</h3>
+              <p class="text-sm text-fg-secondary">
+                Spin up a real Linux environment in seconds. No setup required.
+              </p>
+            </div>
+
+            <div class="text-center">
+              <div class="w-16 h-16 mx-auto mb-4 flex items-center justify-center rounded-full bg-accent-cyan/10 text-accent-cyan">
+                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-fg-primary mb-2">3. Verify Your Work</h3>
+              <p class="text-sm text-fg-secondary">
+                Run verification to check your solution. Progress syncs automatically.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Featured Module */}
+      {featuredModule && (
+        <section class="py-16">
+          <div class="container mx-auto px-4">
+            <div class="flex items-center justify-between mb-8">
+              <h2 class="text-2xl font-bold text-fg-primary">
+                Start Learning
+              </h2>
+              <a
+                href="/labs/modules"
+                class="text-sm text-accent-blue hover:text-accent-cyan transition-colors"
+              >
+                View all modules →
+              </a>
+            </div>
+
+            <div class="max-w-2xl">
+              <ModuleCard
+                id={featuredModule.id}
+                title={featuredModule.title}
+                description={featuredModule.description}
+                icon={featuredModule.icon}
+                exerciseCount={featuredModule.exerciseCount}
+                estimatedTime={featuredModule.estimatedTime}
+                status={featuredModule.status}
+              />
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Learning Path Preview */}
+      <section class="py-16 bg-bg-secondary/50">
+        <div class="container mx-auto px-4">
+          <h2 class="text-2xl font-bold text-fg-primary mb-8 text-center">
+            Learning Path
+          </h2>
+
+          <div class="flex flex-wrap justify-center gap-4 max-w-3xl mx-auto">
+            {modules.map((module, index) => (
+              <div class="flex items-center gap-3">
+                <div
+                  class:list={[
+                    'flex items-center gap-2 px-4 py-2 rounded-lg border',
+                    module.status === 'available'
+                      ? 'bg-bg-secondary border-accent-blue/30 text-fg-primary'
+                      : 'bg-bg-tertiary border-border text-fg-muted opacity-60',
+                  ]}
+                >
+                  {module.icon && <span>{module.icon}</span>}
+                  <span class="font-medium">{module.title}</span>
+                </div>
+                {index < modules.length - 1 && (
+                  <svg class="w-4 h-4 text-fg-muted hidden sm:block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                  </svg>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <p class="text-center text-sm text-fg-muted mt-6">
+            More modules coming soon!
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <Footer />
+  </div>
+</Layout>

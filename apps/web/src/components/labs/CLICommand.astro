@@ -1,0 +1,18 @@
+---
+import CLICommandCopy from './islands/CLICommandCopy';
+
+interface Props {
+  command: string;
+  description?: string;
+  class?: string;
+}
+
+const { command, description, class: className } = Astro.props;
+---
+
+<div class:list={['cli-command', className]}>
+  {description && (
+    <p class="mb-2 text-sm text-fg-secondary">{description}</p>
+  )}
+  <CLICommandCopy client:load command={command} />
+</div>

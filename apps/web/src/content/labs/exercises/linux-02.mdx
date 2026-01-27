@@ -1,0 +1,118 @@
+---
+id: linux-02
+module: linux
+order: 2
+title: Process Management
+description: Learn to view, manage, and control processes running on a Linux system.
+difficulty: beginner
+estimatedTime: "15m"
+objectives:
+  - View running processes with ps and top
+  - Understand process states and priorities
+  - Send signals to processes
+  - Run processes in the background
+  - Use job control commands
+verificationCriteria:
+  - Background process running with name "sleep"
+  - Process has been started by the learner user
+  - Process is running in the background (not foreground)
+hints:
+  - "Use & at the end of a command to run it in the background"
+  - "Use jobs to see background jobs"
+  - "Use ps aux to see all processes"
+cliCommand: infra-learn launch linux-02
+---
+
+## Introduction
+
+In Linux, a **process** is a running instance of a program. Understanding how to view and manage processes is essential for system administration and troubleshooting.
+
+## Viewing Processes
+
+### `ps` - Process Status
+
+```bash
+$ ps                 # Show processes in current terminal
+$ ps aux             # Show all processes (BSD style)
+$ ps -ef             # Show all processes (System V style)
+$ ps aux | grep nginx  # Filter for specific process
+```
+
+**Common columns:**
+- `PID` - Process ID (unique identifier)
+- `USER` - Process owner
+- `%CPU` - CPU usage percentage
+- `%MEM` - Memory usage percentage
+- `STAT` - Process state
+- `COMMAND` - Command that started the process
+
+### `top` / `htop` - Interactive Process Viewer
+
+```bash
+$ top                # Real-time process viewer
+$ htop               # Enhanced version (if installed)
+```
+
+Press `q` to exit, `k` to kill a process, `h` for help.
+
+### `pgrep` - Find Process by Name
+
+```bash
+$ pgrep nginx        # Get PID of nginx process
+$ pgrep -l nginx     # Include process name
+```
+
+## Process States
+
+| State | Code | Description |
+|-------|------|-------------|
+| Running | R | Currently executing or ready to run |
+| Sleeping | S | Waiting for an event |
+| Stopped | T | Stopped (e.g., Ctrl+Z) |
+| Zombie | Z | Terminated but not cleaned up |
+
+## Signals
+
+Signals are used to communicate with processes:
+
+```bash
+$ kill PID           # Send SIGTERM (graceful shutdown)
+$ kill -9 PID        # Send SIGKILL (force kill)
+$ kill -STOP PID     # Pause process
+$ kill -CONT PID     # Resume process
+$ killall nginx      # Kill all processes by name
+```
+
+## Background & Foreground
+
+### Running in Background
+
+```bash
+$ sleep 100 &        # Start in background
+$ jobs               # List background jobs
+$ fg %1              # Bring job 1 to foreground
+$ bg %1              # Resume job 1 in background
+```
+
+### Ctrl+Z and Ctrl+C
+
+- `Ctrl+C` - Terminate foreground process (SIGINT)
+- `Ctrl+Z` - Suspend foreground process (SIGTSTP)
+
+## Your Task
+
+1. Start a long-running process in the background
+2. Verify it's running with `ps`
+3. Check its job number with `jobs`
+
+Run this command to start the background process:
+
+```bash
+sleep 300 &
+```
+
+Then verify it's running.
+
+## Launch Your Sandbox
+
+Copy the command below to start this exercise:
