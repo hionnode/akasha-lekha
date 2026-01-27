@@ -1,18 +1,17 @@
-# .github/workflows/production.yml
+# .github/workflows/web-production.yml
 #
-# Deploys to production when code is merged to main
-# Features:
-# - Full production deployment
-# - Deployment tracking
-# - Build caching
-# - Job summary with deployment details
-# - Slack/Discord notification ready
+# Deploys web app to production when merged to main
+# Triggers only when web app or shared types change
 
-name: Production
+name: Web Production
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'apps/web/**'
+      - 'packages/types/**'
+      - 'pnpm-lock.yaml'
   workflow_dispatch:
     inputs:
       skip_cache:
@@ -21,8 +20,8 @@ on:
         default: false
 
 concurrency:
-  group: production
-  cancel-in-progress: false  # Never cancel production deploys
+  group: web-production
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -36,13 +35,11 @@ jobs:
   deploy:
     name: Deploy Production
     runs-on: ubuntu-latest
-    
-    # Environment with optional protection rules
-    # Configure in: Repository → Settings → Environments → production
+
     environment:
       name: production
       url: ${{ steps.deploy.outputs.deployment-url }}
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,9 +63,9 @@ jobs:
         id: cache-astro
         with:
           path: |
-            node_modules/.astro
-            .astro
-          key: astro-prod-${{ runner.os }}-${{ hashFiles('src/**/*', 'public/**/*', 'astro.config.*') }}
+            apps/web/node_modules/.astro
+            apps/web/.astro
+          key: astro-prod-${{ runner.os }}-${{ hashFiles('apps/web/src/**/*', 'apps/web/public/**/*', 'apps/web/astro.config.*') }}
           restore-keys: |
             astro-prod-${{ runner.os }}-
 
@@ -79,38 +76,37 @@ jobs:
         id: build
         run: |
           START_TIME=$(date +%s)
-          pnpm run build
+          pnpm --filter @akasha/web build
           END_TIME=$(date +%s)
           echo "duration=$((END_TIME - START_TIME))" >> $GITHUB_OUTPUT
         env:
           PUBLIC_ENV: production
 
-      # Get the previous version for potential rollback reference
       - name: Get Previous Version
         id: previous
         run: |
+          cd apps/web
           PREV_VERSION=$(npx wrangler versions list --json 2>/dev/null | jq -r '.[0].id // empty' || echo "")
           echo "version=$PREV_VERSION" >> $GITHUB_OUTPUT
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-      # Deploy to production
       - name: Deploy to Production
         id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/web
           command: deploy
 
-      # Create deployment summary
       - name: Create Summary
         if: success()
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## 🚀 Production Deployment Complete
-          
+          ## 🚀 Web Production Deployment Complete
+
           | Property | Value |
           |:---------|:------|
           | **URL** | ${{ steps.deploy.outputs.deployment-url }} |
@@ -119,17 +115,13 @@ jobs:
           | **Cache** | ${{ steps.cache-astro.outputs.cache-hit == 'true' && '✅ Hit' || '❌ Miss' }} |
           | **Triggered by** | @${{ github.actor }} |
           | **Previous Version** | `${{ steps.previous.outputs.version || 'N/A' }}` |
-          
+
           ### Rollback Command
-          If you need to rollback, run:
           ```bash
-          npx wrangler versions deploy ${{ steps.previous.outputs.version }}
+          cd apps/web && npx wrangler versions deploy ${{ steps.previous.outputs.version }}
           ```
-          
-          Or use the [Rollback Workflow](../actions/workflows/rollback.yml).
           EOF
 
-      # Update commit status
       - name: Update Commit Status
         if: always()
         uses: actions/github-script@v7
@@ -137,7 +129,7 @@ jobs:
           script: |
             const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
             const url = '${{ steps.deploy.outputs.deployment-url }}';
-            
+
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -145,29 +137,5 @@ jobs:
               state: state,
               target_url: url || `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               description: state === 'success' ? 'Deployed to production' : 'Production deploy failed',
-              context: 'Production Deployment'
+              context: 'Web Production'
             });
-
-      # Optional: Slack notification
-      # Uncomment and add SLACK_WEBHOOK secret to enable
-      # - name: Notify Slack
-      #   if: always()
-      #   uses: 8398a7/action-slack@v3
-      #   with:
-      #     status: ${{ job.status }}
-      #     fields: repo,message,commit,author,action,workflow,took
-      #     text: |
-      #       ${{ job.status == 'success' && '✅' || '❌' }} Production deployment ${{ job.status }}
-      #       URL: ${{ steps.deploy.outputs.deployment-url }}
-      #   env:
-      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
-
-  # Optional: Run smoke tests after deployment
-  # smoke-test:
-  #   name: Smoke Tests
-  #   needs: deploy
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Health Check
-  #       run: |
-  #         curl -sf ${{ needs.deploy.outputs.url }}/health || exit 1

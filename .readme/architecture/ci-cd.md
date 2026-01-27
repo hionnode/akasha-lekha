@@ -5,340 +5,383 @@ This document describes the GitHub Actions workflows for continuous integration 
 ## Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    GitHub Actions                            │
-│                                                              │
-│  ┌─────────────────────┐    ┌─────────────────────────────┐ │
-│  │   Pull Request      │    │     Push to main            │ │
-│  │                     │    │                             │ │
-│  │  pr-preview.yml     │    │  production-deploy.yml      │ │
-│  │  ───────────────    │    │  ────────────────────       │ │
-│  │  1. Build           │    │  1. Build                   │ │
-│  │  2. Deploy Preview  │    │  2. Deploy Production       │ │
-│  │  3. Comment on PR   │    │  3. Create Summary          │ │
-│  └─────────────────────┘    └─────────────────────────────┘ │
-│           │                            │                     │
-│           ▼                            ▼                     │
-│  ┌─────────────────────┐    ┌─────────────────────────────┐ │
-│  │ Cloudflare Pages    │    │   Cloudflare Pages          │ │
-│  │ (Preview URL)       │    │   (Production)              │ │
-│  └─────────────────────┘    └─────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           GitHub Actions                                     │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                        Pull Request                                  │    │
+│  │                                                                      │    │
+│  │   ci.yml          web-preview.yml        api-deploy.yml             │    │
+│  │   ────────        ────────────────       ───────────────            │    │
+│  │   All changes:    Web changes:           API/Infra changes:         │    │
+│  │   - Lint          - Build                - Deploy to preview        │    │
+│  │   - Typecheck     - Deploy preview       - Comment on PR            │    │
+│  │   - Test          - Comment on PR                                   │    │
+│  │   - Build                                                           │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                        Push to main                                  │    │
+│  │                                                                      │    │
+│  │   ci.yml          web-production.yml     api-deploy.yml             │    │
+│  │   ────────        ─────────────────      ───────────────            │    │
+│  │   Quality checks  Web changes:           API/Infra changes:         │    │
+│  │                   - Deploy production    - Deploy to prod           │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Workflows
 
-### Preview Deployment (`pr-preview.yml`)
+### 1. CI (`ci.yml`)
 
-**Trigger:** Pull requests to `main`
+**Purpose:** Quality checks for all packages with path filtering.
 
-**Purpose:** Deploy preview versions for every PR, providing a Vercel-like experience.
+**Triggers:**
+- All pull requests to `main`
+- All pushes to `main`
+
+**Jobs:**
+
+| Job | Condition | Checks |
+|-----|-----------|--------|
+| `changes` | Always | Detect which packages changed |
+| `web` | `apps/web/**` changed | Lint, typecheck, test, build |
+| `api` | `packages/api/**` changed | Typecheck, test |
+| `types` | `packages/types/**` changed | Typecheck |
+| `ci-success` | Always | Aggregate results for branch protection |
+
+**Path Filters:**
 
 ```yaml
-on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
+web:
+  - 'apps/web/**'
+  - 'packages/types/**'
+  - 'pnpm-lock.yaml'
+api:
+  - 'packages/api/**'
+  - 'packages/types/**'
+  - 'pnpm-lock.yaml'
+types:
+  - 'packages/types/**'
+infra:
+  - 'infra/**'
+  - 'sst.config.ts'
 ```
 
-**Steps:**
+---
 
-1. **Checkout** - Get the PR code
-2. **Set Pending Status** - Show "Building..." status on commit
-3. **Setup pnpm + Node.js** - Install toolchain
-4. **Cache Astro Build** - Speed up subsequent builds
-5. **Install Dependencies** - `pnpm install`
-6. **Build** - `pnpm build` with timing
-7. **Deploy Preview** - Upload to Cloudflare Workers
-8. **Update Commit Status** - Show success/failure
-9. **Comment on PR** - Post deployment URL
+### 2. Web Preview (`web-preview.yml`)
 
-**PR Comment Features:**
+**Purpose:** Deploy preview of web app for every PR.
 
-- Preview URL with one-click access
-- Build duration and cache status
-- Deployment history (last 5 deployments)
-- Commit links and status badges
+**Triggers:**
+- Pull requests to `main` with web changes
 
-**Example PR Comment:**
+**Path Filter:**
+```yaml
+paths:
+  - 'apps/web/**'
+  - 'packages/types/**'
+  - 'pnpm-lock.yaml'
+```
+
+**Features:**
+- Builds from `apps/web/`
+- Deploys to Cloudflare Pages
+- Posts preview URL as PR comment
+- Tracks deployment history (last 5)
+- Updates commit status
+
+**PR Comment Example:**
 
 ```markdown
-## 🌐 Preview Deployment
+## 🌐 Web Preview Deployment
 
 ### 🔗 [**Visit Preview →**](https://preview-123.workers.dev)
 
 | Branch | Commit | Build | Cache | Status |
 |:-------|:-------|:------|:------|:-------|
 | `feat/new-feature` | `abc1234` | 45s | ✅ | ✅ Ready |
-
-<details>
-<summary>📜 Deployment History (3 deployments)</summary>
-...
-</details>
 ```
 
-### Production Deployment (`production-deploy.yml`)
+---
 
-**Trigger:** Push to `main` (including merges)
+### 3. Web Production (`web-production.yml`)
 
-**Purpose:** Deploy to production with rollback support.
+**Purpose:** Deploy web app to production on merge.
 
+**Triggers:**
+- Push to `main` with web changes
+- Manual dispatch (with skip cache option)
+
+**Path Filter:**
 ```yaml
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      skip_cache:
-        description: 'Skip build cache'
-        type: boolean
+paths:
+  - 'apps/web/**'
+  - 'packages/types/**'
+  - 'pnpm-lock.yaml'
 ```
 
-**Steps:**
+**Features:**
+- Deploys to Cloudflare Pages production
+- Captures previous version for rollback
+- Creates job summary with rollback command
+- Never cancels in-progress deploys
 
-1. **Checkout** - Get full history (for versioning)
-2. **Setup pnpm + Node.js** - Install toolchain
-3. **Cache Astro Build** - Unless skip_cache is true
-4. **Install Dependencies** - `pnpm install`
-5. **Build** - `pnpm build` with timing
-6. **Get Previous Version** - For rollback reference
-7. **Deploy to Production** - `wrangler deploy`
-8. **Create Summary** - Job summary with details
-9. **Update Commit Status** - Mark deployment status
+---
 
-**Job Summary:**
+### 4. API Deploy (`api-deploy.yml`)
+
+**Purpose:** Deploy SST API to AWS.
+
+**Triggers:**
+- Pull requests: Deploy to `preview` stage
+- Push to `main`: Deploy to `prod` stage
+- Manual dispatch: Choose stage
+
+**Path Filter:**
+```yaml
+paths:
+  - 'packages/api/**'
+  - 'packages/types/**'
+  - 'infra/**'
+  - 'sst.config.ts'
+  - 'pnpm-lock.yaml'
+```
+
+**Features:**
+- Automatic stage selection (PR → preview, main → prod)
+- AWS credentials via secrets
+- Posts API URL as PR comment
+- Cleanup job removes preview stage when PR closes
+
+**PR Comment Example:**
 
 ```markdown
-## 🚀 Production Deployment Complete
+## ⚡ API Deployment
 
-| Property | Value |
-|:---------|:------|
-| **URL** | https://works-on-my.cloud |
-| **Commit** | `abc1234567890` |
-| **Build Time** | 52s |
-| **Cache** | ✅ Hit |
-| **Previous Version** | `v1.2.3` |
+### ✅ Deployed to `preview`
 
-### Rollback Command
-npx wrangler versions deploy v1.2.3
+**API URL:** https://abc123.execute-api.ap-south-1.amazonaws.com
+
+**Test endpoint:**
+```bash
+curl https://abc123.execute-api.ap-south-1.amazonaws.com/exercises
 ```
+```
+
+---
 
 ## Required Secrets
 
-Configure these in **Repository Settings → Secrets and variables → Actions**:
+### GitHub Repository Secrets
 
-| Secret | Description | How to Get |
-|--------|-------------|------------|
-| `CLOUDFLARE_API_TOKEN` | API token for deployments | [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) |
-| `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account | Cloudflare Dashboard → Account ID |
+Configure in **Settings → Secrets and variables → Actions**:
 
-### Creating Cloudflare API Token
+| Secret | Used By | Description |
+|--------|---------|-------------|
+| `CLOUDFLARE_API_TOKEN` | Web workflows | Cloudflare API token |
+| `CLOUDFLARE_ACCOUNT_ID` | Web workflows | Cloudflare account ID |
+| `AWS_ACCESS_KEY_ID` | API workflow | AWS IAM access key |
+| `AWS_SECRET_ACCESS_KEY` | API workflow | AWS IAM secret key |
 
-1. Go to [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens)
-2. Click "Create Token"
-3. Use "Edit Cloudflare Workers" template
-4. Or create custom with permissions:
-   - Account: Cloudflare Pages - Edit
-   - Zone: Zone - Read (if using custom domain)
-5. Copy the token and add to GitHub secrets
+### SST Secrets (per stage)
+
+Set via CLI (not GitHub):
+
+```bash
+# Preview stage
+pnpm sst secret set GithubClientId <value> --stage preview
+pnpm sst secret set GithubClientSecret <value> --stage preview
+pnpm sst secret set JwtSecret <value> --stage preview
+
+# Production stage
+pnpm sst secret set GithubClientId <value> --stage prod
+pnpm sst secret set GithubClientSecret <value> --stage prod
+pnpm sst secret set JwtSecret <value> --stage prod
+```
+
+---
+
+## Path-Based Triggering
+
+Workflows only run when relevant files change:
+
+| Change | ci.yml | web-preview | web-production | api-deploy |
+|--------|--------|-------------|----------------|------------|
+| `apps/web/**` | ✅ web job | ✅ | ✅ | ❌ |
+| `packages/api/**` | ✅ api job | ❌ | ❌ | ✅ |
+| `packages/types/**` | ✅ types job | ✅ | ✅ | ✅ |
+| `infra/**` | ✅ (detect) | ❌ | ❌ | ✅ |
+| `sst.config.ts` | ✅ (detect) | ❌ | ❌ | ✅ |
+| `pnpm-lock.yaml` | ✅ all jobs | ✅ | ✅ | ✅ |
+| `README.md` | ❌ | ❌ | ❌ | ❌ |
+
+---
 
 ## Concurrency
 
-### Preview Deployments
-
+### CI Workflow
 ```yaml
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 ```
+Cancels previous runs on same branch.
 
-- Groups by PR number
-- Cancels previous runs for same PR
-- Prevents duplicate deployments
-
-### Production Deployments
-
+### Web Preview
 ```yaml
 concurrency:
-  group: production
+  group: web-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+```
+One deployment per PR, cancels outdated.
+
+### Web Production
+```yaml
+concurrency:
+  group: web-production
   cancel-in-progress: false
 ```
+Never cancels, queues deploys.
 
-- Single group for all production deploys
-- Never cancels in-progress deploys
-- Queues subsequent deploys
+### API Deploy
+```yaml
+concurrency:
+  group: api-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'prod' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+```
+Cancels PR deploys, never cancels production.
+
+---
 
 ## Caching
 
-### Astro Build Cache
-
+### Web (Astro)
 ```yaml
-- name: Cache Astro Build
-  uses: actions/cache@v4
-  with:
-    path: |
-      node_modules/.astro
-      .astro
-    key: astro-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'astro.config.*') }}
+path: |
+  apps/web/node_modules/.astro
+  apps/web/.astro
+key: astro-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/astro.config.*') }}
 ```
 
-Cache is invalidated when:
-- `pnpm-lock.yaml` changes (new dependencies)
-- `astro.config.*` changes (config updates)
-
-### pnpm Cache
-
+### pnpm
 ```yaml
 - uses: actions/setup-node@v4
   with:
     cache: 'pnpm'
 ```
 
-Automatically caches `node_modules` based on lockfile.
+---
 
-## Environment Protection
+## Branch Protection
 
-### Preview Environment
+Recommended settings for `main` branch:
 
-```yaml
-environment:
-  name: preview
-  url: ${{ steps.deploy.outputs.deployment-url }}
-```
+1. **Require status checks:**
+   - `CI Success` (from ci.yml)
+   - `Web Preview` (when web changes)
+   - `API Deploy` (when API changes)
 
-No protection rules by default. Every PR gets a preview.
+2. **Require PR reviews**
 
-### Production Environment
+3. **Require linear history** (optional)
 
-```yaml
-environment:
-  name: production
-  url: ${{ steps.deploy.outputs.deployment-url }}
-```
-
-Optional protection rules (configure in GitHub):
-- Required reviewers
-- Wait timer
-- Deployment branches
-
-## Commit Status Checks
-
-Both workflows update commit status:
-
-| Context | States | Description |
-|---------|--------|-------------|
-| Preview Deployment | pending, success, failure | PR preview status |
-| Production Deployment | success, failure | Production deploy status |
-
-These appear in:
-- PR checks section
-- Commit status indicators
-- Branch protection rules
+---
 
 ## Manual Triggers
 
-### Production with Skip Cache
+### Web Production (skip cache)
 
-```yaml
-workflow_dispatch:
-  inputs:
-    skip_cache:
-      description: 'Skip build cache'
-      type: boolean
-      default: false
-```
+1. Go to **Actions** → **Web Production**
+2. Click **Run workflow**
+3. Check **Skip build cache**
+4. Click **Run workflow**
 
-Trigger manually via:
-1. Actions tab → Production workflow
-2. "Run workflow" button
-3. Optionally check "Skip build cache"
+### API Deploy (choose stage)
 
-Useful for:
-- Forcing fresh build after cache issues
-- Testing deployment without cache
+1. Go to **Actions** → **API Deploy**
+2. Click **Run workflow**
+3. Select stage: `preview` or `prod`
+4. Click **Run workflow**
 
-## Debugging Workflows
+---
+
+## Debugging
 
 ### View Logs
-
 1. Go to **Actions** tab
-2. Click on workflow run
+2. Click workflow run
 3. Expand job steps
 
 ### Common Issues
 
-**Build fails:**
-- Check Node version compatibility
-- Verify pnpm-lock.yaml is committed
-- Check for TypeScript errors
+**"No changes detected":**
+- Workflow didn't trigger because paths didn't match
+- Check path filters in workflow file
 
-**Deploy fails:**
-- Verify Cloudflare secrets are set
-- Check API token permissions
-- Ensure wrangler.jsonc is valid
+**Web build fails:**
+- Check `apps/web/` has valid astro.config.mjs
+- Verify TypeScript errors in web package
+
+**API deploy fails:**
+- Verify AWS credentials are set
+- Check SST secrets are configured
+- Run `pnpm sst deploy --stage <stage>` locally to debug
 
 **Cache not working:**
 - Check cache key matches
-- Verify paths exist
-- Look for "Cache hit" in logs
+- Verify paths exist after build
 
-## Extending Workflows
+---
 
-### Add Quality Checks
+## Adding New Workflows
 
+### New Package Workflow
+
+1. Add path filter to `ci.yml`:
 ```yaml
-jobs:
-  quality:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-      - run: pnpm install
-      - run: pnpm lint
-      - run: pnpm typecheck
-      - run: pnpm test
-
-  deploy:
-    needs: quality
-    # ... deployment steps
+newpackage:
+  - 'packages/newpackage/**'
 ```
 
-### Add Slack Notifications
-
+2. Add job:
 ```yaml
-- name: Notify Slack
-  if: always()
-  uses: 8398a7/action-slack@v3
-  with:
-    status: ${{ job.status }}
-    fields: repo,message,commit,author
-  env:
-    SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+newpackage:
+  name: NewPackage Quality
+  needs: changes
+  if: needs.changes.outputs.newpackage == 'true'
+  # ... steps
 ```
 
-### Add Smoke Tests
+3. Update `ci-success` job to include new job.
 
-```yaml
-smoke-test:
-  needs: deploy
-  runs-on: ubuntu-latest
-  steps:
-    - name: Health Check
-      run: |
-        curl -sf ${{ needs.deploy.outputs.url }}/health || exit 1
-```
+### New Deployment Target
 
-## Future Enhancements
+Create new workflow file following existing patterns:
+- Define triggers with path filters
+- Set up concurrency
+- Configure environment
+- Add deployment steps
+- Post comments/summaries
 
-- [ ] API deployment workflow (SST)
-- [ ] E2E tests before production deploy
-- [ ] Automatic rollback on health check failure
-- [ ] Deployment notifications (Slack/Discord)
-- [ ] Performance budget checks
+---
+
+## File Reference
+
+| File | Purpose |
+|------|---------|
+| `.github/workflows/ci.yml` | Quality checks (lint, test, typecheck) |
+| `.github/workflows/web-preview.yml` | Web preview deployments |
+| `.github/workflows/web-production.yml` | Web production deployments |
+| `.github/workflows/api-deploy.yml` | API (SST) deployments |
+
+---
 
 ## Related Documentation
 
 - [Architecture Overview](./overview.md)
 - [Blog Setup](./blog.md)
 - [Backend (SST)](./backend-sst.md)
+- [SST Development Guide](../sst-api-development.md)
