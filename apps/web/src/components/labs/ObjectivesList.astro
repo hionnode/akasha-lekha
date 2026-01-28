@@ -1,0 +1,27 @@
+---
+interface Props {
+  objectives: string[];
+  title?: string;
+  class?: string;
+}
+
+const { objectives, title = 'Learning Objectives', class: className } = Astro.props;
+---
+
+<div class:list={['objectives-list', className]}>
+  <h4 class="flex items-center gap-2 text-sm font-semibold text-fg-primary mb-3">
+    <svg class="w-4 h-4 text-accent-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+    </svg>
+    {title}
+  </h4>
+
+  <ul class="space-y-2">
+    {objectives.map((objective) => (
+      <li class="flex items-start gap-3 text-sm">
+        <span class="flex-shrink-0 mt-1 w-1.5 h-1.5 rounded-full bg-accent-green" />
+        <span class="text-fg-secondary">{objective}</span>
+      </li>
+    ))}
+  </ul>
+</div>

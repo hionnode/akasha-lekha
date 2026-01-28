@@ -1,0 +1,171 @@
+# .github/workflows/ci.yml
+#
+# Continuous Integration - Quality checks for all packages
+# Runs on every PR and push to main
+# Path-filtered to only run relevant checks
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Detect which packages have changes
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      web: ${{ steps.filter.outputs.web }}
+      api: ${{ steps.filter.outputs.api }}
+      types: ${{ steps.filter.outputs.types }}
+      infra: ${{ steps.filter.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            web:
+              - 'apps/web/**'
+              - 'packages/types/**'
+              - 'pnpm-lock.yaml'
+            api:
+              - 'packages/api/**'
+              - 'packages/types/**'
+              - 'pnpm-lock.yaml'
+            types:
+              - 'packages/types/**'
+            infra:
+              - 'infra/**'
+              - 'sst.config.ts'
+
+  # Quality checks for web app
+  web:
+    name: Web Quality
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install
+        working-directory: .
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type Check
+        run: pnpm typecheck
+
+      - name: Unit Tests
+        run: pnpm test:run
+
+      - name: Build
+        run: pnpm build
+
+  # Quality checks for API package
+  api:
+    name: API Quality
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install
+        working-directory: .
+
+      - name: Type Check
+        run: pnpm typecheck
+        continue-on-error: true  # SST types may not exist until deployed
+
+      - name: Unit Tests
+        run: pnpm test:run
+        continue-on-error: true  # Tests may not exist yet
+
+  # Quality checks for types package
+  types:
+    name: Types Quality
+    needs: changes
+    if: needs.changes.outputs.types == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/types
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install
+        working-directory: .
+
+      - name: Type Check
+        run: pnpm typecheck
+
+  # Summary job for branch protection
+  ci-success:
+    name: CI Success
+    needs: [changes, web, api, types]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Results
+        run: |
+          if [[ "${{ needs.web.result }}" == "failure" ]] || \
+             [[ "${{ needs.api.result }}" == "failure" ]] || \
+             [[ "${{ needs.types.result }}" == "failure" ]]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
+          echo "All checks passed!"

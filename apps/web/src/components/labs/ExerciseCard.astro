@@ -1,0 +1,116 @@
+---
+import DifficultyBadge from './DifficultyBadge.astro';
+
+interface Props {
+  id: string;
+  module: string;
+  order: number;
+  title: string;
+  description?: string;
+  difficulty: 'beginner' | 'intermediate' | 'advanced';
+  estimatedTime: string;
+  isCompleted?: boolean;
+  isLocked?: boolean;
+  class?: string;
+}
+
+const {
+  id,
+  module,
+  order,
+  title,
+  description,
+  difficulty,
+  estimatedTime,
+  isCompleted = false,
+  isLocked = false,
+  class: className,
+} = Astro.props;
+
+const href = isLocked ? undefined : `/labs/modules/${module}/${id}`;
+---
+
+<article
+  class:list={[
+    'group relative flex items-center gap-4 p-4 bg-bg-secondary border border-border rounded-lg transition-all',
+    !isLocked && 'hover:border-accent-blue hover:shadow-md hover:shadow-accent-blue/5',
+    isLocked && 'opacity-60 cursor-not-allowed',
+    isCompleted && 'border-accent-green/30',
+    className,
+  ]}
+>
+  {/* Order number / completion status */}
+  <div
+    class:list={[
+      'flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-full text-sm font-bold',
+      isCompleted && 'bg-accent-green/20 text-accent-green',
+      !isCompleted && !isLocked && 'bg-bg-tertiary text-fg-muted',
+      isLocked && 'bg-bg-tertiary text-fg-muted',
+    ]}
+  >
+    {isCompleted ? (
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+      </svg>
+    ) : isLocked ? (
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+    ) : (
+      <span>{order}</span>
+    )}
+  </div>
+
+  {/* Content */}
+  <div class="flex-1 min-w-0">
+    {href ? (
+      <a href={href} class="block">
+        <h4 class="font-semibold text-fg-primary group-hover:text-accent-blue transition-colors">
+          {title}
+        </h4>
+        {description && (
+          <p class="mt-1 text-sm text-fg-secondary line-clamp-1">
+            {description}
+          </p>
+        )}
+      </a>
+    ) : (
+      <div>
+        <h4 class="font-semibold text-fg-primary">
+          {title}
+        </h4>
+        {description && (
+          <p class="mt-1 text-sm text-fg-secondary line-clamp-1">
+            {description}
+          </p>
+        )}
+      </div>
+    )}
+  </div>
+
+  {/* Meta */}
+  <div class="flex-shrink-0 flex items-center gap-3">
+    <DifficultyBadge difficulty={difficulty} />
+    <span class="text-xs text-fg-muted whitespace-nowrap">
+      {estimatedTime}
+    </span>
+  </div>
+
+  {/* Arrow indicator for available exercises */}
+  {!isLocked && !isCompleted && (
+    <div class="flex-shrink-0 text-fg-muted group-hover:text-accent-blue transition-colors">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+      </svg>
+    </div>
+  )}
+</article>
+
+<style>
+  .line-clamp-1 {
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+</style>

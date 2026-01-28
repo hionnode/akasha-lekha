@@ -1,0 +1,232 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import LabsHeader from '../../components/labs/layout/LabsHeader.astro';
+import Footer from '../../components/layout/Footer.astro';
+import CLICommand from '../../components/labs/CLICommand.astro';
+---
+
+<Layout
+  title="Setup | Labs | works-on-my.cloud"
+  description="Install the infra-learn CLI and get started with hands-on infrastructure learning."
+>
+  <div class="min-h-screen flex flex-col bg-bg-primary">
+    <LabsHeader currentPath="/labs/setup" />
+
+    <main class="flex-1 py-12">
+      <div class="container mx-auto px-4 max-w-3xl">
+        <h1 class="text-3xl font-bold text-fg-primary mb-4">
+          Get Started
+        </h1>
+        <p class="text-lg text-fg-secondary mb-8">
+          Set up the CLI in a few minutes, then start learning.
+        </p>
+
+        {/* Step 1: Install */}
+        <section class="mb-12">
+          <div class="flex items-center gap-3 mb-4">
+            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-accent-blue text-bg-primary font-bold text-sm">
+              1
+            </span>
+            <h2 class="text-xl font-semibold text-fg-primary">Install the CLI</h2>
+          </div>
+
+          <div class="pl-11">
+            <p class="text-fg-secondary mb-4">
+              Choose your platform and run the install command:
+            </p>
+
+            <div class="space-y-4">
+              {/* macOS / Linux */}
+              <div>
+                <h4 class="text-sm font-medium text-fg-muted mb-2">macOS / Linux</h4>
+                <CLICommand command="curl -fsSL https://get.infra-learn.dev | sh" />
+              </div>
+
+              {/* Windows */}
+              <div>
+                <h4 class="text-sm font-medium text-fg-muted mb-2">Windows (PowerShell)</h4>
+                <CLICommand command="iwr -useb https://get.infra-learn.dev/win | iex" />
+              </div>
+
+              {/* Homebrew */}
+              <div>
+                <h4 class="text-sm font-medium text-fg-muted mb-2">Homebrew (macOS / Linux)</h4>
+                <CLICommand command="brew install infra-learn/tap/infra-learn" />
+              </div>
+            </div>
+
+            <p class="mt-4 text-sm text-fg-muted">
+              Or download binaries directly from{' '}
+              <a
+                href="https://github.com/yourorg/infra-learn/releases"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-accent-blue hover:underline"
+              >
+                GitHub Releases
+              </a>
+            </p>
+          </div>
+        </section>
+
+        {/* Step 2: Verify */}
+        <section class="mb-12">
+          <div class="flex items-center gap-3 mb-4">
+            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-accent-blue text-bg-primary font-bold text-sm">
+              2
+            </span>
+            <h2 class="text-xl font-semibold text-fg-primary">Verify Installation</h2>
+          </div>
+
+          <div class="pl-11">
+            <p class="text-fg-secondary mb-4">
+              Make sure the CLI is installed correctly:
+            </p>
+            <CLICommand command="infra-learn --version" />
+            <p class="mt-4 text-sm text-fg-muted">
+              You should see something like <code class="px-1 py-0.5 bg-bg-tertiary rounded text-accent-cyan">infra-learn v0.1.0</code>
+            </p>
+          </div>
+        </section>
+
+        {/* Step 3: Initialize */}
+        <section class="mb-12">
+          <div class="flex items-center gap-3 mb-4">
+            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-accent-blue text-bg-primary font-bold text-sm">
+              3
+            </span>
+            <h2 class="text-xl font-semibold text-fg-primary">Initialize</h2>
+          </div>
+
+          <div class="pl-11">
+            <p class="text-fg-secondary mb-4">
+              Run the init command to configure your sandbox backend:
+            </p>
+            <CLICommand command="infra-learn init" />
+
+            <div class="mt-4 p-4 bg-bg-secondary border border-border rounded-lg">
+              <h4 class="text-sm font-semibold text-fg-primary mb-2">Choose a Backend</h4>
+              <ul class="space-y-3 text-sm text-fg-secondary">
+                <li class="flex items-start gap-3">
+                  <span class="text-accent-green font-bold">Local (Docker)</span>
+                  <span>— Recommended for beginners. Runs sandboxes on your machine using Docker.</span>
+                </li>
+                <li class="flex items-start gap-3">
+                  <span class="text-accent-cyan font-bold">AWS</span>
+                  <span>— Uses your AWS account to launch EC2 instances. Great for realistic cloud experience.</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        {/* Step 4: Login */}
+        <section class="mb-12">
+          <div class="flex items-center gap-3 mb-4">
+            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-accent-blue text-bg-primary font-bold text-sm">
+              4
+            </span>
+            <h2 class="text-xl font-semibold text-fg-primary">Login (Optional)</h2>
+          </div>
+
+          <div class="pl-11">
+            <p class="text-fg-secondary mb-4">
+              Login to sync your progress across devices:
+            </p>
+            <CLICommand command="infra-learn login" />
+            <p class="mt-4 text-sm text-fg-muted">
+              This will open your browser for GitHub authentication.
+              You can skip this step and complete exercises offline, but your progress won't sync.
+            </p>
+          </div>
+        </section>
+
+        {/* Step 5: Start Learning */}
+        <section class="mb-12">
+          <div class="flex items-center gap-3 mb-4">
+            <span class="flex items-center justify-center w-8 h-8 rounded-full bg-accent-green text-bg-primary font-bold text-sm">
+              ✓
+            </span>
+            <h2 class="text-xl font-semibold text-fg-primary">Start Learning!</h2>
+          </div>
+
+          <div class="pl-11">
+            <p class="text-fg-secondary mb-4">
+              You're ready to go! Launch your first exercise:
+            </p>
+            <CLICommand command="infra-learn launch linux-01" />
+
+            <div class="mt-6">
+              <a
+                href="/labs/modules/linux"
+                class="inline-flex items-center gap-2 px-6 py-3 text-lg font-semibold text-bg-primary bg-accent-blue hover:bg-accent-blue/90 rounded-lg transition-colors"
+              >
+                Start Linux Fundamentals
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                </svg>
+              </a>
+            </div>
+          </div>
+        </section>
+
+        {/* Requirements */}
+        <section class="p-6 bg-bg-secondary border border-border rounded-lg">
+          <h3 class="text-lg font-semibold text-fg-primary mb-4">Requirements</h3>
+
+          <div class="grid md:grid-cols-2 gap-6 text-sm">
+            <div>
+              <h4 class="font-medium text-fg-primary mb-2">For Local Backend</h4>
+              <ul class="space-y-1 text-fg-secondary">
+                <li class="flex items-center gap-2">
+                  <svg class="w-4 h-4 text-accent-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  Docker Desktop or Docker Engine
+                </li>
+                <li class="flex items-center gap-2">
+                  <svg class="w-4 h-4 text-accent-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  4GB RAM minimum
+                </li>
+                <li class="flex items-center gap-2">
+                  <svg class="w-4 h-4 text-accent-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  macOS, Linux, or Windows with WSL2
+                </li>
+              </ul>
+            </div>
+
+            <div>
+              <h4 class="font-medium text-fg-primary mb-2">For AWS Backend</h4>
+              <ul class="space-y-1 text-fg-secondary">
+                <li class="flex items-center gap-2">
+                  <svg class="w-4 h-4 text-accent-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  AWS account
+                </li>
+                <li class="flex items-center gap-2">
+                  <svg class="w-4 h-4 text-accent-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  AWS CLI configured
+                </li>
+                <li class="flex items-center gap-2">
+                  <svg class="w-4 h-4 text-accent-green" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  EC2 permissions (t3.micro)
+                </li>
+              </ul>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <Footer />
+  </div>
+</Layout>

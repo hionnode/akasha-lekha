@@ -1,0 +1,33 @@
+---
+interface Props {
+  criteria: string[];
+  title?: string;
+  class?: string;
+}
+
+const { criteria, title = 'Verification Criteria', class: className } = Astro.props;
+---
+
+<div class:list={['verification-checklist', className]}>
+  <h4 class="flex items-center gap-2 text-sm font-semibold text-fg-primary mb-3">
+    <svg class="w-4 h-4 text-accent-cyan" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+    {title}
+  </h4>
+
+  <p class="text-xs text-fg-muted mb-3">
+    The verification script will check the following when you run <code class="px-1 py-0.5 bg-bg-tertiary rounded text-accent-cyan">infra-learn verify</code>:
+  </p>
+
+  <ul class="space-y-2">
+    {criteria.map((item, index) => (
+      <li class="flex items-start gap-3 text-sm">
+        <span class="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-full bg-bg-tertiary text-fg-muted text-xs font-mono">
+          {index + 1}
+        </span>
+        <span class="text-fg-secondary">{item}</span>
+      </li>
+    ))}
+  </ul>
+</div>

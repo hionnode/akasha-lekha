@@ -1,21 +1,25 @@
-# .github/workflows/preview.yml
+# .github/workflows/web-preview.yml
 #
-# Deploys preview versions for Pull Requests
+# Deploys preview versions for Pull Requests (Web only)
+# Triggers only when web app or shared types change
 # Provides Vercel-like experience with:
 # - Automatic preview URL on every PR
 # - Rich PR comments with status, URL, build time
 # - Commit status checks
-# - Deployment tracking in GitHub UI
 
-name: Preview
+name: Web Preview
 
 on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
+    paths:
+      - 'apps/web/**'
+      - 'packages/types/**'
+      - 'pnpm-lock.yaml'
 
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: web-preview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
@@ -31,19 +35,18 @@ jobs:
   preview:
     name: Deploy Preview
     runs-on: ubuntu-latest
-    
+
     environment:
       name: preview
       url: ${{ steps.deploy.outputs.deployment-url }}
-    
+
     outputs:
       url: ${{ steps.deploy.outputs.deployment-url }}
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Set pending status immediately
       - name: Set Pending Status
         uses: actions/github-script@v7
         with:
@@ -53,11 +56,11 @@ jobs:
               repo: context.repo.repo,
               sha: context.sha,
               state: 'pending',
-              context: 'Preview Deployment',
+              context: 'Web Preview',
               description: 'Building...'
             });
 
-      - name: setup pnpm
+      - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -68,17 +71,16 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
 
-      # Cache Astro build artifacts - keyed on dependencies, not source content
       - name: Cache Astro Build
         uses: actions/cache@v4
         id: cache-astro
         with:
           path: |
-            node_modules/.astro
-            .astro
-          key: astro-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'astro.config.*') }}
+            apps/web/node_modules/.astro
+            apps/web/.astro
+          key: astro-preview-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/astro.config.*') }}
           restore-keys: |
-            astro-${{ runner.os }}-
+            astro-preview-${{ runner.os }}-
 
       - name: Install Dependencies
         run: pnpm install
@@ -87,23 +89,22 @@ jobs:
         id: build
         run: |
           START_TIME=$(date +%s)
-          pnpm run build
+          pnpm --filter @akasha/web build
           END_TIME=$(date +%s)
           echo "duration=$((END_TIME - START_TIME))" >> $GITHUB_OUTPUT
         env:
           PUBLIC_ENV: preview
-          PUBLIC_PREVIEW_URL: https://preview-${{ github.event.pull_request.number }}.${{ vars.WORKER_NAME || 'your-site' }}.workers.dev
+          PUBLIC_PREVIEW_URL: https://preview-${{ github.event.pull_request.number }}.${{ vars.WORKER_NAME || 'akasha-lekha' }}.workers.dev
 
-      # Deploy using wrangler versions upload (creates version without promoting)
       - name: Deploy Preview
         id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/web
           command: versions upload --message "PR #${{ github.event.pull_request.number }}"
 
-      # Update commit status with result
       - name: Update Commit Status
         if: always()
         uses: actions/github-script@v7
@@ -111,7 +112,7 @@ jobs:
           script: |
             const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
             const deploymentUrl = '${{ steps.deploy.outputs.deployment-url }}';
-            
+
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -119,10 +120,9 @@ jobs:
               state: state,
               target_url: deploymentUrl || `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               description: state === 'success' ? 'Preview ready' : 'Preview failed',
-              context: 'Preview Deployment'
+              context: 'Web Preview'
             });
 
-      # Create rich PR comment with deployment history
       - name: Comment on PR
         if: always()
         uses: actions/github-script@v7
@@ -142,34 +142,31 @@ jobs:
             const prNumber = context.issue.number;
             const branch = context.payload.pull_request.head.ref;
             const timestamp = new Date().toISOString();
-            const prettyTime = new Date().toLocaleString('en-US', { 
-              timeZone: 'UTC', 
-              dateStyle: 'medium', 
-              timeStyle: 'short' 
+            const prettyTime = new Date().toLocaleString('en-US', {
+              timeZone: 'UTC',
+              dateStyle: 'medium',
+              timeStyle: 'short'
             }) + ' UTC';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            
-            // Status indicators
+
             const statusConfig = {
-              success: { emoji: '✅', text: 'Ready', badge: '![Success](https://img.shields.io/badge/status-ready-success)' },
-              failure: { emoji: '❌', text: 'Failed', badge: '![Failed](https://img.shields.io/badge/status-failed-critical)' },
-              cancelled: { emoji: '⏹️', text: 'Cancelled', badge: '![Cancelled](https://img.shields.io/badge/status-cancelled-inactive)' }
+              success: { emoji: '✅', text: 'Ready' },
+              failure: { emoji: '❌', text: 'Failed' },
+              cancelled: { emoji: '⏹️', text: 'Cancelled' }
             };
-            const { emoji, text, badge } = statusConfig[status] || statusConfig.failure;
-            
-            // Find existing comment
+            const { emoji, text } = statusConfig[status] || statusConfig.failure;
+
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
             });
-            
-            const botComment = comments.find(c => 
-              c.user.type === 'Bot' && 
-              c.body.includes('<!-- cf-preview-bot -->')
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' &&
+              c.body.includes('<!-- web-preview-bot -->')
             );
-            
-            // Parse existing history from comment
+
             let history = [];
             if (botComment) {
               const historyMatch = botComment.body.match(/<!-- history:(.+?) -->/s);
@@ -181,24 +178,19 @@ jobs:
                 }
               }
             }
-            
-            // Add current deployment to history (keep last 5)
+
             history.unshift({
-              sha: sha,
-              fullSha: fullSha,
-              status: status,
-              url: url,
+              sha, fullSha, status, url,
               time: timestamp,
               duration: buildDuration,
               cached: cacheHit
             });
             history = history.slice(0, 5);
-            
-            // Build comment body
-            let body = `<!-- cf-preview-bot -->\n`;
+
+            let body = `<!-- web-preview-bot -->\n`;
             body += `<!-- history:${Buffer.from(JSON.stringify(history)).toString('base64')} -->\n`;
-            body += `## <img src="https://www.cloudflare.com/favicon.ico" width="20" height="20" /> Preview Deployment\n\n`;
-            
+            body += `## 🌐 Web Preview Deployment\n\n`;
+
             if (status === 'success' && url) {
               body += `### 🔗 [**Visit Preview →**](${url})\n\n`;
               body += `| Branch | Commit | Build | Cache | Status |\n`;
@@ -209,38 +201,36 @@ jobs:
               body += `| Branch | Commit | Status |\n`;
               body += `|:-------|:-------|:-------|\n`;
               body += `| \`${branch}\` | [\`${sha}\`](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/commit/${fullSha}) | ${emoji} ${text} |\n\n`;
-              body += `> ⚠️ **Build failed** — [View workflow logs](${runUrl})\n\n`;
+              body += `> ⚠️ **Build failed** — [View logs](${runUrl})\n\n`;
             }
-            
-            // Deployment history
+
             if (history.length > 1) {
-              body += `<details>\n<summary>📜 Deployment History (${history.length} deployments)</summary>\n\n`;
-              body += `| Commit | Status | Build Time | Cache | Deployed |\n`;
-              body += `|:-------|:-------|:-----------|:------|:---------|\n`;
+              body += `<details>\n<summary>📜 History (${history.length})</summary>\n\n`;
+              body += `| Commit | Status | Build | Cache | Time |\n`;
+              body += `|:-------|:-------|:------|:------|:-----|\n`;
               for (const h of history) {
-                const statusEmoji = h.status === 'success' ? '✅' : (h.status === 'failure' ? '❌' : '⏹️');
-                const commitLink = h.url ? `[\`${h.sha}\`](${h.url})` : `\`${h.sha}\``;
-                const deployedTime = new Date(h.time).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-                body += `| ${commitLink} | ${statusEmoji} | ${h.duration}s | ${h.cached ? '✅' : '❌'} | ${deployedTime} |\n`;
+                const hEmoji = h.status === 'success' ? '✅' : (h.status === 'failure' ? '❌' : '⏹️');
+                const link = h.url ? `[\`${h.sha}\`](${h.url})` : `\`${h.sha}\``;
+                const time = new Date(h.time).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+                body += `| ${link} | ${hEmoji} | ${h.duration}s | ${h.cached ? '✅' : '❌'} | ${time} |\n`;
               }
               body += `\n</details>\n`;
             }
-            
-            body += `\n---\n`;
-            body += `<sub>🚀 Deployed to Cloudflare Workers · Updated ${prettyTime} · [Logs](${runUrl})</sub>`;
-            
+
+            body += `\n---\n<sub>🚀 Cloudflare Pages · ${prettyTime} · [Logs](${runUrl})</sub>`;
+
             if (botComment) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 comment_id: botComment.id,
-                body: body
+                body
               });
             } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
-                body: body
+                body
               });
             }

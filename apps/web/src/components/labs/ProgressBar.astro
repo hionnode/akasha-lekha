@@ -1,0 +1,55 @@
+---
+interface Props {
+  completed: number;
+  total: number;
+  showLabel?: boolean;
+  showPercentage?: boolean;
+  size?: 'sm' | 'md' | 'lg';
+  class?: string;
+}
+
+const {
+  completed,
+  total,
+  showLabel = false,
+  showPercentage = false,
+  size = 'md',
+  class: className,
+} = Astro.props;
+
+const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+const sizeClasses = {
+  sm: 'h-1',
+  md: 'h-2',
+  lg: 'h-3',
+};
+---
+
+<div class:list={['progress-bar', className]}>
+  {showLabel && (
+    <div class="flex items-center justify-between mb-1 text-sm">
+      <span class="text-fg-secondary">
+        {completed} / {total} completed
+      </span>
+      {showPercentage && (
+        <span class="text-accent-green font-medium">{percentage}%</span>
+      )}
+    </div>
+  )}
+
+  <div class:list={['bg-bg-tertiary rounded-full overflow-hidden', sizeClasses[size]]}>
+    <div
+      class="h-full bg-accent-green transition-all duration-300 rounded-full"
+      style={`width: ${percentage}%`}
+      role="progressbar"
+      aria-valuenow={percentage}
+      aria-valuemin="0"
+      aria-valuemax="100"
+    />
+  </div>
+
+  {!showLabel && showPercentage && (
+    <div class="mt-1 text-xs text-fg-muted text-right">{percentage}%</div>
+  )}
+</div>

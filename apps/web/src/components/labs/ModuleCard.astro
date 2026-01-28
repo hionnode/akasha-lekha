@@ -1,0 +1,164 @@
+---
+import ProgressBar from './ProgressBar.astro';
+
+interface Props {
+  id: string;
+  title: string;
+  description: string;
+  icon?: string;
+  exerciseCount: number;
+  estimatedTime?: string;
+  status: 'available' | 'coming-soon' | 'beta';
+  completedCount?: number;
+  class?: string;
+}
+
+const {
+  id,
+  title,
+  description,
+  icon,
+  exerciseCount,
+  estimatedTime,
+  status,
+  completedCount = 0,
+  class: className,
+} = Astro.props;
+
+const isAvailable = status === 'available';
+const href = isAvailable ? `/labs/modules/${id}` : undefined;
+
+const statusConfig = {
+  'available': { badge: null, opacity: '' },
+  'coming-soon': { badge: 'Coming Soon', opacity: 'opacity-60' },
+  'beta': { badge: 'Beta', opacity: '' },
+};
+
+const config = statusConfig[status];
+---
+
+<article
+  class:list={[
+    'group relative bg-bg-secondary border border-border rounded-lg overflow-hidden transition-all',
+    isAvailable && 'hover:border-accent-blue hover:shadow-lg hover:shadow-accent-blue/10',
+    config.opacity,
+    className,
+  ]}
+>
+  {/* Status badge */}
+  {config.badge && (
+    <div class="absolute top-3 right-3 z-10">
+      <span
+        class:list={[
+          'px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded',
+          status === 'coming-soon' && 'bg-fg-muted/20 text-fg-muted',
+          status === 'beta' && 'bg-accent-cyan/20 text-accent-cyan',
+        ]}
+      >
+        {config.badge}
+      </span>
+    </div>
+  )}
+
+  {/* Card content wrapper - link if available */}
+  {isAvailable ? (
+    <a href={href} class="block p-6">
+      <div class="flex items-start gap-4">
+        {/* Icon */}
+        {icon && (
+          <div class="flex-shrink-0 text-3xl" aria-hidden="true">
+            {icon}
+          </div>
+        )}
+
+        <div class="flex-1 min-w-0">
+          {/* Title */}
+          <h3 class="text-lg font-semibold text-fg-primary group-hover:text-accent-blue transition-colors">
+            {title}
+          </h3>
+
+          {/* Description */}
+          <p class="mt-2 text-sm text-fg-secondary line-clamp-2">
+            {description}
+          </p>
+
+          {/* Meta info */}
+          <div class="mt-4 flex items-center gap-4 text-xs text-fg-muted">
+            <span class="flex items-center gap-1">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+              </svg>
+              {exerciseCount} exercises
+            </span>
+            {estimatedTime && (
+              <span class="flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {estimatedTime}
+              </span>
+            )}
+          </div>
+
+          {/* Progress bar (if any progress) */}
+          {completedCount > 0 && (
+            <div class="mt-4">
+              <ProgressBar
+                completed={completedCount}
+                total={exerciseCount}
+                showPercentage
+                size="sm"
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </a>
+  ) : (
+    <div class="p-6">
+      <div class="flex items-start gap-4">
+        {icon && (
+          <div class="flex-shrink-0 text-3xl opacity-50" aria-hidden="true">
+            {icon}
+          </div>
+        )}
+
+        <div class="flex-1 min-w-0">
+          <h3 class="text-lg font-semibold text-fg-primary">
+            {title}
+          </h3>
+
+          <p class="mt-2 text-sm text-fg-secondary line-clamp-2">
+            {description}
+          </p>
+
+          <div class="mt-4 flex items-center gap-4 text-xs text-fg-muted">
+            <span class="flex items-center gap-1">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+              </svg>
+              {exerciseCount} exercises
+            </span>
+            {estimatedTime && (
+              <span class="flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {estimatedTime}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )}
+</article>
+
+<style>
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+</style>

@@ -1,0 +1,43 @@
+---
+interface Props {
+  difficulty: 'beginner' | 'intermediate' | 'advanced';
+  class?: string;
+}
+
+const { difficulty, class: className } = Astro.props;
+
+const badgeConfig = {
+  beginner: {
+    text: 'Beginner',
+    bgClass: 'bg-accent-green/20',
+    textClass: 'text-accent-green',
+    icon: '●',
+  },
+  intermediate: {
+    text: 'Intermediate',
+    bgClass: 'bg-accent-yellow/20',
+    textClass: 'text-accent-yellow',
+    icon: '●●',
+  },
+  advanced: {
+    text: 'Advanced',
+    bgClass: 'bg-accent-orange/20',
+    textClass: 'text-accent-orange',
+    icon: '●●●',
+  },
+};
+
+const config = badgeConfig[difficulty];
+---
+
+<span
+  class:list={[
+    'inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded',
+    config.bgClass,
+    config.textClass,
+    className,
+  ]}
+>
+  <span class="text-[10px] tracking-wider">{config.icon}</span>
+  <span>{config.text}</span>
+</span>

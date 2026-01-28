@@ -1,0 +1,245 @@
+# .github/workflows/api-deploy.yml
+#
+# Deploys API (SST) to AWS when API or infrastructure changes
+# Uses OIDC for secure, keyless AWS authentication
+#
+# Preview: Deploys to 'preview' stage on PR
+# Production: Deploys to 'prod' stage on merge to main
+
+name: API Deploy
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - 'packages/api/**'
+      - 'packages/types/**'
+      - 'infra/**'
+      - 'sst.config.ts'
+      - 'pnpm-lock.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/api/**'
+      - 'packages/types/**'
+      - 'infra/**'
+      - 'sst.config.ts'
+      - 'pnpm-lock.yaml'
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: 'Deployment stage'
+        required: true
+        default: 'preview'
+        type: choice
+        options:
+          - preview
+          - prod
+
+concurrency:
+  group: api-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'prod' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write  # Required for OIDC
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  deploy:
+    name: Deploy API
+    runs-on: ubuntu-latest
+    # Don't deploy on PR close (cleanup job handles that)
+    if: github.event.action != 'closed'
+
+    environment:
+      name: ${{ github.event_name == 'pull_request' && 'api-preview' || 'api-production' }}
+
+    outputs:
+      api_url: ${{ steps.deploy.outputs.api_url }}
+      stage: ${{ steps.stage.outputs.stage }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine Stage
+        id: stage
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "stage=preview" >> $GITHUB_OUTPUT
+          elif [[ "${{ inputs.stage }}" != "" ]]; then
+            echo "stage=${{ inputs.stage }}" >> $GITHUB_OUTPUT
+          else
+            echo "stage=prod" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      # OIDC authentication - no static credentials needed
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Dependencies
+        run: pnpm install
+
+      - name: Deploy SST
+        id: deploy
+        run: |
+          STAGE=${{ steps.stage.outputs.stage }}
+          echo "Deploying to stage: $STAGE"
+
+          # Deploy and capture output
+          OUTPUT=$(pnpm sst deploy --stage $STAGE 2>&1) || {
+            echo "Deployment failed"
+            echo "$OUTPUT"
+            exit 1
+          }
+
+          echo "$OUTPUT"
+
+          # Extract API URL from output
+          API_URL=$(echo "$OUTPUT" | grep -oP 'api:\s*\K(https://[^\s]+)' || echo "")
+          echo "api_url=$API_URL" >> $GITHUB_OUTPUT
+
+      - name: Create Summary
+        if: success()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🚀 API Deployment Complete
+
+          | Property | Value |
+          |:---------|:------|
+          | **Stage** | \`${{ steps.stage.outputs.stage }}\` |
+          | **API URL** | ${{ steps.deploy.outputs.api_url || 'See SST output' }} |
+          | **Commit** | \`${{ github.sha }}\` |
+          | **Region** | ${{ env.AWS_REGION }} |
+          | **Auth** | OIDC (keyless) |
+          | **Triggered by** | @${{ github.actor }} |
+
+          ### Test the API
+          \`\`\`bash
+          curl ${{ steps.deploy.outputs.api_url }}/exercises
+          \`\`\`
+
+          ### View Resources
+          \`\`\`bash
+          pnpm sst output --stage ${{ steps.stage.outputs.stage }}
+          \`\`\`
+          EOF
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        env:
+          DEPLOY_STATUS: ${{ job.status }}
+          API_URL: ${{ steps.deploy.outputs.api_url }}
+          STAGE: ${{ steps.stage.outputs.stage }}
+        with:
+          script: |
+            const status = process.env.DEPLOY_STATUS;
+            const apiUrl = process.env.API_URL;
+            const stage = process.env.STAGE;
+            const prNumber = context.issue.number;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' &&
+              c.body.includes('<!-- api-deploy-bot -->')
+            );
+
+            let body = `<!-- api-deploy-bot -->\n`;
+            body += `## ⚡ API Deployment\n\n`;
+
+            if (status === 'success') {
+              body += `### ✅ Deployed to \`${stage}\`\n\n`;
+              if (apiUrl) {
+                body += `**API URL:** ${apiUrl}\n\n`;
+                body += `**Test endpoint:**\n\`\`\`bash\ncurl ${apiUrl}/exercises\n\`\`\`\n\n`;
+              }
+            } else {
+              body += `### ❌ Deployment Failed\n\n`;
+              body += `[View logs](${runUrl})\n\n`;
+            }
+
+            body += `---\n<sub>SST · Stage: ${stage} · OIDC Auth · [Logs](${runUrl})</sub>`;
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body
+              });
+            }
+
+  # Remove preview stage when PR is closed
+  cleanup:
+    name: Cleanup Preview
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-cleanup-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Dependencies
+        run: pnpm install
+
+      - name: Remove Preview Stage
+        run: |
+          echo "Removing preview stage..."
+          pnpm sst remove --stage preview || true
+        continue-on-error: true
