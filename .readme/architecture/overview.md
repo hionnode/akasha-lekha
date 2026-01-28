@@ -13,7 +13,7 @@ This document provides a high-level overview of the Akasha Lekha platform archit
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         CLOUDFLARE PAGES                                     │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                     apps/web (Astro)                                 │    │
+│  │                     apps/web (Astro 5.x)                             │    │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐   │    │
 │  │  │    Blog      │  │    Labs      │  │    Static Assets         │   │    │
 │  │  │  /blog/*     │  │   /labs/*    │  │   /favicon, /fonts, etc  │   │    │
@@ -24,16 +24,16 @@ This document provides a high-level overview of the Akasha Lekha platform archit
                                     │ API Calls (fetch)
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          AWS API GATEWAY                                     │
+│                          AWS API GATEWAY v2                                  │
 │                         (ap-south-1 region)                                  │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Routes:                                                             │    │
 │  │  GET  /auth/github          → Lambda (OAuth redirect)                │    │
-│  │  GET  /auth/github/callback → Lambda (OAuth callback)                │    │
+│  │  GET  /auth/github/callback → Lambda (OAuth callback, JWT creation)  │    │
 │  │  POST /auth/verify          → Lambda (JWT verification)              │    │
 │  │  POST /auth/logout          → Lambda (Session cleanup)               │    │
 │  │  GET  /exercises            → Lambda (List exercises)                │    │
-│  │  GET  /exercises/{id}       → Lambda (Get exercise)                  │    │
+│  │  GET  /exercises/{id}       → Lambda (Get exercise details)          │    │
 │  │  GET  /progress             → Lambda (User progress)                 │    │
 │  │  POST /exercises/{id}/verify→ Lambda (Record completion)             │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
@@ -53,10 +53,12 @@ This document provides a high-level overview of the Akasha Lekha platform archit
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                          AWS DYNAMODB                                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                      │
-│  │    Users     │  │   Progress   │  │   Sessions   │                      │
-│  │  (profiles)  │  │ (completions)│  │   (tokens)   │                      │
-│  └──────────────┘  └──────────────┘  └──────────────┘                      │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐          │
+│  │      Users       │  │     Progress     │  │     Sessions     │          │
+│  │  pk=USER#<id>    │  │  pk=USER#<id>    │  │ pk=SESSION#<hash>│          │
+│  │  sk=PROFILE      │  │ sk=EXERCISE#<id> │  │  sk=USER#<id>    │          │
+│  │  gsi1pk=EMAIL#   │  │ gsi1pk=EXERCISE# │  │  ttl=expiresAt   │          │
+│  └──────────────────┘  └──────────────────┘  └──────────────────┘          │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,20 +71,21 @@ The Astro-based frontend serves both the blog and labs:
 | Feature | Technology | Description |
 |---------|------------|-------------|
 | Static Site Generation | Astro 5.x | Blog posts, landing pages |
-| Interactive Islands | Solid.js | Auth status, progress tracking |
-| Styling | Tailwind CSS v4 | Tokyo Night theme |
+| Interactive Islands | Solid.js | Auth status, progress tracking, clipboard |
+| Styling | Tailwind CSS v4 | Tokyo Night theme (dark mode only) |
 | Content | MDX | Blog posts and lab exercises |
+| Typography | Inconsolata | Monospace font throughout |
 
 ### Backend (packages/api)
 
-Serverless API built with SST:
+Serverless API built with SST v3:
 
 | Component | Technology | Description |
 |-----------|------------|-------------|
 | Runtime | AWS Lambda | Node.js 20 functions |
 | API | API Gateway v2 | HTTP API with CORS |
-| Auth | GitHub OAuth + JWT | Stateless authentication |
-| Database | DynamoDB | Single-table design |
+| Auth | GitHub OAuth + JWT | Stateless authentication (7-day expiry) |
+| Database | DynamoDB | Single-table design with GSIs |
 
 ### Infrastructure (infra/)
 
@@ -90,44 +93,113 @@ SST infrastructure-as-code:
 
 | File | Purpose |
 |------|---------|
-| `sst.config.ts` | App configuration |
-| `infra/database.ts` | DynamoDB tables |
-| `infra/auth.ts` | Secrets management |
-| `infra/api.ts` | API Gateway routes |
+| `sst.config.ts` | App configuration (name: akasha-labs, region: ap-south-1) |
+| `infra/database.ts` | DynamoDB tables (Users, Progress, Sessions) |
+| `infra/auth.ts` | Secrets (GithubClientId, GithubClientSecret, JwtSecret) |
+| `infra/api.ts` | API Gateway routes with Lambda handlers |
 
 ## Data Flow
 
 ### Authentication Flow
 
 ```
-1. User clicks "Login with GitHub"
-2. Frontend redirects to /auth/github
-3. Lambda redirects to GitHub OAuth
-4. GitHub redirects back with code
-5. Lambda exchanges code for token
-6. Lambda creates user in DynamoDB
-7. Lambda creates JWT
-8. Redirect to frontend with JWT
-9. Frontend stores JWT in localStorage
+┌──────────┐      ┌──────────────┐      ┌─────────────┐      ┌──────────┐
+│   User   │      │   Frontend   │      │  API Lambda │      │  GitHub  │
+└────┬─────┘      └──────┬───────┘      └──────┬──────┘      └────┬─────┘
+     │                   │                     │                   │
+     │  1. Click Login   │                     │                   │
+     │──────────────────>│                     │                   │
+     │                   │                     │                   │
+     │                   │  2. GET /auth/github│                   │
+     │                   │────────────────────>│                   │
+     │                   │                     │                   │
+     │                   │  3. Redirect URL    │                   │
+     │                   │<────────────────────│                   │
+     │                   │                     │                   │
+     │  4. Redirect to GitHub OAuth            │                   │
+     │<────────────────────────────────────────────────────────────>
+     │                   │                     │                   │
+     │  5. User authorizes app                 │                   │
+     │<────────────────────────────────────────────────────────────>
+     │                   │                     │                   │
+     │  6. Callback with code                  │                   │
+     │──────────────────>│                     │                   │
+     │                   │                     │                   │
+     │                   │  7. GET /callback?code=xxx              │
+     │                   │────────────────────>│                   │
+     │                   │                     │                   │
+     │                   │                     │  8. Exchange code │
+     │                   │                     │──────────────────>│
+     │                   │                     │                   │
+     │                   │                     │  9. Access token  │
+     │                   │                     │<──────────────────│
+     │                   │                     │                   │
+     │                   │                     │  10. Get user info│
+     │                   │                     │──────────────────>│
+     │                   │                     │                   │
+     │                   │                     │  11. User data    │
+     │                   │                     │<──────────────────│
+     │                   │                     │                   │
+     │                   │                     │  12. Save to DynamoDB
+     │                   │                     │  (Users + Sessions)
+     │                   │                     │                   │
+     │                   │  13. Redirect + JWT │                   │
+     │                   │<────────────────────│                   │
+     │                   │                     │                   │
+     │  14. Store JWT    │                     │                   │
+     │<──────────────────│                     │                   │
+     │                   │                     │                   │
 ```
 
 ### Exercise Completion Flow
 
 ```
-1. User completes exercise locally
-2. User runs verification command
-3. Frontend sends POST /exercises/{id}/verify
-4. Lambda validates JWT
-5. Lambda records completion in DynamoDB
-6. Lambda returns updated progress
-7. Frontend updates UI
+┌──────────┐      ┌──────────────┐      ┌─────────────┐      ┌──────────┐
+│   User   │      │   Frontend   │      │  API Lambda │      │ DynamoDB │
+└────┬─────┘      └──────┬───────┘      └──────┬──────┘      └────┬─────┘
+     │                   │                     │                   │
+     │  1. Read exercise │                     │                   │
+     │      instructions │                     │                   │
+     │<──────────────────│                     │                   │
+     │                   │                     │                   │
+     │  2. Perform tasks │                     │                   │
+     │     locally       │                     │                   │
+     │  (terminal/editor)│                     │                   │
+     │                   │                     │                   │
+     │  3. Run CLI:      │                     │                   │
+     │  infra-learn      │                     │                   │
+     │  verify <id>      │                     │                   │
+     │──────────────────>│                     │                   │
+     │                   │                     │                   │
+     │                   │  4. POST /exercises/{id}/verify        │
+     │                   │     Authorization: Bearer <jwt>        │
+     │                   │────────────────────>│                   │
+     │                   │                     │                   │
+     │                   │                     │  5. Validate JWT  │
+     │                   │                     │──────────────────>│
+     │                   │                     │                   │
+     │                   │                     │  6. Session valid │
+     │                   │                     │<──────────────────│
+     │                   │                     │                   │
+     │                   │                     │  7. Record progress
+     │                   │                     │──────────────────>│
+     │                   │                     │                   │
+     │                   │                     │  8. Success       │
+     │                   │                     │<──────────────────│
+     │                   │                     │                   │
+     │                   │  9. Updated progress│                   │
+     │                   │<────────────────────│                   │
+     │                   │                     │                   │
+     │  10. Show success │                     │                   │
+     │<──────────────────│                     │                   │
+     │                   │                     │                   │
 ```
 
 ## Environments
 
 | Environment | Frontend URL | API Stage | Purpose |
 |-------------|--------------|-----------|---------|
-| Development | localhost:4321 | (local) | Local development |
+| Development | localhost:4321 | (local SST dev) | Local development |
 | Preview | preview.works-on-my.cloud | preview | PR previews |
 | Production | works-on-my.cloud | prod | Live site |
 
@@ -135,42 +207,38 @@ SST infrastructure-as-code:
 
 ### Authentication
 - GitHub OAuth for user identity
-- JWT tokens (7-day expiry)
-- Secure HTTP-only considerations for production
+- JWT tokens with 7-day expiry
+- Sessions stored in DynamoDB with TTL
 
 ### API Security
-- CORS restricted to frontend origins
+- CORS restricted to specific frontend origins per stage
 - JWT validation on protected routes
-- DynamoDB IAM roles per Lambda
+- DynamoDB IAM roles scoped per Lambda function
 
 ### Secrets Management
-- SST Secrets for sensitive values
+- SST Secrets for sensitive values (GitHub OAuth, JWT secret)
 - Per-stage secret isolation
 - No secrets in code or git
+- OIDC for GitHub Actions (no static AWS credentials)
 
 ## Scalability
 
 ### Frontend
-- Cloudflare Pages CDN
-- Edge caching for static assets
-- Incremental static regeneration
+- Cloudflare Pages CDN with global edge caching
+- Static assets cached long-term
+- HTML pages with short-term caching
 
 ### Backend
-- Lambda auto-scaling
+- Lambda auto-scaling (concurrent executions)
 - DynamoDB on-demand capacity
 - API Gateway managed scaling
 
 ## Monitoring
 
 ### Current
-- Cloudflare analytics (frontend)
-- CloudWatch Logs (Lambda)
-- GitHub Actions logs (CI/CD)
-
-### Planned
-- OpenTelemetry integration
-- Custom dashboards
-- Error tracking (Sentry)
+- Cloudflare analytics for frontend traffic
+- CloudWatch Logs for Lambda functions
+- GitHub Actions logs for CI/CD
 
 ## Related Documentation
 
@@ -179,3 +247,4 @@ SST infrastructure-as-code:
 - [Backend (SST)](./backend-sst.md)
 - [CI/CD Workflows](./ci-cd.md)
 - [SST Development Guide](../sst-api-development.md)
+- [AWS OIDC Setup](../aws-oidc-setup.md)

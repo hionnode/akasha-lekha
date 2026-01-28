@@ -164,6 +164,36 @@ api.route("GET /auth/github", {
 
 ## Adding New Routes
 
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Adding a New API Route                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Step 1                        Step 2                        Step 3
+───────                       ───────                       ───────
+Define Route                  Create Handler                Generate Types
+in infra/api.ts               in packages/api/              with sst dev
+
+┌───────────────────┐    ┌───────────────────┐    ┌───────────────────┐
+│                   │    │                   │    │                   │
+│  api.route(       │    │  export const     │    │  $ pnpm sst dev   │
+│    "GET /new",    │───>│    handler =      │───>│                   │
+│    { handler,     │    │    async (event)  │    │  Generates types  │
+│      link: [...] }│    │    => { ... }     │    │  in .sst/         │
+│  );               │    │                   │    │                   │
+│                   │    │                   │    │                   │
+└───────────────────┘    └───────────────────┘    └───────────────────┘
+         │                        │                        │
+         │                        │                        │
+         ▼                        ▼                        ▼
+┌───────────────────┐    ┌───────────────────┐    ┌───────────────────┐
+│ Link resources:   │    │ Access via:       │    │ Now you can use:  │
+│ • Secrets         │    │ • Resource.X.value│    │ • Resource.Table  │
+│ • DynamoDB tables │    │ • Resource.Y.name │    │ • Resource.Secret │
+│ • Environment vars│    │ • event.params    │    │ • Full TypeScript │
+└───────────────────┘    └───────────────────┘    └───────────────────┘
+```
+
 ### Step 1: Define the Route in `infra/api.ts`
 
 ```typescript
@@ -334,6 +364,36 @@ export function redirect(url: string): APIGatewayProxyResultV2 {
 }
 ```
 
+### JWT Auth Utilities (`lib/auth.ts`)
+
+```typescript
+import jwt from "jsonwebtoken";
+import { Resource } from "sst";
+import type { JwtPayload } from "@akasha/types";
+
+// Create a JWT token (7-day expiry)
+export function createToken(payload: Omit<JwtPayload, "iat" | "exp">): string {
+  return jwt.sign(payload, Resource.JwtSecret.value, {
+    expiresIn: "7d",
+  });
+}
+
+// Verify and decode a JWT token
+export function verifyToken(token: string): JwtPayload | null {
+  try {
+    return jwt.verify(token, Resource.JwtSecret.value) as JwtPayload;
+  } catch {
+    return null;
+  }
+}
+
+// Extract Bearer token from Authorization header
+export function getTokenFromHeader(authHeader?: string): string | null {
+  if (!authHeader?.startsWith("Bearer ")) return null;
+  return authHeader.slice(7);
+}
+```
+
 ---
 
 ## Working with DynamoDB
@@ -348,18 +408,27 @@ import {
   PutCommand,
   QueryCommand,
   DeleteCommand,
-  UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
+
+// Support for local DynamoDB development
+const isLocal = process.env.DYNAMODB_ENDPOINT !== undefined;
 
 const client = new DynamoDBClient({
   region: process.env.AWS_REGION || "ap-south-1",
+  ...(isLocal && {
+    endpoint: process.env.DYNAMODB_ENDPOINT,
+    credentials: {
+      accessKeyId: "local",
+      secretAccessKey: "local",
+    },
+  }),
 });
 
 export const db = DynamoDBDocumentClient.from(client, {
   marshallOptions: { removeUndefinedValues: true },
 });
 
-export { GetCommand, PutCommand, QueryCommand, DeleteCommand, UpdateCommand };
+export { GetCommand, PutCommand, QueryCommand, DeleteCommand };
 ```
 
 ### Common Operations
