@@ -6,10 +6,41 @@ The Labs platform provides interactive, hands-on exercises for developers. Users
 
 Labs is designed around the concept of **learn by doing**:
 
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Labs Learning Flow                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+     ┌───────────┐         ┌───────────┐         ┌───────────┐
+     │           │         │           │         │           │
+     │  1. READ  │────────>│  2. DO    │────────>│ 3. VERIFY │
+     │           │         │           │         │           │
+     └───────────┘         └───────────┘         └───────────┘
+          │                     │                     │
+          ▼                     ▼                     ▼
+    ┌───────────┐         ┌───────────┐         ┌───────────┐
+    │   Web UI  │         │  Local    │         │    CLI    │
+    │           │         │  Machine  │         │  Command  │
+    │ • Exercise│         │           │         │           │
+    │   content │         │ • Terminal│         │ infra-    │
+    │ • Hints   │         │ • Editor  │         │ learn     │
+    │ • Docs    │         │ • Tools   │         │ verify    │
+    └───────────┘         └───────────┘         └───────────┘
+                                                     │
+                                                     ▼
+                               ┌─────────────────────────────────┐
+                               │         4. TRACK PROGRESS        │
+                               │                                  │
+                               │  • API validates completion      │
+                               │  • DynamoDB stores progress      │
+                               │  • UI updates with checkmark     │
+                               └─────────────────────────────────┘
+```
+
 1. User reads exercise instructions on the web
 2. User performs tasks on their local machine (terminal, editor)
 3. User runs a CLI command to verify completion
-4. Progress is tracked and persisted
+4. Progress is tracked and persisted via GitHub OAuth
 
 ## Directory Structure
 
@@ -19,14 +50,14 @@ Labs is designed around the concept of **learn by doing**:
 apps/web/src/
 ├── components/labs/
 │   ├── CLICommand.astro         # CLI command display
-│   ├── DifficultyBadge.astro    # Easy/Medium/Hard badge
+│   ├── DifficultyBadge.astro    # Beginner/Intermediate/Advanced badge
 │   ├── ExerciseCard.astro       # Exercise preview card
 │   ├── HintAccordion.astro      # Collapsible hints
 │   ├── ModuleCard.astro         # Module overview card
 │   ├── ObjectivesList.astro     # Exercise objectives
 │   ├── ProgressBar.astro        # Completion progress
-│   ├── VerificationChecklist.astro # Verification steps
-│   ├── islands/                 # Interactive components
+│   ├── VerificationChecklist.astro # Verification criteria
+│   ├── islands/                 # Interactive Solid.js components
 │   │   ├── AuthStatus.tsx       # Login/logout UI
 │   │   ├── CLICommandCopy.tsx   # Copy-to-clipboard
 │   │   └── ProgressTracker.tsx  # Real-time progress
@@ -40,20 +71,21 @@ apps/web/src/
 │   │   ├── linux-01.mdx
 │   │   ├── linux-02.mdx
 │   │   └── linux-03.mdx
-│   └── schemas.ts               # Content schemas
+│   └── schemas.ts               # Zod schemas (separate from config.ts)
 ├── pages/labs/
-│   ├── index.astro              # Labs landing
+│   ├── index.astro              # Labs landing page
 │   ├── dashboard.astro          # User dashboard
 │   ├── login.astro              # Login page
 │   ├── setup.astro              # CLI setup instructions
-│   ├── auth/callback.astro      # OAuth callback
+│   ├── auth/callback.astro      # OAuth callback handler
 │   └── modules/
 │       ├── index.astro          # Module listing
 │       └── [...slug].astro      # Module/exercise pages
 └── utils/labs/
-    ├── api.ts                   # API client
+    ├── api.ts                   # API client functions
     ├── auth.ts                  # Auth utilities
-    └── mocks.ts                 # Mock data for dev
+    ├── index.ts                 # Exports
+    └── mocks.ts                 # Mock data for development
 ```
 
 ### Backend (packages/api)
@@ -62,7 +94,7 @@ apps/web/src/
 packages/api/src/functions/
 ├── auth/
 │   ├── github.ts       # Initiate GitHub OAuth
-│   ├── callback.ts     # Handle OAuth callback
+│   ├── callback.ts     # Handle OAuth callback, create JWT
 │   ├── verify.ts       # Verify JWT token
 │   └── logout.ts       # Invalidate session
 ├── exercises/
@@ -73,42 +105,47 @@ packages/api/src/functions/
     └── record.ts       # Record exercise completion
 ```
 
-## Content Schema
+## Content Schemas
+
+Content collections are defined in `apps/web/src/content/config.ts`.
 
 ### Module Schema
 
 ```typescript
-const moduleSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  description: z.string(),
-  icon: z.string(),                    // Emoji or icon name
-  difficulty: z.enum(['beginner', 'intermediate', 'advanced']),
-  estimatedTime: z.string(),           // "2-3 hours"
-  prerequisites: z.array(z.string()).optional(),
-  tags: z.array(z.string()),
-  status: z.enum(['available', 'coming-soon', 'beta']),
+const labsModules = defineCollection({
+  type: 'content',
+  schema: z.object({
+    id: z.string().min(1),                              // Unique module identifier
+    title: z.string().min(1),                           // Module title
+    description: z.string().min(1),                     // Module description
+    order: z.number().int().positive(),                 // Display order
+    icon: z.string().optional(),                        // Emoji or icon
+    prerequisites: z.array(z.string()).optional(),      // Required modules
+    estimatedTime: z.string().min(1),                   // "2-3 hours"
+    exerciseCount: z.number().int().nonnegative(),      // Number of exercises
+    status: z.enum(['available', 'coming-soon', 'beta']).default('available'),
+  }),
 });
 ```
 
 ### Exercise Schema
 
 ```typescript
-const exerciseSchema = z.object({
-  id: z.string(),
-  module: z.string(),                  // Reference to module
-  title: z.string(),
-  description: z.string(),
-  difficulty: z.enum(['easy', 'medium', 'hard']),
-  estimatedTime: z.string(),           // "15 minutes"
-  objectives: z.array(z.string()),
-  hints: z.array(z.object({
-    title: z.string(),
-    content: z.string(),
-  })).optional(),
-  cliCommand: z.string(),              // Verification command
-  verificationSteps: z.array(z.string()),
-  order: z.number(),
+const labsExercises = defineCollection({
+  type: 'content',
+  schema: z.object({
+    id: z.string().min(1),                              // Unique exercise identifier
+    module: z.string().min(1),                          // Parent module ID
+    order: z.number().int().positive(),                 // Order within module
+    title: z.string().min(1),                           // Exercise title
+    description: z.string().min(1),                     // Brief description
+    difficulty: z.enum(['beginner', 'intermediate', 'advanced']),
+    estimatedTime: z.string().min(1),                   // "15 minutes"
+    objectives: z.array(z.string()).min(1),             // Learning objectives
+    verificationCriteria: z.array(z.string()).min(1),   // What gets verified
+    hints: z.array(z.string()).optional(),              // Help hints
+    cliCommand: z.string().startsWith('infra-learn'),   // Verification command
+  }),
 });
 ```
 
@@ -144,8 +181,9 @@ const exerciseSchema = z.object({
      │                │                │───────────────>│
      │                │                │<───────────────│
      │                │                │                │
-     │                │                │ Create/update user
-     │                │                │ Create JWT     │
+     │                │                │ Create/update user in DynamoDB
+     │                │                │ Create session in DynamoDB
+     │                │                │ Generate JWT (7-day expiry)
      │                │ Redirect with JWT              │
      │                │<───────────────│                │
      │ Store JWT      │                │                │
@@ -154,14 +192,14 @@ const exerciseSchema = z.object({
 
 ## Progress Tracking
 
-### Data Model
+### DynamoDB Data Model
 
 ```typescript
-// DynamoDB Progress Table
+// Progress Table
 {
   pk: "USER#<github_id>",           // Partition key
   sk: "EXERCISE#<exercise_id>",     // Sort key
-  gsi1pk: "EXERCISE#<exercise_id>", // For leaderboards
+  gsi1pk: "EXERCISE#<exercise_id>", // For leaderboards (GSI)
   gsi1sk: "COMPLETED#<timestamp>",
 
   // Attributes
@@ -175,41 +213,42 @@ const exerciseSchema = z.object({
 
 ```
 1. User completes exercise locally
-2. User runs: labs verify <exercise-id>
+2. User runs: infra-learn verify <exercise-id>
 3. CLI generates verification hash based on:
    - Local system state
    - Exercise requirements
    - Timestamp
-4. CLI sends hash to API
-5. API validates hash format
-6. API records completion with hash
-7. Frontend updates progress
+4. CLI sends hash to POST /exercises/{id}/verify
+5. API validates JWT from Authorization header
+6. API validates hash format
+7. API records completion in Progress table
+8. Frontend updates to show completion
 ```
 
 ## API Endpoints
 
 ### Authentication
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/auth/github` | Redirect to GitHub OAuth |
-| GET | `/auth/github/callback` | Handle OAuth callback |
-| POST | `/auth/verify` | Verify JWT token |
-| POST | `/auth/logout` | Invalidate session |
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/auth/github` | No | Redirect to GitHub OAuth |
+| GET | `/auth/github/callback` | No | Handle OAuth callback, create JWT |
+| POST | `/auth/verify` | JWT | Verify JWT token is valid |
+| POST | `/auth/logout` | No | Invalidate session |
 
 ### Exercises
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/exercises` | List all exercises |
-| GET | `/exercises/{id}` | Get exercise details |
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/exercises` | No | List all exercises |
+| GET | `/exercises/{id}` | No | Get exercise details |
 
 ### Progress
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/progress` | Get user's progress |
-| POST | `/exercises/{id}/verify` | Record exercise completion |
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/progress` | JWT | Get user's exercise progress |
+| POST | `/exercises/{id}/verify` | JWT | Record exercise completion |
 
 ## Frontend Components
 
@@ -221,19 +260,20 @@ These components hydrate on the client for interactivity:
 // AuthStatus.tsx - Shows login/logout button
 export function AuthStatus() {
   const [user, setUser] = createSignal<User | null>(null);
-  // ... handles auth state
+  // Checks localStorage for JWT, verifies with API
+  // Shows login button or user avatar with logout
 }
 
 // ProgressTracker.tsx - Real-time progress updates
 export function ProgressTracker(props: { exerciseId: string }) {
   const [progress, setProgress] = createSignal<Progress | null>(null);
-  // ... polls for progress updates
+  // Fetches progress from API, updates on completion
 }
 
 // CLICommandCopy.tsx - Copy command to clipboard
 export function CLICommandCopy(props: { command: string }) {
   const [copied, setCopied] = createSignal(false);
-  // ... handles clipboard
+  // Copies command to clipboard with visual feedback
 }
 ```
 
@@ -247,20 +287,20 @@ import { AuthStatus } from './islands/AuthStatus';
 <AuthStatus client:load />
 ```
 
-## Module Structure
+## Example Content
 
-### Example Module (Linux Fundamentals)
+### Module Definition
 
 ```mdx
 ---
 id: "linux"
 title: "Linux Fundamentals"
 description: "Master essential Linux commands and concepts"
+order: 1
 icon: "🐧"
-difficulty: "beginner"
 estimatedTime: "4-6 hours"
+exerciseCount: 3
 prerequisites: []
-tags: ["linux", "terminal", "basics"]
 status: "available"
 ---
 
@@ -272,29 +312,29 @@ status: "available"
 - Understand permissions
 ```
 
-### Example Exercise
+### Exercise Definition
 
 ```mdx
 ---
 id: "linux-01"
 module: "linux"
+order: 1
 title: "Navigate the Filesystem"
 description: "Learn to move around the Linux filesystem"
-difficulty: "easy"
+difficulty: "beginner"
 estimatedTime: "15 minutes"
 objectives:
   - "Use cd to change directories"
   - "Use ls to list directory contents"
   - "Understand absolute vs relative paths"
-hints:
-  - title: "Stuck on cd?"
-    content: "Remember, `cd ..` goes up one directory"
-cliCommand: "labs verify linux-01"
-verificationSteps:
+verificationCriteria:
   - "Navigate to /tmp"
   - "Create a directory called 'labs-test'"
   - "Navigate into labs-test"
-order: 1
+hints:
+  - "Remember, `cd ..` goes up one directory"
+  - "Use `pwd` to print your current directory"
+cliCommand: "infra-learn verify linux-01"
 ---
 
 ## Introduction
@@ -307,19 +347,22 @@ The filesystem is the foundation of Linux...
 ### Running Labs Locally
 
 ```bash
-# Start frontend
+# Start frontend only
 pnpm dev
 
 # Start API (SST dev mode)
 pnpm dev:api
 
-# Or both
+# Start both together
 pnpm dev:all
+
+# Start local DynamoDB
+pnpm db:local
 ```
 
 ### Mock Data
 
-For frontend development without the API:
+For frontend development without the API, mocks are available:
 
 ```typescript
 // utils/labs/mocks.ts
@@ -327,25 +370,28 @@ export const mockUser: User = {
   id: "1",
   githubId: "12345",
   username: "developer",
-  // ...
+  email: "dev@example.com",
+  avatarUrl: "https://...",
 };
 
 export const mockProgress: Progress[] = [
   { exerciseId: "linux-01", completedAt: "2025-01-27" },
-  // ...
 ];
 ```
 
-## Future Enhancements
+### Testing
 
-- [ ] CLI tool (`labs` command) for verification
-- [ ] Leaderboards and achievements
-- [ ] Team/organization progress tracking
-- [ ] Custom exercise creation
-- [ ] Integration with cloud sandboxes
+```bash
+# Unit tests for labs components
+pnpm test:web
+
+# E2E tests
+pnpm test:e2e
+```
 
 ## Related Documentation
 
 - [Architecture Overview](./overview.md)
 - [Backend (SST)](./backend-sst.md)
 - [SST Development Guide](../sst-api-development.md)
+- [CI/CD Workflows](./ci-cd.md)

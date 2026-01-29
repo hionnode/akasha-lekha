@@ -28,6 +28,13 @@ This document describes the GitHub Actions workflows for continuous integration 
 │  │   Quality checks  Web changes:           API/Infra changes:         │    │
 │  │                   - Deploy production    - Deploy to prod           │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                      PR Closed                                       │    │
+│  │                                                                      │    │
+│  │   api-deploy.yml (cleanup job)                                      │    │
+│  │   - Remove preview stage resources                                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,8 +53,8 @@ This document describes the GitHub Actions workflows for continuous integration 
 | Job | Condition | Checks |
 |-----|-----------|--------|
 | `changes` | Always | Detect which packages changed |
-| `web` | `apps/web/**` changed | Lint, typecheck, test, build |
-| `api` | `packages/api/**` changed | Typecheck, test |
+| `web` | `apps/web/**` changed | Lint, typecheck, test:run, build |
+| `api` | `packages/api/**` changed | Typecheck, test:run |
 | `types` | `packages/types/**` changed | Typecheck |
 | `ci-success` | Always | Aggregate results for branch protection |
 
@@ -90,20 +97,7 @@ paths:
 - Builds from `apps/web/`
 - Deploys to Cloudflare Pages
 - Posts preview URL as PR comment
-- Tracks deployment history (last 5)
-- Updates commit status
-
-**PR Comment Example:**
-
-```markdown
-## 🌐 Web Preview Deployment
-
-### 🔗 [**Visit Preview →**](https://preview-123.workers.dev)
-
-| Branch | Commit | Build | Cache | Status |
-|:-------|:-------|:------|:------|:-------|
-| `feat/new-feature` | `abc1234` | 45s | ✅ | ✅ Ready |
-```
+- Updates existing comment on new commits
 
 ---
 
@@ -113,7 +107,7 @@ paths:
 
 **Triggers:**
 - Push to `main` with web changes
-- Manual dispatch (with skip cache option)
+- Manual dispatch
 
 **Path Filter:**
 ```yaml
@@ -125,18 +119,17 @@ paths:
 
 **Features:**
 - Deploys to Cloudflare Pages production
-- Captures previous version for rollback
-- Creates job summary with rollback command
 - Never cancels in-progress deploys
+- Creates job summary
 
 ---
 
 ### 4. API Deploy (`api-deploy.yml`)
 
-**Purpose:** Deploy SST API to AWS.
+**Purpose:** Deploy SST API to AWS using OIDC authentication.
 
 **Triggers:**
-- Pull requests: Deploy to `preview` stage
+- Pull requests (opened, synchronize, reopened, closed): Deploy to `preview` stage
 - Push to `main`: Deploy to `prod` stage
 - Manual dispatch: Choose stage
 
@@ -150,11 +143,18 @@ paths:
   - 'pnpm-lock.yaml'
 ```
 
+**Jobs:**
+
+| Job | Trigger | Action |
+|-----|---------|--------|
+| `deploy` | PR opened/updated, push to main | Deploy to appropriate stage |
+| `cleanup` | PR closed | Remove preview stage resources |
+
 **Features:**
+- **OIDC Authentication**: No static AWS credentials in GitHub secrets
 - Automatic stage selection (PR → preview, main → prod)
-- AWS credentials via secrets
 - Posts API URL as PR comment
-- Cleanup job removes preview stage when PR closes
+- Cleanup job removes preview resources when PR closes
 
 **PR Comment Example:**
 
@@ -173,52 +173,123 @@ curl https://abc123.execute-api.ap-south-1.amazonaws.com/exercises
 
 ---
 
-## Required Secrets
+## AWS OIDC Authentication
 
-### GitHub Repository Secrets
+The API workflow uses **OIDC (OpenID Connect)** for keyless AWS authentication, eliminating the need for static credentials:
+
+| Traditional (Access Keys) | OIDC |
+|---------------------------|------|
+| Long-lived credentials | Short-lived tokens (15 min - 1 hour) |
+| Stored in GitHub secrets | No secrets to manage |
+| Must be rotated manually | Automatic token refresh |
+| Risk of credential leakage | No credentials to leak |
+
+**How it works:**
+
+```yaml
+permissions:
+  id-token: write  # Required for OIDC
+
+steps:
+  - name: Configure AWS Credentials (OIDC)
+    uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      role-session-name: github-actions-${{ github.run_id }}
+      aws-region: ap-south-1
+```
+
+**Setup required:** See [AWS OIDC Setup Guide](../aws-oidc-setup.md) for IAM role configuration.
+
+---
+
+## Required Secrets
 
 Configure in **Settings → Secrets and variables → Actions**:
 
 | Secret | Used By | Description |
 |--------|---------|-------------|
-| `CLOUDFLARE_API_TOKEN` | Web workflows | Cloudflare API token |
+| `CLOUDFLARE_API_TOKEN` | Web workflows | Cloudflare API token with Pages edit permission |
 | `CLOUDFLARE_ACCOUNT_ID` | Web workflows | Cloudflare account ID |
-| `AWS_ROLE_ARN` | API workflow | IAM role ARN for OIDC |
+| `AWS_ROLE_ARN` | API workflow | IAM role ARN for OIDC (e.g., `arn:aws:iam::123456789:role/github-actions-akasha-labs`) |
 
-### AWS Authentication (OIDC)
-
-The API workflow uses **OIDC** (OpenID Connect) for keyless AWS authentication:
-
-- No long-lived credentials stored in GitHub
-- Short-lived tokens (auto-refresh)
-- Full CloudTrail audit trail
-- See **[AWS OIDC Setup Guide](../aws-oidc-setup.md)** for configuration
-
-```yaml
-# How it works in the workflow
-- uses: aws-actions/configure-aws-credentials@v4
-  with:
-    role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-    aws-region: ap-south-1
-```
-
-### SST Secrets (per stage)
-
-Set via CLI (not GitHub):
+**SST Secrets (per stage)** - Set via CLI, not GitHub:
 
 ```bash
 # Preview stage
 pnpm sst secret set GithubClientId <value> --stage preview
 pnpm sst secret set GithubClientSecret <value> --stage preview
-pnpm sst secret set JwtSecret <value> --stage preview
+pnpm sst secret set JwtSecret $(openssl rand -base64 32) --stage preview
 
 # Production stage
 pnpm sst secret set GithubClientId <value> --stage prod
 pnpm sst secret set GithubClientSecret <value> --stage prod
-pnpm sst secret set JwtSecret <value> --stage prod
+pnpm sst secret set JwtSecret $(openssl rand -base64 32) --stage prod
 ```
 
 ---
+
+## Deployment Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Developer Workflow                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            Create Pull Request                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                    ┌─────────────────┼─────────────────┐
+                    ▼                 ▼                 ▼
+          ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+          │    ci.yml       │ │ web-preview.yml │ │ api-deploy.yml  │
+          │                 │ │                 │ │                 │
+          │ • Lint          │ │ • Build Astro   │ │ • SST deploy    │
+          │ • Typecheck     │ │ • Deploy to CF  │ │   --stage       │
+          │ • Test          │ │ • Comment URL   │ │   preview       │
+          │ • Build         │ │                 │ │ • Comment URL   │
+          └────────┬────────┘ └────────┬────────┘ └────────┬────────┘
+                   │                   │                   │
+                   └─────────────────┬─┴───────────────────┘
+                                     │
+                                     ▼
+                    ┌─────────────────────────────────────┐
+                    │       All Checks Pass?              │
+                    │       Review & Approve PR           │
+                    └─────────────────┬───────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            Merge to main                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    ▼                                   ▼
+          ┌─────────────────────────┐       ┌─────────────────────────┐
+          │  web-production.yml     │       │    api-deploy.yml       │
+          │                         │       │                         │
+          │  • Build Astro          │       │  • SST deploy           │
+          │  • Deploy to Cloudflare │       │    --stage prod         │
+          │    Pages (production)   │       │  • AWS OIDC auth        │
+          └─────────────────────────┘       └─────────────────────────┘
+                    │                                   │
+                    ▼                                   ▼
+          ┌─────────────────────────┐       ┌─────────────────────────┐
+          │   works-on-my.cloud     │       │  API Gateway (prod)     │
+          │   (Cloudflare Pages)    │       │  Lambda + DynamoDB      │
+          └─────────────────────────┘       └─────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         PR Closed (Cleanup)                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  api-deploy.yml (cleanup job)                                        │    │
+│  │  • pnpm sst remove --stage preview                                   │    │
+│  │  • Removes all AWS resources for preview stage                       │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ## Path-Based Triggering
 
@@ -244,7 +315,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 ```
-Cancels previous runs on same branch.
+Cancels previous runs on same branch to save resources.
 
 ### Web Preview
 ```yaml
@@ -252,7 +323,7 @@ concurrency:
   group: web-preview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 ```
-One deployment per PR, cancels outdated.
+One deployment per PR, cancels outdated builds.
 
 ### Web Production
 ```yaml
@@ -260,7 +331,7 @@ concurrency:
   group: web-production
   cancel-in-progress: false
 ```
-Never cancels, queues deploys.
+Never cancels, queues deployments to prevent interruptions.
 
 ### API Deploy
 ```yaml
@@ -268,26 +339,18 @@ concurrency:
   group: api-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'prod' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 ```
-Cancels PR deploys, never cancels production.
+Cancels PR preview deploys, never cancels production.
 
 ---
 
-## Caching
+## Environments
 
-### Web (Astro)
-```yaml
-path: |
-  apps/web/node_modules/.astro
-  apps/web/.astro
-key: astro-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/astro.config.*') }}
-```
+GitHub Environments configured in the workflows:
 
-### pnpm
-```yaml
-- uses: actions/setup-node@v4
-  with:
-    cache: 'pnpm'
-```
+| Environment | Used By | Purpose |
+|-------------|---------|---------|
+| `api-preview` | api-deploy.yml (PR) | Preview API deployments |
+| `api-production` | api-deploy.yml (main) | Production API deployments |
 
 ---
 
@@ -297,23 +360,14 @@ Recommended settings for `main` branch:
 
 1. **Require status checks:**
    - `CI Success` (from ci.yml)
-   - `Web Preview` (when web changes)
-   - `API Deploy` (when API changes)
 
 2. **Require PR reviews**
 
-3. **Require linear history** (optional)
+3. **Do not allow bypassing the above settings**
 
 ---
 
 ## Manual Triggers
-
-### Web Production (skip cache)
-
-1. Go to **Actions** → **Web Production**
-2. Click **Run workflow**
-3. Check **Skip build cache**
-4. Click **Run workflow**
 
 ### API Deploy (choose stage)
 
@@ -333,30 +387,35 @@ Recommended settings for `main` branch:
 
 ### Common Issues
 
-**"No changes detected":**
-- Workflow didn't trigger because paths didn't match
-- Check path filters in workflow file
+**"No changes detected" - workflow didn't run:**
+- Check if changed paths match workflow path filters
+- Verify branch is correct (PRs to `main`)
 
-**Web build fails:**
-- Check `apps/web/` has valid astro.config.mjs
-- Verify TypeScript errors in web package
+**CI job skipped:**
+- Normal behavior when path filter doesn't match
+- Check `changes` job output to see detected changes
 
-**API deploy fails:**
-- Verify AWS credentials are set
-- Check SST secrets are configured
-- Run `pnpm sst deploy --stage <stage>` locally to debug
+**API deploy fails with OIDC error:**
+- Verify `AWS_ROLE_ARN` secret is set correctly
+- Check IAM role trust policy allows the repository
+- Ensure `id-token: write` permission is set
+- See [AWS OIDC Setup Guide](../aws-oidc-setup.md)
 
-**Cache not working:**
-- Check cache key matches
-- Verify paths exist after build
+**Web deploy fails:**
+- Verify `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets
+- Check Cloudflare Pages project exists
+
+**SST deploy fails with missing secrets:**
+- Run `pnpm sst secret list --stage <stage>` to verify secrets
+- Set missing secrets with `pnpm sst secret set`
 
 ---
 
 ## Adding New Workflows
 
-### New Package Workflow
+### New Package Quality Checks
 
-1. Add path filter to `ci.yml`:
+1. Add path filter to `ci.yml` changes job:
 ```yaml
 newpackage:
   - 'packages/newpackage/**'
@@ -368,19 +427,26 @@ newpackage:
   name: NewPackage Quality
   needs: changes
   if: needs.changes.outputs.newpackage == 'true'
-  # ... steps
+  runs-on: ubuntu-latest
+  defaults:
+    run:
+      working-directory: packages/newpackage
+  steps:
+    - uses: actions/checkout@v4
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 10
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'pnpm'
+    - run: pnpm install
+      working-directory: .
+    - run: pnpm typecheck
+    - run: pnpm test:run
 ```
 
-3. Update `ci-success` job to include new job.
-
-### New Deployment Target
-
-Create new workflow file following existing patterns:
-- Define triggers with path filters
-- Set up concurrency
-- Configure environment
-- Add deployment steps
-- Post comments/summaries
+3. Update `ci-success` job needs to include new job.
 
 ---
 
@@ -388,10 +454,10 @@ Create new workflow file following existing patterns:
 
 | File | Purpose |
 |------|---------|
-| `.github/workflows/ci.yml` | Quality checks (lint, test, typecheck) |
-| `.github/workflows/web-preview.yml` | Web preview deployments |
-| `.github/workflows/web-production.yml` | Web production deployments |
-| `.github/workflows/api-deploy.yml` | API (SST) deployments |
+| `.github/workflows/ci.yml` | Quality checks (lint, test, typecheck, build) |
+| `.github/workflows/web-preview.yml` | Web preview deployments to Cloudflare Pages |
+| `.github/workflows/web-production.yml` | Web production deployments to Cloudflare Pages |
+| `.github/workflows/api-deploy.yml` | API (SST) deployments to AWS |
 
 ---
 
@@ -400,4 +466,5 @@ Create new workflow file following existing patterns:
 - [Architecture Overview](./overview.md)
 - [Blog Setup](./blog.md)
 - [Backend (SST)](./backend-sst.md)
+- [AWS OIDC Setup](../aws-oidc-setup.md)
 - [SST Development Guide](../sst-api-development.md)

@@ -1,20 +1,22 @@
 # Blog Architecture
 
-The blog is built with Astro and lives in `apps/web/`. It serves technical articles focused on AWS, DevOps, and cloud engineering.
+The blog is built with Astro 5.x and lives in `apps/web/`. It serves technical articles focused on AWS, DevOps, and cloud engineering.
 
 ## Directory Structure
 
 ```
 apps/web/
-├── astro.config.mjs          # Astro configuration
+├── astro.config.mjs          # Astro configuration with MDX plugins
 ├── package.json              # Dependencies
-├── wrangler.jsonc            # Cloudflare config
+├── wrangler.jsonc            # Cloudflare Pages config
 ├── public/                   # Static assets
 │   ├── favicon.svg
 │   └── .assetsignore
 ├── src/
 │   ├── components/
 │   │   ├── blog/             # Blog-specific components
+│   │   ├── labs/             # Labs components
+│   │   │   └── islands/      # Solid.js interactive components
 │   │   ├── landing/          # Homepage components
 │   │   ├── layout/           # Layout components
 │   │   ├── shared/           # Reusable components
@@ -24,6 +26,9 @@ apps/web/
 │   │   │   ├── aws-for-startups/
 │   │   │   ├── component-guide/
 │   │   │   └── mdx-mastery-series/
+│   │   ├── labs/             # Labs content
+│   │   │   ├── modules/
+│   │   │   └── exercises/
 │   │   └── config.ts         # Content collection schemas
 │   ├── layouts/
 │   │   └── Layout.astro      # Base layout
@@ -32,11 +37,15 @@ apps/web/
 │   │   ├── blog/
 │   │   │   ├── index.astro   # Blog listing
 │   │   │   └── [...slug].astro # Blog post pages
-│   │   └── ...
+│   │   └── labs/             # Labs pages
 │   ├── styles/
 │   │   └── global.css        # Global styles + Tailwind
-│   └── utils/                # Utility functions
-└── vitest.config.ts          # Test configuration
+│   └── utils/                # Utility functions + MDX plugins
+│       ├── remarkCallouts.ts
+│       ├── remarkSteps.ts
+│       └── remarkPackageManager.ts
+├── vitest.config.ts          # Unit test configuration
+└── playwright.config.ts      # E2E test configuration
 ```
 
 ## Technology Stack
@@ -48,6 +57,8 @@ apps/web/
 | Tailwind CSS v4 | Styling |
 | Solid.js | Interactive islands |
 | TypeScript | Type safety |
+| Vitest | Unit testing |
+| Playwright | E2E testing |
 
 ## Content Collections
 
@@ -59,27 +70,66 @@ Blog posts use Astro's Content Collections for type-safe content management.
 // src/content/config.ts
 import { defineCollection, z } from 'astro:content';
 
-const blogCollection = defineCollection({
+const blog = defineCollection({
   type: 'content',
   schema: z.object({
     title: z.string(),
-    date: z.coerce.date(),
-    excerpt: z.string().min(10),
-    tags: z.array(z.string()).min(1),
-    featured: z.boolean().optional().default(false),
-    draft: z.boolean().optional().default(false),
-    series: z.string().optional(),
-    seriesPart: z.number().optional(),
-    seriesTotal: z.number().optional(),
+    date: z.string(),                              // YYYY-MM-DD format
+    updated: z.string().optional(),                // Last updated date
+    excerpt: z.string(),                           // Brief description
+    description: z.string().optional(),            // SEO description
+    author: z.string().optional(),                 // Post author
+    tags: z.array(z.string()),                     // Topic tags
+    featured: z.boolean().default(false),          // Show on homepage
+    draft: z.boolean().default(false),             // Hide from production
+    series: z.string().optional(),                 // Series identifier
+    seriesPart: z.number().optional(),             // Part number in series
+    seriesTotal: z.number().optional(),            // Total parts
   }),
 });
 
-export const collections = { blog: blogCollection };
+export const collections = { blog };
+```
+
+## Content Structure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Blog Content Organization                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+apps/web/src/content/blog/
+│
+├── Standalone Posts (single files)
+│   │
+│   ├── 2024-12-01-getting-started.mdx ──────> /blog/2024-12-01-getting-started
+│   ├── 2024-12-15-advanced-tips.mdx ────────> /blog/2024-12-15-advanced-tips
+│   └── 2025-01-20-new-feature.mdx ──────────> /blog/2025-01-20-new-feature
+│
+└── Series Posts (folders)
+    │
+    ├── aws-for-startups/
+    │   ├── 01-your-first-60-minutes.mdx ────> /blog/aws-for-startups/01-your-first-60-minutes
+    │   ├── 02-iam-intro.mdx ────────────────> /blog/aws-for-startups/02-iam-intro
+    │   └── 03-local-setup.mdx ──────────────> /blog/aws-for-startups/03-local-setup
+    │
+    └── mdx-mastery-series/
+        ├── 01-getting-started.mdx ──────────> /blog/mdx-mastery-series/01-getting-started
+        ├── 02-advanced-components.mdx ──────> /blog/mdx-mastery-series/02-advanced-components
+        └── 03-best-practices.mdx ───────────> /blog/mdx-mastery-series/03-best-practices
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Series Frontmatter Requirements:                                            │
+│  ─────────────────────────────────                                           │
+│  series: "aws-for-startups"    # Must match folder name exactly              │
+│  seriesPart: 1                 # Part number in series                       │
+│  seriesTotal: 5                # Total parts (optional)                      │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Creating Blog Posts
 
-### Basic Post
+### Standalone Post
 
 Create a new `.mdx` file in `src/content/blog/`:
 
@@ -87,7 +137,7 @@ Create a new `.mdx` file in `src/content/blog/`:
 ---
 title: "Your Post Title"
 date: "2025-01-27"
-excerpt: "A brief description of your post (minimum 10 characters)"
+excerpt: "A brief description of your post"
 tags: ["aws", "devops"]
 ---
 
@@ -96,7 +146,7 @@ Your content here using MDX...
 
 ### Series Post
 
-For multi-part series, organize in a folder:
+For multi-part series, organize in a folder matching the series slug:
 
 ```
 src/content/blog/
@@ -114,11 +164,13 @@ title: "Your First 60 Minutes in AWS"
 date: "2025-01-15"
 excerpt: "Get started with AWS the right way"
 tags: ["aws", "beginner"]
-series: "AWS for Startups"
+series: "aws-for-startups"
 seriesPart: 1
 seriesTotal: 5
 ---
 ```
+
+**Note:** The `series` field should match the folder name exactly.
 
 ### Frontmatter Reference
 
@@ -126,37 +178,102 @@ seriesTotal: 5
 |-------|------|----------|-------------|
 | `title` | string | Yes | Post title |
 | `date` | string | Yes | Publication date (YYYY-MM-DD) |
-| `excerpt` | string | Yes | Brief description (min 10 chars) |
-| `tags` | string[] | Yes | At least one tag |
-| `featured` | boolean | No | Highlight on homepage |
-| `draft` | boolean | No | Hide from public |
-| `series` | string | No | Series name |
+| `updated` | string | No | Last updated date (YYYY-MM-DD) |
+| `excerpt` | string | Yes | Brief description for cards |
+| `description` | string | No | SEO meta description |
+| `author` | string | No | Post author |
+| `tags` | string[] | Yes | Topic tags |
+| `featured` | boolean | No | Highlight on homepage (default: false) |
+| `draft` | boolean | No | Hide from production (default: false) |
+| `series` | string | No | Series identifier (match folder name) |
 | `seriesPart` | number | No | Part number in series |
 | `seriesTotal` | number | No | Total parts in series |
 
+### URL Structure
+
+- **Standalone posts:** `/blog/2024-12-01-my-post`
+- **Series posts:** `/blog/aws-for-startups/01-your-first-60-minutes`
+
 ## MDX Components
 
-The blog supports custom MDX components for enhanced content:
+### Callout Directives
 
-### Code Blocks
+Use directive syntax for callouts (no imports needed):
 
-````mdx
+```markdown
+:::tip
+Best practices, helpful suggestions, optimizations
+:::
+
+:::note
+Important information to remember
+:::
+
+:::info
+Additional context, background information
+:::
+
+:::warning
+Cost implications, breaking changes, important caveats
+:::
+
+:::caution
+Data loss, security issues, system failures
+:::
+```
+
+### Steps Component
+
+For step-by-step instructions:
+
+```markdown
+:::steps
+1. Create a new Amplify Hosting project
+2. Connect your repository to Amplify
+3. Modify your build settings
+4. Deploy and verify your application
+:::
+```
+
+### Package Manager Switcher
+
+For showing commands across package managers:
+
+````markdown
+:::package-manager
+```bash npm
+npm install package-name
+```
+
+```bash pnpm
+pnpm add package-name
+```
+
+```bash yarn
+yarn add package-name
+```
+:::
+````
+
+### Code Block Enhancements
+
+**With filename header:**
+````markdown
 ```typescript title="example.ts"
 const greeting = "Hello, World!";
 ```
 ````
 
-### Callouts/Alerts
-
-```mdx
-import Alert from '@/components/shared/Alert.astro';
-
-<Alert type="warning">
-  This is important information!
-</Alert>
+**Terminal window styling:**
+````markdown
+```bash terminal
+aws sso login --sso-session=acme
 ```
+````
 
-### File Trees
+### Astro Components
+
+Import and use components directly:
 
 ```mdx
 import FileTree from '@/components/shared/FileTree.astro';
@@ -166,17 +283,6 @@ import FileTree from '@/components/shared/FileTree.astro';
     - components/
     - pages/
 </FileTree>
-```
-
-### Terminal Output
-
-```mdx
-import TerminalOutput from '@/components/shared/TerminalOutput.astro';
-
-<TerminalOutput>
-  $ npm install
-  added 150 packages in 3s
-</TerminalOutput>
 ```
 
 ## Styling
@@ -207,13 +313,11 @@ The site is dark-mode only, matching the terminal aesthetic.
 ### Start Development Server
 
 ```bash
-cd apps/web
+# From root
 pnpm dev
-```
 
-Or from root:
-
-```bash
+# Or from apps/web
+cd apps/web
 pnpm dev
 ```
 
@@ -229,20 +333,22 @@ pnpm build
 pnpm preview
 ```
 
-### Validate Blog Posts
+### Run Tests
 
 ```bash
-pnpm validate:blog
-```
+# Unit tests
+pnpm test:web
 
-This checks all frontmatter against the schema.
+# E2E tests
+pnpm test:e2e
+```
 
 ## Deployment
 
 The blog deploys to Cloudflare Pages:
 
-1. **Preview**: Automatic on every PR
-2. **Production**: Automatic on merge to `main`
+1. **Preview**: Automatic on every PR (web-preview.yml)
+2. **Production**: Automatic on merge to `main` (web-production.yml)
 
 ### Cloudflare Configuration
 
@@ -285,7 +391,7 @@ import myImage from '../assets/image.png';
 
 ### Caching
 
-- Static assets: Long-term caching via Cloudflare
+- Static assets: Long-term caching via Cloudflare CDN
 - HTML pages: Short-term caching with revalidation
 
 ## Related Documentation
