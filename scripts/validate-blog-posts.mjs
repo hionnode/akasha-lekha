@@ -15,7 +15,7 @@ const blogSchema = z.object({
   seriesTotal: z.number().optional(),
 });
 
-const BLOG_DIR = './src/content/blog';
+const BLOG_DIR = './apps/web/src/content/blog';
 
 let hasErrors = false;
 
