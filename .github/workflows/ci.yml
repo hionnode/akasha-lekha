@@ -29,6 +29,7 @@ jobs:
       api: ${{ steps.filter.outputs.api }}
       types: ${{ steps.filter.outputs.types }}
       infra: ${{ steps.filter.outputs.infra }}
+      blog: ${{ steps.filter.outputs.blog }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -48,6 +49,9 @@ jobs:
             infra:
               - 'infra/**'
               - 'sst.config.ts'
+            blog:
+              - 'apps/web/src/content/blog/**'
+              - 'scripts/validate-blog-posts.mjs'
 
   # Quality checks for web app
   web:
@@ -115,13 +119,12 @@ jobs:
         run: pnpm install
         working-directory: .
 
+      - name: Lint
+        run: pnpm lint
+
       - name: Type Check
         run: pnpm typecheck
-        continue-on-error: true  # SST types may not exist until deployed
-
-      - name: Unit Tests
-        run: pnpm test:run
-        continue-on-error: true  # Tests may not exist yet
+        continue-on-error: true  # SST generates types from deployed resources
 
   # Quality checks for types package
   types:
@@ -153,10 +156,69 @@ jobs:
       - name: Type Check
         run: pnpm typecheck
 
+  # Blog validation
+  blog:
+    name: Blog Validation
+    needs: changes
+    if: needs.changes.outputs.blog == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install
+
+      - name: Validate Blog Posts
+        run: pnpm validate:blog
+
+  # E2E tests (optional - does not block CI)
+  e2e:
+    name: E2E Tests
+    needs: [changes, web]
+    if: needs.changes.outputs.web == 'true' && needs.web.result == 'success'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install
+        working-directory: .
+
+      - name: Install Playwright Browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run E2E Tests
+        run: pnpm test:e2e --project=chromium
+
   # Summary job for branch protection
   ci-success:
     name: CI Success
-    needs: [changes, web, api, types]
+    needs: [changes, web, api, types, blog]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -164,7 +226,8 @@ jobs:
         run: |
           if [[ "${{ needs.web.result }}" == "failure" ]] || \
              [[ "${{ needs.api.result }}" == "failure" ]] || \
-             [[ "${{ needs.types.result }}" == "failure" ]]; then
+             [[ "${{ needs.types.result }}" == "failure" ]] || \
+             [[ "${{ needs.blog.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
