@@ -121,8 +121,6 @@ yarn.lock
 # Local development
 .local/
 
-# AI-generated documentation
-docs/
 
 # Keep pnpm-lock.yaml (don't ignore it)
 !pnpm-lock.yaml
