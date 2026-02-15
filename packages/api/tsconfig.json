@@ -12,6 +12,6 @@
     "rootDir": "src",
     "types": ["node"]
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "sst-env.d.ts"],
   "exclude": ["node_modules", "dist"]
 }
