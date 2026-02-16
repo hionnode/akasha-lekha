@@ -24,19 +24,19 @@ describe('labsModuleSchema', () => {
   });
 
   it('should require id field', () => {
-    const { id, ...moduleWithoutId } = validModule;
+    const { id: _id, ...moduleWithoutId } = validModule;
     const result = labsModuleSchema.safeParse(moduleWithoutId);
     expect(result.success).toBe(false);
   });
 
   it('should require title field', () => {
-    const { title, ...moduleWithoutTitle } = validModule;
+    const { title: _title, ...moduleWithoutTitle } = validModule;
     const result = labsModuleSchema.safeParse(moduleWithoutTitle);
     expect(result.success).toBe(false);
   });
 
   it('should require description field', () => {
-    const { description, ...moduleWithoutDesc } = validModule;
+    const { description: _description, ...moduleWithoutDesc } = validModule;
     const result = labsModuleSchema.safeParse(moduleWithoutDesc);
     expect(result.success).toBe(false);
   });
@@ -50,13 +50,13 @@ describe('labsModuleSchema', () => {
   });
 
   it('should allow optional icon field', () => {
-    const { icon, ...moduleWithoutIcon } = validModule;
+    const { icon: _icon, ...moduleWithoutIcon } = validModule;
     const result = labsModuleSchema.safeParse(moduleWithoutIcon);
     expect(result.success).toBe(true);
   });
 
   it('should default status to available', () => {
-    const { status, ...moduleWithoutStatus } = validModule;
+    const { status: _status, ...moduleWithoutStatus } = validModule;
     const result = labsModuleSchema.safeParse(moduleWithoutStatus);
     expect(result.success).toBe(true);
     if (result.success) {
@@ -87,7 +87,7 @@ describe('labsModuleSchema', () => {
   });
 
   it('should allow optional prerequisites field', () => {
-    const { prerequisites, ...moduleWithoutPrereqs } = validModule;
+    const { prerequisites: _prerequisites, ...moduleWithoutPrereqs } = validModule;
     const result = labsModuleSchema.safeParse(moduleWithoutPrereqs);
     expect(result.success).toBe(true);
   });
@@ -102,10 +102,7 @@ describe('labsExerciseSchema', () => {
     description: 'Learn how to create and manage a systemd service unit.',
     difficulty: 'beginner' as const,
     estimatedTime: '15m',
-    objectives: [
-      'Understand systemd service unit files',
-      'Create a custom service unit',
-    ],
+    objectives: ['Understand systemd service unit files', 'Create a custom service unit'],
     verificationCriteria: [
       'Unit file exists at /etc/systemd/system/myapp.service',
       'Service is enabled',
@@ -124,13 +121,13 @@ describe('labsExerciseSchema', () => {
   });
 
   it('should require id field', () => {
-    const { id, ...exerciseWithoutId } = validExercise;
+    const { id: _id, ...exerciseWithoutId } = validExercise;
     const result = labsExerciseSchema.safeParse(exerciseWithoutId);
     expect(result.success).toBe(false);
   });
 
   it('should require module field', () => {
-    const { module, ...exerciseWithoutModule } = validExercise;
+    const { module: _module, ...exerciseWithoutModule } = validExercise;
     const result = labsExerciseSchema.safeParse(exerciseWithoutModule);
     expect(result.success).toBe(false);
   });
@@ -177,13 +174,13 @@ describe('labsExerciseSchema', () => {
   });
 
   it('should allow optional hints field', () => {
-    const { hints, ...exerciseWithoutHints } = validExercise;
+    const { hints: _hints, ...exerciseWithoutHints } = validExercise;
     const result = labsExerciseSchema.safeParse(exerciseWithoutHints);
     expect(result.success).toBe(true);
   });
 
   it('should require cliCommand field', () => {
-    const { cliCommand, ...exerciseWithoutCmd } = validExercise;
+    const { cliCommand: _cliCommand, ...exerciseWithoutCmd } = validExercise;
     const result = labsExerciseSchema.safeParse(exerciseWithoutCmd);
     expect(result.success).toBe(false);
   });
