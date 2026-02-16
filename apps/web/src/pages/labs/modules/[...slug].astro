@@ -50,7 +50,9 @@ export async function getStaticPaths() {
   return paths;
 }
 
-const { type, module, exercise, exercises } = Astro.props;
+const { type, module, exercise: rawExercise, exercises } = Astro.props;
+// exercise is guaranteed defined when type === 'exercise' (from getStaticPaths)
+const exercise = rawExercise!;
 const { slug } = Astro.params;
 
 // Sort exercises by order
