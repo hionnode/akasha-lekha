@@ -2,7 +2,6 @@
 import Layout from '../../layouts/Layout.astro';
 import LabsHeader from '../../components/labs/layout/LabsHeader.astro';
 import Footer from '../../components/layout/Footer.astro';
-import ModuleCard from '../../components/labs/ModuleCard.astro';
 import ProgressBar from '../../components/labs/ProgressBar.astro';
 import { mockModules, mockExercises, mockProgress, mockUser } from '../../utils/labs/mocks';
 
@@ -16,13 +15,15 @@ const progress = mockProgress;
 // Calculate stats
 const totalExercises = exercises.length;
 const completedExercises = progress.length;
-const completedModuleIds = new Set(progress.map((p) => {
-  const exercise = exercises.find((e) => e.id === p.exerciseId);
-  return exercise?.module;
-}));
+const completedModuleIds = new Set(
+  progress.map((p) => {
+    const exercise = exercises.find((e) => e.id === p.exerciseId);
+    return exercise?.module;
+  })
+);
 
 // Get in-progress modules (modules with some but not all exercises completed)
-const inProgressModules = modules.filter((m) => {
+const _inProgressModules = modules.filter((m) => {
   const moduleExercises = exercises.filter((e) => e.module === m.id);
   const completed = progress.filter((p) => {
     const ex = exercises.find((e) => e.id === p.exerciseId);
@@ -51,18 +52,12 @@ const nextExercise = lastExercise
         {/* Welcome section */}
         <div class="mb-8">
           <div class="flex items-center gap-4 mb-4">
-            <img
-              src={user.avatarUrl}
-              alt={user.username}
-              class="w-12 h-12 rounded-full"
-            />
+            <img src={user.avatarUrl} alt={user.username} class="w-12 h-12 rounded-full" />
             <div>
               <h1 class="text-2xl font-bold text-fg-primary">
                 Welcome back, {user.username}!
               </h1>
-              <p class="text-fg-secondary">
-                Keep up the great work on your learning journey.
-              </p>
+              <p class="text-fg-secondary">Keep up the great work on your learning journey.</p>
             </div>
           </div>
         </div>
@@ -92,115 +87,131 @@ const nextExercise = lastExercise
         </div>
 
         {/* Continue learning */}
-        {nextExercise && (
-          <section class="mb-8">
-            <h2 class="text-xl font-semibold text-fg-primary mb-4">
-              Continue Learning
-            </h2>
+        {
+          nextExercise && (
+            <section class="mb-8">
+              <h2 class="text-xl font-semibold text-fg-primary mb-4">Continue Learning</h2>
 
-            <a
-              href={`/labs/modules/${nextExercise.module}/${nextExercise.id}`}
-              class="block p-6 bg-gradient-to-r from-accent-blue/10 to-accent-cyan/10 border border-accent-blue/20 rounded-lg hover:border-accent-blue/40 transition-colors"
-            >
-              <div class="flex items-center justify-between">
-                <div>
-                  <p class="text-sm text-fg-muted mb-1">
-                    {modules.find((m) => m.id === nextExercise.module)?.title}
-                  </p>
-                  <h3 class="text-lg font-semibold text-fg-primary mb-2">
-                    {nextExercise.title}
-                  </h3>
-                  <p class="text-sm text-fg-secondary">
-                    {nextExercise.description}
-                  </p>
+              <a
+                href={`/labs/modules/${nextExercise.module}/${nextExercise.id}`}
+                class="block p-6 bg-gradient-to-r from-accent-blue/10 to-accent-cyan/10 border border-accent-blue/20 rounded-lg hover:border-accent-blue/40 transition-colors"
+              >
+                <div class="flex items-center justify-between">
+                  <div>
+                    <p class="text-sm text-fg-muted mb-1">
+                      {modules.find((m) => m.id === nextExercise.module)?.title}
+                    </p>
+                    <h3 class="text-lg font-semibold text-fg-primary mb-2">{nextExercise.title}</h3>
+                    <p class="text-sm text-fg-secondary">{nextExercise.description}</p>
+                  </div>
+                  <div class="flex-shrink-0 ml-4">
+                    <span class="inline-flex items-center gap-2 px-4 py-2 bg-accent-blue text-bg-primary font-semibold rounded-lg">
+                      Continue
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M13 7l5 5m0 0l-5 5m5-5H6"
+                        />
+                      </svg>
+                    </span>
+                  </div>
                 </div>
-                <div class="flex-shrink-0 ml-4">
-                  <span class="inline-flex items-center gap-2 px-4 py-2 bg-accent-blue text-bg-primary font-semibold rounded-lg">
-                    Continue
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
-                  </span>
-                </div>
-              </div>
-            </a>
-          </section>
-        )}
+              </a>
+            </section>
+          )
+        }
 
         {/* In progress modules */}
         <section class="mb-8">
-          <h2 class="text-xl font-semibold text-fg-primary mb-4">
-            Your Modules
-          </h2>
+          <h2 class="text-xl font-semibold text-fg-primary mb-4">Your Modules</h2>
 
           <div class="space-y-4">
-            {modules.filter((m) => m.status === 'available').map((module) => {
-              const moduleExercises = exercises.filter((e) => e.module === module.id);
-              const completed = progress.filter((p) => {
-                const ex = exercises.find((e) => e.id === p.exerciseId);
-                return ex?.module === module.id;
-              }).length;
+            {
+              modules
+                .filter((m) => m.status === 'available')
+                .map((module) => {
+                  const moduleExercises = exercises.filter((e) => e.module === module.id);
+                  const completed = progress.filter((p) => {
+                    const ex = exercises.find((e) => e.id === p.exerciseId);
+                    return ex?.module === module.id;
+                  }).length;
 
-              return (
-                <div class="p-4 bg-bg-secondary border border-border rounded-lg">
-                  <div class="flex items-center justify-between mb-3">
-                    <div class="flex items-center gap-3">
-                      {module.icon && <span class="text-xl">{module.icon}</span>}
-                      <h3 class="font-semibold text-fg-primary">{module.title}</h3>
+                  return (
+                    <div class="p-4 bg-bg-secondary border border-border rounded-lg">
+                      <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center gap-3">
+                          {module.icon && <span class="text-xl">{module.icon}</span>}
+                          <h3 class="font-semibold text-fg-primary">{module.title}</h3>
+                        </div>
+                        <a
+                          href={`/labs/modules/${module.id}`}
+                          class="text-sm text-accent-blue hover:text-accent-cyan transition-colors"
+                        >
+                          View →
+                        </a>
+                      </div>
+                      <ProgressBar
+                        completed={completed}
+                        total={moduleExercises.length}
+                        showLabel
+                        showPercentage
+                        size="sm"
+                      />
                     </div>
-                    <a
-                      href={`/labs/modules/${module.id}`}
-                      class="text-sm text-accent-blue hover:text-accent-cyan transition-colors"
-                    >
-                      View →
-                    </a>
-                  </div>
-                  <ProgressBar
-                    completed={completed}
-                    total={moduleExercises.length}
-                    showLabel
-                    showPercentage
-                    size="sm"
-                  />
-                </div>
-              );
-            })}
+                  );
+                })
+            }
           </div>
         </section>
 
         {/* Recent activity */}
-        {progress.length > 0 && (
-          <section>
-            <h2 class="text-xl font-semibold text-fg-primary mb-4">
-              Recent Activity
-            </h2>
+        {
+          progress.length > 0 && (
+            <section>
+              <h2 class="text-xl font-semibold text-fg-primary mb-4">Recent Activity</h2>
 
-            <div class="space-y-2">
-              {progress.slice(-5).reverse().map((p) => {
-                const exercise = exercises.find((e) => e.id === p.exerciseId);
-                const module = exercise ? modules.find((m) => m.id === exercise.module) : null;
+              <div class="space-y-2">
+                {progress
+                  .slice(-5)
+                  .reverse()
+                  .map((p) => {
+                    const exercise = exercises.find((e) => e.id === p.exerciseId);
+                    const module = exercise ? modules.find((m) => m.id === exercise.module) : null;
 
-                return (
-                  <div class="flex items-center gap-4 p-3 bg-bg-secondary/50 rounded-lg">
-                    <div class="w-8 h-8 flex items-center justify-center rounded-full bg-accent-green/20 text-accent-green">
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                      </svg>
-                    </div>
-                    <div class="flex-1">
-                      <p class="text-sm text-fg-primary">
-                        Completed <span class="font-medium">{exercise?.title}</span>
-                      </p>
-                      <p class="text-xs text-fg-muted">
-                        {module?.title} • {new Date(p.completedAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
+                    return (
+                      <div class="flex items-center gap-4 p-3 bg-bg-secondary/50 rounded-lg">
+                        <div class="w-8 h-8 flex items-center justify-center rounded-full bg-accent-green/20 text-accent-green">
+                          <svg
+                            class="w-4 h-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                              stroke-width="2"
+                              d="M5 13l4 4L19 7"
+                            />
+                          </svg>
+                        </div>
+                        <div class="flex-1">
+                          <p class="text-sm text-fg-primary">
+                            Completed <span class="font-medium">{exercise?.title}</span>
+                          </p>
+                          <p class="text-xs text-fg-muted">
+                            {module?.title} • {new Date(p.completedAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </section>
+          )
+        }
       </div>
     </main>
 

@@ -4,7 +4,6 @@ import Layout from '../../../layouts/Layout.astro';
 import LabsHeader from '../../../components/labs/layout/LabsHeader.astro';
 import LabsSidebar from '../../../components/labs/layout/LabsSidebar.astro';
 import Footer from '../../../components/layout/Footer.astro';
-import ModuleCard from '../../../components/labs/ModuleCard.astro';
 import ExerciseCard from '../../../components/labs/ExerciseCard.astro';
 import ProgressBar from '../../../components/labs/ProgressBar.astro';
 import DifficultyBadge from '../../../components/labs/DifficultyBadge.astro';
@@ -12,7 +11,7 @@ import ObjectivesList from '../../../components/labs/ObjectivesList.astro';
 import VerificationChecklist from '../../../components/labs/VerificationChecklist.astro';
 import HintAccordion from '../../../components/labs/HintAccordion.astro';
 import CLICommand from '../../../components/labs/CLICommand.astro';
-import { mockModules, mockExercises } from '../../../utils/labs/mocks';
+import { mockModules } from '../../../utils/labs/mocks';
 
 export async function getStaticPaths() {
   const modules = await getCollection('labs/modules');
@@ -51,7 +50,9 @@ export async function getStaticPaths() {
   return paths;
 }
 
-const { type, module, exercise, exercises } = Astro.props;
+const { type, module, exercise: rawExercise, exercises } = Astro.props;
+// exercise is guaranteed defined when type === 'exercise' (from getStaticPaths)
+const exercise = rawExercise!;
 const { slug } = Astro.params;
 
 // Sort exercises by order
@@ -92,172 +93,198 @@ if (type === 'exercise' && exercise) {
             <span>/</span>
             <a href="/labs/modules" class="hover:text-fg-secondary transition-colors">Modules</a>
             <span>/</span>
-            {type === 'exercise' ? (
-              <>
-                <a href={`/labs/modules/${module.data.id}`} class="hover:text-fg-secondary transition-colors">
-                  {module.data.title}
-                </a>
-                <span>/</span>
-                <span class="text-fg-primary">{exercise.data.title}</span>
-              </>
-            ) : (
-              <span class="text-fg-primary">{module.data.title}</span>
-            )}
-          </nav>
-
-          {type === 'module' ? (
-            /* Module Overview Page */
-            <div>
-              <div class="flex items-start gap-4 mb-8">
-                {module.data.icon && (
-                  <span class="text-4xl">{module.data.icon}</span>
-                )}
-                <div>
-                  <h1 class="text-3xl font-bold text-fg-primary mb-2">
-                    {module.data.title}
-                  </h1>
-                  <p class="text-fg-secondary">
-                    {module.data.description}
-                  </p>
-                </div>
-              </div>
-
-              {/* Module stats */}
-              <div class="flex flex-wrap gap-6 mb-8 text-sm text-fg-muted">
-                <span class="flex items-center gap-2">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                  </svg>
-                  {module.data.exerciseCount} exercises
-                </span>
-                {module.data.estimatedTime && (
-                  <span class="flex items-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    {module.data.estimatedTime}
-                  </span>
-                )}
-              </div>
-
-              {/* Progress bar placeholder */}
-              <div class="mb-8 p-4 bg-bg-secondary border border-border rounded-lg">
-                <ProgressBar completed={0} total={sortedExercises.length} showLabel showPercentage />
-                <p class="mt-2 text-xs text-fg-muted">
-                  <a href="/labs/login" class="text-accent-blue hover:underline">Login</a> to track your progress
-                </p>
-              </div>
-
-              {/* Exercise list */}
-              <h2 class="text-xl font-semibold text-fg-primary mb-4">Exercises</h2>
-              <div class="space-y-3">
-                {sortedExercises.map((ex) => (
-                  <ExerciseCard
-                    id={ex.data.id}
-                    module={ex.data.module}
-                    order={ex.data.order}
-                    title={ex.data.title}
-                    description={ex.data.description}
-                    difficulty={ex.data.difficulty}
-                    estimatedTime={ex.data.estimatedTime}
-                  />
-                ))}
-              </div>
-            </div>
-          ) : (
-            /* Exercise Page */
-            <article>
-              {/* Exercise header */}
-              <div class="mb-8">
-                <div class="flex items-center gap-3 mb-4">
-                  <span class="flex items-center justify-center w-8 h-8 rounded-full bg-bg-tertiary text-fg-muted font-bold text-sm">
-                    {exercise.data.order}
-                  </span>
-                  <DifficultyBadge difficulty={exercise.data.difficulty} />
-                  <span class="text-sm text-fg-muted">{exercise.data.estimatedTime}</span>
-                </div>
-
-                <h1 class="text-3xl font-bold text-fg-primary mb-2">
-                  {exercise.data.title}
-                </h1>
-                <p class="text-lg text-fg-secondary">
-                  {exercise.data.description}
-                </p>
-              </div>
-
-              {/* Objectives */}
-              <div class="mb-8 p-4 bg-bg-secondary border border-border rounded-lg">
-                <ObjectivesList objectives={exercise.data.objectives} />
-              </div>
-
-              {/* Main content */}
-              <div class="prose prose-invert max-w-none mb-8">
-                {Content && <Content />}
-              </div>
-
-              {/* Launch sandbox */}
-              <div class="mb-8 p-6 bg-accent-blue/5 border border-accent-blue/20 rounded-lg">
-                <h3 class="text-lg font-semibold text-fg-primary mb-2">
-                  Launch Your Sandbox
-                </h3>
-                <p class="text-sm text-fg-secondary mb-4">
-                  Copy the command below to start this exercise in your terminal:
-                </p>
-                <CLICommand command={exercise.data.cliCommand} />
-              </div>
-
-              {/* Verification criteria */}
-              <div class="mb-8 p-4 bg-bg-secondary border border-border rounded-lg">
-                <VerificationChecklist criteria={exercise.data.verificationCriteria} />
-              </div>
-
-              {/* Hints */}
-              {exercise.data.hints && exercise.data.hints.length > 0 && (
-                <div class="mb-8">
-                  <HintAccordion hints={exercise.data.hints} />
-                </div>
-              )}
-
-              {/* Navigation */}
-              <div class="flex items-center justify-between pt-8 border-t border-border">
-                {exercise.data.order > 1 ? (
-                  <a
-                    href={`/labs/modules/${module.data.id}/${sortedExercises[exercise.data.order - 2]?.data.id}`}
-                    class="flex items-center gap-2 text-fg-secondary hover:text-fg-primary transition-colors"
-                  >
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
-                    </svg>
-                    Previous
-                  </a>
-                ) : (
-                  <div />
-                )}
-
-                {exercise.data.order < sortedExercises.length ? (
-                  <a
-                    href={`/labs/modules/${module.data.id}/${sortedExercises[exercise.data.order]?.data.id}`}
-                    class="flex items-center gap-2 text-fg-secondary hover:text-fg-primary transition-colors"
-                  >
-                    Next
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-                    </svg>
-                  </a>
-                ) : (
+            {
+              type === 'exercise' ? (
+                <>
                   <a
                     href={`/labs/modules/${module.data.id}`}
-                    class="flex items-center gap-2 text-accent-green hover:text-accent-green/80 transition-colors"
+                    class="hover:text-fg-secondary transition-colors"
                   >
-                    Complete Module
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                    </svg>
+                    {module.data.title}
                   </a>
-                )}
+                  <span>/</span>
+                  <span class="text-fg-primary">{exercise.data.title}</span>
+                </>
+              ) : (
+                <span class="text-fg-primary">{module.data.title}</span>
+              )
+            }
+          </nav>
+
+          {
+            type === 'module' ? (
+              /* Module Overview Page */
+              <div>
+                <div class="flex items-start gap-4 mb-8">
+                  {module.data.icon && <span class="text-4xl">{module.data.icon}</span>}
+                  <div>
+                    <h1 class="text-3xl font-bold text-fg-primary mb-2">{module.data.title}</h1>
+                    <p class="text-fg-secondary">{module.data.description}</p>
+                  </div>
+                </div>
+
+                {/* Module stats */}
+                <div class="flex flex-wrap gap-6 mb-8 text-sm text-fg-muted">
+                  <span class="flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+                      />
+                    </svg>
+                    {module.data.exerciseCount} exercises
+                  </span>
+                  {module.data.estimatedTime && (
+                    <span class="flex items-center gap-2">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                      </svg>
+                      {module.data.estimatedTime}
+                    </span>
+                  )}
+                </div>
+
+                {/* Progress bar placeholder */}
+                <div class="mb-8 p-4 bg-bg-secondary border border-border rounded-lg">
+                  <ProgressBar
+                    completed={0}
+                    total={sortedExercises.length}
+                    showLabel
+                    showPercentage
+                  />
+                  <p class="mt-2 text-xs text-fg-muted">
+                    <a href="/labs/login" class="text-accent-blue hover:underline">
+                      Login
+                    </a>{' '}
+                    to track your progress
+                  </p>
+                </div>
+
+                {/* Exercise list */}
+                <h2 class="text-xl font-semibold text-fg-primary mb-4">Exercises</h2>
+                <div class="space-y-3">
+                  {sortedExercises.map((ex) => (
+                    <ExerciseCard
+                      id={ex.data.id}
+                      module={ex.data.module}
+                      order={ex.data.order}
+                      title={ex.data.title}
+                      description={ex.data.description}
+                      difficulty={ex.data.difficulty}
+                      estimatedTime={ex.data.estimatedTime}
+                    />
+                  ))}
+                </div>
               </div>
-            </article>
-          )}
+            ) : (
+              /* Exercise Page */
+              <article>
+                {/* Exercise header */}
+                <div class="mb-8">
+                  <div class="flex items-center gap-3 mb-4">
+                    <span class="flex items-center justify-center w-8 h-8 rounded-full bg-bg-tertiary text-fg-muted font-bold text-sm">
+                      {exercise.data.order}
+                    </span>
+                    <DifficultyBadge difficulty={exercise.data.difficulty} />
+                    <span class="text-sm text-fg-muted">{exercise.data.estimatedTime}</span>
+                  </div>
+
+                  <h1 class="text-3xl font-bold text-fg-primary mb-2">{exercise.data.title}</h1>
+                  <p class="text-lg text-fg-secondary">{exercise.data.description}</p>
+                </div>
+
+                {/* Objectives */}
+                <div class="mb-8 p-4 bg-bg-secondary border border-border rounded-lg">
+                  <ObjectivesList objectives={exercise.data.objectives} />
+                </div>
+
+                {/* Main content */}
+                <div class="prose prose-invert max-w-none mb-8">{Content && <Content />}</div>
+
+                {/* Launch sandbox */}
+                <div class="mb-8 p-6 bg-accent-blue/5 border border-accent-blue/20 rounded-lg">
+                  <h3 class="text-lg font-semibold text-fg-primary mb-2">Launch Your Sandbox</h3>
+                  <p class="text-sm text-fg-secondary mb-4">
+                    Copy the command below to start this exercise in your terminal:
+                  </p>
+                  <CLICommand command={exercise.data.cliCommand} />
+                </div>
+
+                {/* Verification criteria */}
+                <div class="mb-8 p-4 bg-bg-secondary border border-border rounded-lg">
+                  <VerificationChecklist criteria={exercise.data.verificationCriteria} />
+                </div>
+
+                {/* Hints */}
+                {exercise.data.hints && exercise.data.hints.length > 0 && (
+                  <div class="mb-8">
+                    <HintAccordion hints={exercise.data.hints} />
+                  </div>
+                )}
+
+                {/* Navigation */}
+                <div class="flex items-center justify-between pt-8 border-t border-border">
+                  {exercise.data.order > 1 ? (
+                    <a
+                      href={`/labs/modules/${module.data.id}/${sortedExercises[exercise.data.order - 2]?.data.id}`}
+                      class="flex items-center gap-2 text-fg-secondary hover:text-fg-primary transition-colors"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M15 19l-7-7 7-7"
+                        />
+                      </svg>
+                      Previous
+                    </a>
+                  ) : (
+                    <div />
+                  )}
+
+                  {exercise.data.order < sortedExercises.length ? (
+                    <a
+                      href={`/labs/modules/${module.data.id}/${sortedExercises[exercise.data.order]?.data.id}`}
+                      class="flex items-center gap-2 text-fg-secondary hover:text-fg-primary transition-colors"
+                    >
+                      Next
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M9 5l7 7-7 7"
+                        />
+                      </svg>
+                    </a>
+                  ) : (
+                    <a
+                      href={`/labs/modules/${module.data.id}`}
+                      class="flex items-center gap-2 text-accent-green hover:text-accent-green/80 transition-colors"
+                    >
+                      Complete Module
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M5 13l4 4L19 7"
+                        />
+                      </svg>
+                    </a>
+                  )}
+                </div>
+              </article>
+            )
+          }
         </div>
       </main>
     </div>
