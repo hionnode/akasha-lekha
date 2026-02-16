@@ -68,6 +68,7 @@ jobs:
           key: astro-prod-${{ runner.os }}-${{ hashFiles('apps/web/src/**/*', 'apps/web/public/**/*', 'apps/web/astro.config.*') }}
           restore-keys: |
             astro-prod-${{ runner.os }}-
+            astro-preview-${{ runner.os }}-
 
       - name: Install Dependencies
         run: pnpm install

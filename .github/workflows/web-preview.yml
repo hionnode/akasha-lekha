@@ -81,6 +81,7 @@ jobs:
           key: astro-preview-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/astro.config.*') }}
           restore-keys: |
             astro-preview-${{ runner.os }}-
+            astro-prod-${{ runner.os }}-
 
       - name: Install Dependencies
         run: pnpm install
