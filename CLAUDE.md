@@ -16,6 +16,13 @@ pnpm dev              # Start blog (Astro) at localhost:4321
 pnpm dev:api          # Start API (SST dev mode - deploys real AWS resources, routes Lambda to local)
 pnpm dev:all          # Run both concurrently
 
+# Build & Deploy
+pnpm build            # Build web app
+pnpm build:api        # Build API (SST)
+pnpm deploy:web       # Deploy web to Cloudflare Pages
+pnpm deploy:api       # Deploy API to production stage
+pnpm deploy:api:dev   # Deploy API to dev stage
+
 # Testing
 pnpm test             # Run all tests (Vitest)
 pnpm test:web         # Web app tests only
@@ -34,6 +41,7 @@ pnpm validate:blog    # Validate blog post frontmatter
 # Database
 pnpm db:local         # Start local DynamoDB + Admin UI (Docker)
 pnpm db:local:stop    # Stop local DynamoDB
+pnpm db:seed          # Seed database (via @akasha/db)
 # DynamoDB Local: http://localhost:8000
 # Admin UI: http://localhost:8001
 
@@ -99,29 +107,30 @@ pnpm sst remove --stage dev           # Remove all resources for a stage
 │                           pnpm monorepo                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
-         ┌──────────────────────────┼──────────────────────────┐
-         │                          │                          │
-         ▼                          ▼                          ▼
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│    apps/web     │      │  packages/api   │      │ packages/types  │
-│   @akasha/web   │      │   @akasha/api   │      │  @akasha/types  │
-├─────────────────┤      ├─────────────────┤      ├─────────────────┤
-│ • Astro 5.x     │      │ • Lambda funcs  │      │ • Shared types  │
-│ • Solid.js      │      │ • Auth handlers │      │ • API contracts │
-│ • Tailwind v4   │      │ • DynamoDB ops  │      │ • Zod schemas   │
-│ • MDX content   │      │ • Response lib  │      │                 │
-└─────────────────┘      └─────────────────┘      └─────────────────┘
-         │                          │                          │
-         │                          │                          │
-         ▼                          ▼                          │
-┌─────────────────┐      ┌─────────────────┐                   │
-│  Cloudflare     │      │      AWS        │                   │
-│    Pages        │      │  (ap-south-1)   │                   │
-├─────────────────┤      ├─────────────────┤                   │
-│ • Static site   │ ───> │ • API Gateway   │ <─────────────────┘
-│ • CDN edge      │      │ • Lambda        │
-│ • Preview/Prod  │      │ • DynamoDB      │
-└─────────────────┘      └─────────────────┘
+      ┌─────────────────┬───────────┼───────────┬─────────────────┐
+      │                 │           │           │                 │
+      ▼                 ▼           ▼           ▼                 ▼
+┌───────────┐  ┌──────────────┐ ┌────────────┐ ┌──────────┐ ┌──────────┐
+│ apps/web  │  │ packages/api │ │packages/db │ │pkgs/types│ │  infra/  │
+│@akasha/web│  │ @akasha/api  │ │ @akasha/db │ │@akasha/  │ │  SST IaC │
+├───────────┤  ├──────────────┤ ├────────────┤ │  types   │ ├──────────┤
+│• Astro 5  │  │• Lambda funcs│ │• DB seeds  │ ├──────────┤ │• API GW  │
+│• Solid.js │  │• Auth handler│ │• Migrations│ │• Shared  │ │• Lambda  │
+│• Tailwind │  │• DynamoDB ops│ │            │ │  types   │ │• DynamoDB│
+│  v4       │  │• Response lib│ │            │ │• API     │ │• Secrets │
+│• MDX      │  │              │ │            │ │  schemas │ │          │
+└───────────┘  └──────────────┘ └────────────┘ └──────────┘ └──────────┘
+      │                │                                          │
+      ▼                ▼                                          │
+┌───────────┐  ┌──────────────┐                                   │
+│Cloudflare │  │    AWS        │                                   │
+│  Pages    │  │ (ap-south-1)  │ <────────────────────────────────┘
+├───────────┤  ├──────────────┤
+│• Static   │  │• API Gateway │
+│• CDN edge │  │• Lambda      │
+│• Preview/ │  │• DynamoDB    │
+│  Prod     │  │              │
+└───────────┘  └──────────────┘
 ```
 
 ```
@@ -130,21 +139,40 @@ akasha-lekha/
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── blog/              # Blog-specific components
-│   │   │   ├── labs/              # Labs components + islands/
-│   │   │   │   └── islands/       # Solid.js interactive components
-│   │   │   ├── landing/           # Homepage components
-│   │   │   ├── layout/            # Layout components
-│   │   │   ├── shared/            # Reusable components
-│   │   │   └── tui/               # Terminal UI components
+│   │   │   ├── labs/              # Labs components
+│   │   │   │   ├── islands/       # Solid.js interactive components (AuthStatus, ProgressTracker, CLICommandCopy)
+│   │   │   │   └── layout/        # LabsHeader.astro, LabsSidebar.astro
+│   │   │   ├── landing/           # Homepage (TerminalHero, FastfetchOutput)
+│   │   │   ├── layout/            # Header, Footer, Container, BlogSidebar, SeriesSidebar, MobileSidebarDrawers
+│   │   │   ├── shared/            # 35+ reusable components (Alert, CodeSwitcher, FileTree, SEO, etc.)
+│   │   │   └── tui/               # Terminal UI components (TUILayout, ContentViewer, SearchBar, StatusBar, etc.)
 │   │   ├── content/
-│   │   │   ├── blog/              # Blog posts (MDX)
-│   │   │   ├── labs/modules/      # Lab module definitions
-│   │   │   └── labs/exercises/    # Exercise definitions
+│   │   │   ├── blog/              # Blog posts (MDX) - standalone + series folders
+│   │   │   └── labs/
+│   │   │       ├── modules/       # Lab module definitions
+│   │   │       ├── exercises/     # Exercise definitions
+│   │   │       ├── schemas.ts     # Zod schemas for labs content validation
+│   │   │       └── schemas.test.ts
 │   │   ├── pages/
-│   │   │   ├── blog/[...slug].astro
-│   │   │   └── labs/modules/[...slug].astro
+│   │   │   ├── blog/              # [..slug].astro, index.astro
+│   │   │   ├── labs/              # index, dashboard, login, setup, modules/[...slug]
+│   │   │   │   └── auth/          # callback.astro (GitHub OAuth callback)
+│   │   │   ├── tools/             # aws-latency.astro
+│   │   │   ├── aws.astro          # AWS page
+│   │   │   ├── monitoring.astro   # Monitoring page
+│   │   │   └── tui.astro          # Terminal UI page
 │   │   ├── styles/global.css      # Global styles + Tailwind
-│   │   └── utils/                 # Utility functions
+│   │   └── utils/                 # Remark/Rehype plugins, helpers
+│   │       ├── remarkCallouts.ts
+│   │       ├── remarkCodeMeta.ts
+│   │       ├── remarkSteps.ts
+│   │       ├── remarkCodeSwitcher.poc.ts  # Active code switcher (POC)
+│   │       ├── rehypeCodeSwitcher.poc.ts  # Active code switcher (POC)
+│   │       ├── remarkPackageManager.ts
+│   │       ├── rehypePackageManager.ts
+│   │       └── ...                # seo.ts, readingTime.ts, tuiHelpers.ts, etc.
+│   ├── e2e/                       # Playwright E2E tests
+│   ├── wrangler.jsonc             # Cloudflare Workers config
 │   ├── astro.config.mjs
 │   ├── vitest.config.ts
 │   └── playwright.config.ts
@@ -159,11 +187,20 @@ akasha-lekha/
 │   │           ├── db.ts          # DynamoDB client
 │   │           ├── auth.ts        # JWT utilities
 │   │           └── response.ts    # HTTP helpers (json, error, redirect)
+│   ├── db/                        # @akasha/db - Database seeds/migrations (stub)
 │   └── types/                     # @akasha/types - Shared TypeScript types
+│       └── src/
+│           ├── index.ts           # Re-exports all types
+│           ├── api.ts             # API response types, error codes
+│           ├── exercise.ts        # Exercise and Module types
+│           ├── progress.ts        # Progress types
+│           └── user.ts            # User, Session, JwtPayload types
 ├── infra/                         # SST infrastructure-as-code
 │   ├── api.ts                     # API Gateway routes + Lambda config
 │   ├── auth.ts                    # Secrets (GithubClientId, GithubClientSecret, JwtSecret)
 │   └── database.ts                # DynamoDB tables (Users, Progress, Sessions)
+├── scripts/
+│   └── validate-blog-posts.mjs    # Blog frontmatter validation
 ├── sst.config.ts                  # SST app config (akasha-labs, ap-south-1)
 ├── docker-compose.yml             # Local DynamoDB
 └── .github/workflows/             # CI/CD
@@ -176,14 +213,16 @@ akasha-lekha/
 ## Frontend (apps/web)
 
 ### Tech Stack
-- **Astro 5.x** - Static site generation with MDX content
+- **Astro 5.x** - Static output mode with Cloudflare adapter, MDX content
 - **Solid.js** - Interactive islands (auth status, progress tracking, clipboard)
-- **Tailwind CSS v4** - Tokyo Night theme (dark mode only)
+- **Tailwind CSS v4** - Tokyo Night theme (dark mode only), via `@tailwindcss/vite`
 - **Typography** - Inconsolata monospace font throughout
+- **Shiki** - Code highlighting with `tokyo-night` theme
+- **Markdown pipeline** - remark-directive + custom remark/rehype plugins in `src/utils/`
 
 ### Content Collections
 
-Blog and lab content uses Astro Content Collections with Zod schemas in `src/content/config.ts`.
+Blog and lab content uses Astro Content Collections with Zod schemas in `src/content/config.ts`. Labs also have standalone schemas in `src/content/labs/schemas.ts` with tests.
 
 **Blog Schema:**
 ```typescript
@@ -297,9 +336,24 @@ yarn add package-name
 ```
 ````
 
+**Code Switcher (POC - active in astro.config.mjs):**
+````markdown
+:::code-switcher
+```typescript title="Option A"
+const a = 1;
+```
+
+```typescript title="Option B"
+const b = 2;
+```
+:::
+````
+
+Note: The codebase has both standard and POC versions of the code switcher plugins. The **POC versions** (`remarkCodeSwitcher.poc.ts`, `rehypeCodeSwitcher.poc.ts`) are currently active in `astro.config.mjs`.
+
 ### Interactive Islands (Solid.js)
 
-Located in `apps/web/src/components/labs/islands/`:
+Located in `apps/web/src/components/labs/islands/` (each has co-located `.test.tsx`):
 - `AuthStatus.tsx` - Login/logout button
 - `ProgressTracker.tsx` - Real-time progress updates
 - `CLICommandCopy.tsx` - Copy-to-clipboard
@@ -308,6 +362,33 @@ Usage in Astro:
 ```astro
 <AuthStatus client:load />
 ```
+
+### Key Pages
+
+| Route | File | Purpose |
+|-------|------|---------|
+| `/` | `index.astro` | Landing page with terminal hero |
+| `/blog` | `blog/index.astro` | Blog listing |
+| `/blog/:slug` | `blog/[...slug].astro` | Blog post |
+| `/labs` | `labs/index.astro` | Labs landing |
+| `/labs/dashboard` | `labs/dashboard.astro` | User progress dashboard |
+| `/labs/login` | `labs/login.astro` | Login page |
+| `/labs/setup` | `labs/setup.astro` | Setup instructions |
+| `/labs/modules/:slug` | `labs/modules/[...slug].astro` | Module/exercise pages |
+| `/labs/auth/callback` | `labs/auth/callback.astro` | GitHub OAuth callback |
+| `/aws` | `aws.astro` | AWS resource page |
+| `/monitoring` | `monitoring.astro` | Monitoring page |
+| `/tui` | `tui.astro` | Terminal UI interface |
+| `/tools/aws-latency` | `tools/aws-latency.astro` | AWS region latency tool |
+
+### TUI (Terminal UI)
+
+The TUI feature (`/tui` page) provides a terminal-like browsing interface. Components in `src/components/tui/`:
+- `TUILayout.astro` / `TUIController.ts` - Main layout and controller logic
+- `ContentViewer.astro` / `ContentList.astro` - Content display
+- `SearchBar.astro` / `TagFilter.astro` - Filtering
+- `StatusBar.astro` / `KeybindingSelector.astro` - Chrome
+- `LoadingAnimation.astro` / `TerminalInstructions.astro` - UX
 
 ## Backend (packages/api + infra/)
 
@@ -440,10 +521,45 @@ seriesPart: 1              # seriesTotal auto-calculated from folder contents
 | Preview | preview.works-on-my.cloud | preview | PR previews |
 | Production | works-on-my.cloud | prod | Live site |
 
+## AWS Series Content Plan
+
+The 70-part "AWS From Zero to Production" blog series has a structured content plan at `docs/content-plan/aws-series/`.
+
+### Content Plan Structure
+
+```
+docs/content-plan/aws-series/
+├── aws-plan.md                    # Master curriculum plan (70 parts)
+├── STYLE-GUIDE.md                 # Voice, tone, audience, prose conventions
+├── COMPONENT-PLAYBOOK.md          # Which component when, copy-paste examples
+├── THREAD-TRACKER.md              # Four threads state at every part
+├── CONTENT-PATTERNS.md            # Structural patterns: Fine Line, DGVE, leads
+├── FRONTMATTER-AND-METADATA.md    # Frontmatter templates, tags, SEO, dates
+├── phase-NN-name/
+│   ├── 00-phase-overview.md       # Phase goal, thread state, part summary
+│   └── NN-slug.md                 # Per-part implementation plan
+```
+
+### Using the Content Plan When Writing Blog Posts
+
+1. **Before writing any part:** Read the corresponding `NN-slug.md` implementation file for section outline, component imports, thread additions, and code examples spec.
+2. **For component usage:** Reference `COMPONENT-PLAYBOOK.md` for copy-paste import blocks and usage patterns.
+3. **For voice/tone:** Follow `STYLE-GUIDE.md` conventions (direct, opinionated, second person, active voice).
+4. **For frontmatter:** Copy the exact template from `FRONTMATTER-AND-METADATA.md`.
+5. **For thread continuity:** Check `THREAD-TRACKER.md` to see what AGENT-INSTRUCTIONS.md, Scorecard, Eval, and MCP state should be at any given part.
+6. **For structural patterns:** Use `CONTENT-PATTERNS.md` for Fine Line boxes, DGVE pipeline sections, and cross-referencing conventions.
+
+### Blog Post Location
+
+All AWS series posts live in `apps/web/src/content/blog/aws-for-startups/` with filenames `NN-kebab-case-slug.mdx`.
+
 ## Key Configuration
 
 - **TypeScript**: Strict mode, ES2022 target, ESNext modules
-- **Prettier**: 2 spaces, semicolons, single quotes, 100 char width
-- **ESLint**: Flat config with TypeScript and Astro plugins
+- **Zod**: v4.x (used for content schemas and API validation)
+- **Prettier**: 2 spaces, semicolons, single quotes, 100 char width, trailing commas (es5)
+- **ESLint**: Flat config (`eslint.config.js`) with TypeScript and Astro plugins
+- **Lint-staged** (`.lintstagedrc.json`): `*.{js,ts,astro}` → eslint + prettier; `*.{css,json,md}` → prettier
 - **Pre-commit hooks (Husky)**: lint-staged → blog validation → typecheck → build
-- **SST stages**: `dev`, `preview`, `prod` (prod is protected, resources retained)
+- **SST**: v3.x, stages: `dev`, `preview`, `prod` (prod is protected, resources retained)
+- **Cloudflare**: Wrangler config in `apps/web/wrangler.jsonc` (static output with Cloudflare adapter)
