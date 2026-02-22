@@ -1,0 +1,519 @@
+---
+title: "Git & GitHub: The Foundation Your Whole Team Builds On"
+description: "Set up Git workflows for humans and AI agents. Branching strategy, conventional commits, agent attribution, and reviewing agent-generated PRs."
+excerpt: "The foundation your whole team, humans and agents, builds on. Git conventions, agent commit hygiene, and attribution that tracks who wrote what."
+date: "2026-01-28"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "git"]
+series: "AWS From Zero to Production"
+seriesPart: 6
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
+import FileTree from '../../../components/shared/FileTree.astro';
+
+Your agent commits a massive change with the message "updated files." The diff includes 47 files: your Terraform module, an unrelated README tweak, a debug `console.log`, and your `.env` file with an AWS secret key. `git add .` strikes again. Except this time, it happened at 3 AM while you slept, because you gave the agent access to your repo.
+
+When agents write code, your git hygiene matters more, not less. Bad habits that cost a human developer 10 minutes of cleanup cost an agent-accelerated workflow hours of forensic archaeology.
+
+**Time:** About 30 minutes.
+
+**Outcome:** A git workflow with conventional commits, branch naming conventions, agent attribution via `Co-Authored-By`, and a review process that treats agent PRs differently from human PRs. Plus 6 new lines in your AGENT-INSTRUCTIONS.md.
+
+---
+
+## Why This Matters
+
+You already have infrastructure in place. [Part 1](/blog/aws-for-startups/01-your-first-60-minutes-in-aws) locked down your AWS account. [Part 4](/blog/aws-for-startups/04-terraform-fundamentals) gave you Terraform managing state. [Part 5](/blog/aws-for-startups/05-opentelemetry-setup) set up observability. All of it lives in a git repository.
+
+Without conventions, that repository becomes a liability. Here is what happens:
+
+- **No branch strategy:** everyone pushes to `main`. Terraform state drifts because two people ran `apply` on conflicting changes.
+- **No commit conventions:** the git log reads like a stream of consciousness. "fix stuff", "wip", "asdf", "updated files." Good luck understanding what changed three weeks ago.
+- **No agent attribution:** you cannot tell which commits came from a human and which came from an agent. When a security issue surfaces, you cannot trace whether a human reviewed the change or an agent shipped it directly.
+
+Agents amplify every one of these problems. A human commits once or twice a day. An agent can commit 50 times in an hour. Without guardrails, that is 50 opportunities for leaked credentials, overly broad IAM policies, and undocumented infrastructure changes.
+
+The conventions we set up here feed directly into the Scorecard (starting in [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality)). Agent attribution is not just for credit. It is data.
+
+---
+
+## What We're Building
+
+- Branch naming convention (`feature/`, `fix/`, `chore/`)
+- Conventional commit format with enforced types
+- Agent attribution via `Co-Authored-By` trailers
+- A `.gitignore` that protects against the most common agent mistakes
+- A PR template with an agent-review section
+- 6 new rules in AGENT-INSTRUCTIONS.md
+
+---
+
+## Branching Strategy
+
+Trunk-based development with short-lived feature branches. That is it. No `develop` branch. No `release/v2.3.1` branches living for weeks. No git-flow ceremony that exists to justify its own complexity.
+
+The rules:
+
+| Rule | Convention |
+|------|-----------|
+| Main branch | `main` (always deployable) |
+| Feature work | `feature/add-vpc-module` |
+| Bug fixes | `fix/iam-policy-wildcard` |
+| Maintenance | `chore/update-terraform-providers` |
+| Documentation | `docs/add-runbook-rds-failover` |
+
+Branch names are lowercase, hyphen-separated, and descriptive. The prefix tells you the intent before you read the diff.
+
+**Agent branches follow the same naming.** There is no `agent/` prefix. The agent is a tool, not a separate team. Attribution happens at the commit level, not the branch level. This matters because it keeps your branch namespace clean and avoids the temptation to skip review on "agent branches."
+
+```bash terminal
+# Good
+git checkout -b feature/add-s3-lifecycle-rules
+git checkout -b fix/security-group-ingress-cidr
+git checkout -b chore/bump-aws-provider-5.80
+
+# Bad
+git checkout -b new-stuff
+git checkout -b agent-changes
+git checkout -b test123
+```
+
+**Lifecycle:** branches live for hours or days, not weeks. If a branch is open for more than 3 days, it is too large. Break it into smaller changes. This is especially true for agent-generated work, because large agent PRs are nearly impossible to review effectively.
+
+---
+
+## Conventional Commits
+
+Every commit message follows this format:
+
+```
+type(scope): description
+
+[optional body]
+
+[optional footer(s)]
+```
+
+**Types:**
+
+| Type | When to use | Example |
+|------|------------|---------|
+| `feat` | New functionality | `feat(vpc): add NAT gateway to private subnets` |
+| `fix` | Bug fix | `fix(iam): remove wildcard resource from deploy role` |
+| `chore` | Maintenance, dependencies | `chore(terraform): bump AWS provider to 5.80.0` |
+| `docs` | Documentation only | `docs(runbook): add RDS failover procedure` |
+| `refactor` | Code change that neither fixes nor adds | `refactor(modules): extract common tags to locals` |
+| `test` | Tests only | `test(vpc): add validation for CIDR block ranges` |
+
+**Scope** is optional but valuable. Use the module, service, or domain name: `vpc`, `iam`, `s3`, `ci`, `api`.
+
+**Description** is imperative mood, lowercase, no period. "add NAT gateway" not "added NAT gateway" or "Adding NAT gateway."
+
+### Why Bother?
+
+Conventional commits are not bureaucracy. They give you three things:
+
+1. **Automated changelogs.** Tools like `conventional-changelog` or `release-please` generate changelogs from commit history. No more manually writing "what changed this sprint."
+2. **Searchable history.** `git log --grep="^fix(iam)"` shows every IAM fix. Try doing that with "fixed stuff."
+3. **Scorecard data.** Starting in Part 8, your Agent Scorecard tracks commit types by author. You will see patterns: "agents generate 80% feat commits but only 5% test commits." That is a signal.
+
+### Enforcing Locally
+
+Install `commitlint` to reject non-conforming commit messages:
+
+```bash terminal
+npm install --save-dev @commitlint/cli @commitlint/config-conventional
+```
+
+```javascript title="commitlint.config.js"
+module.exports = {
+  extends: ['@commitlint/config-conventional'],
+  rules: {
+    'type-enum': [
+      2,
+      'always',
+      ['feat', 'fix', 'chore', 'docs', 'refactor', 'test', 'ci', 'perf'],
+    ],
+    'scope-case': [2, 'always', 'kebab-case'],
+    'subject-case': [2, 'never', ['start-case', 'pascal-case', 'upper-case']],
+    'header-max-length': [2, 'always', 100],
+  },
+};
+```
+
+Wire it into a git hook (we will do this properly with pre-commit in [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality)):
+
+```bash terminal
+npx husky add .husky/commit-msg 'npx --no -- commitlint --edit "$1"'
+```
+
+Now try a bad commit message:
+
+```bash terminal
+git commit -m "updated files"
+```
+
+```
+⧗   input: updated files
+✖   subject may not be empty [subject-empty]
+✖   type may not be empty [type-empty]
+
+✖   Found 2 problems, 0 warnings
+```
+
+Good. The guardrail works for humans and agents alike.
+
+---
+
+## Agent Commit Hygiene
+
+This is the section that separates "using agents" from "using agents safely." Three rules, no exceptions.
+
+### Rule 1: Never `git add .`
+
+`git add .` and `git add -A` stage everything in the working directory. For a human, this might include a stray file or two. For an agent that has been generating, testing, and iterating, this can include:
+
+- `.env` files with real credentials
+- Debug logs and temporary test outputs
+- Build artifacts and `node_modules` changes
+- Unrelated files the agent touched while exploring
+
+Always stage specific files:
+
+```bash terminal
+# Good
+git add modules/vpc/main.tf modules/vpc/variables.tf modules/vpc/outputs.tf
+
+# Bad
+git add .
+git add -A
+git add --all
+```
+
+<Alert type="caution" title="Agent Trap">
+
+Agents default to `git add .` because it is the fastest path to a clean working tree. The agent's goal is "commit the code," not "commit only the relevant code." This is Context Amnesia (category 5): the agent forgets you told it to only stage specific files three messages ago.
+
+**What catches it:** The pre-commit hooks we add in Part 8 include a check for staged files that match `.env*`, `*.log`, and other patterns that should never be committed. But the first line of defense is the AGENT-INSTRUCTIONS.md rule we add at the end of this post.
+
+</Alert>
+
+### Rule 2: Agent Attribution
+
+Every agent-generated commit includes a `Co-Authored-By` trailer:
+
+```bash terminal
+git commit -m "$(cat <<'EOF'
+feat(vpc): add NAT gateway with cost-optimized single-AZ config
+
+Single NAT gateway in us-east-1a. Multi-AZ NAT is $65/month per
+additional gateway — not justified until traffic exceeds 100GB/month
+cross-AZ.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+)"
+```
+
+For GitHub Copilot:
+
+```
+Co-Authored-By: GitHub Copilot <noreply@github.com>
+```
+
+For Cursor:
+
+```
+Co-Authored-By: Cursor <noreply@cursor.com>
+```
+
+**Why this matters:**
+
+- GitHub recognizes `Co-Authored-By` trailers and shows them in the commit UI
+- `git log --grep="Co-Authored-By: Claude"` gives you every agent-generated commit instantly
+- The Scorecard (Part 8+) uses this data to track agent contribution quality over time
+- When a security audit asks "who wrote this IAM policy," you have a clear answer
+
+### Rule 3: One Logical Change Per Commit
+
+Agents love to bundle. You ask for a VPC module and get back a VPC, three security groups, an ALB, a Route 53 record, and a "helpful" IAM policy with `Action: "*"`. All in one commit.
+
+Force atomic commits:
+
+```bash terminal
+# One commit per logical unit
+git add modules/vpc/main.tf modules/vpc/variables.tf modules/vpc/outputs.tf
+git commit -m "feat(vpc): add VPC with public and private subnets"
+
+git add modules/vpc/security-groups.tf
+git commit -m "feat(vpc): add security groups for web and app tiers"
+
+git add modules/vpc/nacls.tf
+git commit -m "feat(vpc): add network ACLs for subnet-level filtering"
+```
+
+This makes code review possible. A 500-line commit across 15 files is a rubber-stamp invitation. Five 100-line commits with clear scopes get actual review.
+
+---
+
+## The `.gitignore` That Saves You
+
+A comprehensive `.gitignore` is your safety net for when `git add .` happens anyway (and it will). Here is what should be in yours for an AWS/Terraform/Node project:
+
+```gitignore title=".gitignore"
+# Credentials and secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*
+*secret*
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform lock file — DO commit this
+!.terraform.lock.hcl
+
+# IDE and editor
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+.astro/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Agent artifacts
+.agent-sessions/
+.claude/
+.cursor/
+.copilot/
+```
+
+:::note
+Commit `.env.example` with placeholder values so new team members (and agents) know which variables are required. Never commit `.env` with real values.
+:::
+
+The `*credentials*` and `*secret*` patterns are intentionally broad. False positives are better than leaked keys. If you have a file called `secrets-architecture.md` that you actually want to commit, add a specific exception.
+
+---
+
+## Reviewing Agent PRs
+
+Agent PRs are not human PRs. They require a different review lens.
+
+When a human submits a PR, you review for logic, architecture, and edge cases. You trust that they did not hardcode credentials or add `AdministratorAccess` to an IAM role. (You still check, but it is not your primary concern.)
+
+When an agent submits a PR, the checklist inverts:
+
+### Agent PR Review Checklist
+
+| Check | Why |
+|-------|-----|
+| **IAM permissions** | Agents default to broad permissions. Look for `Resource: "*"`, `Action: "*"`, `AdministratorAccess`. |
+| **Resource naming** | Does it follow `{project}-{env}-{resource}` from AGENT-INSTRUCTIONS.md? |
+| **Hardcoded values** | Regions, account IDs, AMI IDs, CIDR blocks. All should be variables or data sources. |
+| **Missing tags** | Every resource needs `Environment`, `Project`, `Owner`, `ManagedBy`. |
+| **Security group rules** | Ingress from `0.0.0.0/0`? Only acceptable on ALB port 443. |
+| **Cost implications** | Did the agent choose `t3.xlarge` when `t3.micro` would work? Check instance types, storage sizes, reserved capacity. |
+| **Credentials in code** | Search the diff for anything that looks like a key, token, or password. |
+
+### PR Template
+
+Create a PR template that forces this review:
+
+```markdown title=".github/pull_request_template.md"
+## Summary
+
+<!-- What does this PR do? One paragraph. -->
+
+## Generation Method
+
+<!-- How was this code created? Check one. -->
+
+- [ ] Fully human-written
+- [ ] Human-written with agent suggestions (Copilot autocomplete, etc.)
+- [ ] Agent-generated with human review (Claude, Cursor, etc.)
+- [ ] Agent-generated with minimal review
+
+## Changes
+
+<!-- List the key changes -->
+
+-
+
+## Agent Review Checklist
+
+<!-- Complete if any agent involvement -->
+
+- [ ] IAM permissions follow least privilege
+- [ ] No hardcoded account IDs, regions, or AMI IDs
+- [ ] All resources have required tags
+- [ ] Security group ingress rules are scoped
+- [ ] No credentials or secrets in code
+- [ ] Cost implications reviewed
+- [ ] Commit messages follow conventional format
+- [ ] Co-Authored-By attribution present on agent commits
+
+## Testing
+
+<!-- How was this tested? -->
+
+-
+```
+
+The "Generation Method" section is critical. It tells the reviewer how much scrutiny to apply. A PR marked "Agent-generated with minimal review" gets a full manual review. A PR marked "Fully human-written" still gets the standard review, but the reviewer spends less time checking for agent-specific failure modes.
+
+:::note
+**Coming in Part 27:** Your CI pipeline will automatically label PRs with agent attribution data from the commit trailers. No manual checkbox needed.
+:::
+
+---
+
+## AGENT-INSTRUCTIONS.md Update
+
+Add the Git Conventions section to the `AGENT-INSTRUCTIONS.md` you created in [Part 1](/blog/aws-for-startups/01-your-first-60-minutes-in-aws) and expanded in [Part 4](/blog/aws-for-startups/04-terraform-fundamentals).
+
+```markdown title="AGENT-INSTRUCTIONS.md"
+## Git Conventions
+
+- Conventional commits required: feat:, fix:, chore:, docs:, refactor:, test:
+- NEVER use `git add .` or `git add -A`
+- Always `git add` specific files by name
+- Branch naming: feature/, fix/, chore/, docs/
+- One logical change per commit
+- Always include Co-Authored-By trailer on agent-generated commits
+```
+
+Your AGENT-INSTRUCTIONS.md now has 21 lines: the header (1), IAM Rules from Part 2 (4), Terraform Conventions from Part 4 (10), and Git Conventions (6).
+
+This file is the single source of truth for agent behavior in your repository. Every agent session should start by reading it. Every convention you add here is one fewer thing you need to catch in code review.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents will acknowledge your AGENT-INSTRUCTIONS.md at the start of a conversation, then gradually forget its rules as the context window fills up. By message 15, the agent is back to `git add .` and generic commit messages. This is why automated enforcement (commitlint, pre-commit hooks) matters more than written rules alone. We add those automated guardrails in [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality).
+
+</Alert>
+
+---
+
+## Your Repository Structure So Far
+
+After Parts 1-6, your project should look like this:
+
+<FileTree>
+your-project/
+  .github/
+    pull_request_template.md
+  .husky/
+    commit-msg
+  terraform/
+    environments/
+      dev/
+        main.tf
+        observability.tf
+    modules/
+      vpc/
+      signoz-ec2/
+  docker/
+    observability/
+  AGENT-INSTRUCTIONS.md
+  .gitignore
+  commitlint.config.js
+  package.json
+</FileTree>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No conventions. `git add .`, commit messages like "wip" and "fix." Agent commits undifferentiated from human commits. Three months later, a security audit asks who approved the IAM policy with `AdministratorAccess` and nobody knows. |
+| ✅ **Right** | Conventional commits enforced by commitlint. Specific file staging. Agent attribution via `Co-Authored-By`. PR template with generation method and agent review checklist. |
+| ❌ **Over** | GPG signing required on every agent commit, automated squash policies that destroy commit history, mandatory 3-reviewer approval for any file an agent touched, separate repositories for agent-generated code. |
+| 🤖 **Agent Trap** | Agent uses `git add .` because it is the shortest path to a clean working tree. The commit sweeps in `.env` with AWS credentials, a debug log with request payloads, and 12 unrelated files the agent modified while exploring. Your `.gitignore` catches the `.env`, but the debug log with customer data ships to GitHub. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 7: Branch Protection & PR Workflow**, we add branch protection rules that prevent direct pushes to `main`, require PR reviews, and enforce status checks. The conventions you set up today become enforced policy.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Git Setup",
+    tasks: [
+      { text: "Conventional commits configured (commitlint installed and hooked)", syncKey: "part-06-commitlint" },
+      { text: "Branch naming follows convention (feature/, fix/, chore/)", syncKey: "part-06-branch-naming" },
+      { text: ".gitignore is comprehensive (credentials, .terraform/, node_modules/, agent artifacts)", syncKey: "part-06-gitignore" },
+      { text: ".terraform.lock.hcl is committed (not ignored)", syncKey: "part-06-lockfile" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "Agent attribution configured (Co-Authored-By trailer in agent commits)", syncKey: "part-06-attribution" },
+      { text: "Agent commits use specific file staging (no git add .)", syncKey: "part-06-specific-staging" },
+      { text: "PR template includes Generation Method section", syncKey: "part-06-pr-template" },
+      { text: "PR template includes Agent Review Checklist", syncKey: "part-06-pr-checklist" }
+    ]
+  },
+  {
+    category: "AGENT-INSTRUCTIONS.md",
+    tasks: [
+      { text: "Git Conventions section added (6 rules)", syncKey: "part-06-agent-instructions" },
+      { text: "File now has 21 cumulative lines", syncKey: "part-06-line-count" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. `git add .` is the most dangerous command when agents write your code, because agents generate more stray files, faster, than any human.
+2. Conventional commits are not bureaucracy. They are structured data that feeds changelogs, enables `git log` queries, and powers the Agent Scorecard you build in Part 8.
+3. Agent attribution via `Co-Authored-By` is not about credit. It is about traceability: when something breaks, you need to know whether a human reviewed the change or an agent shipped it unchecked.
+4. Review agent PRs with a different lens: permissions, naming, hardcoded values, missing tags, cost implications. The default human trust assumptions do not apply.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
