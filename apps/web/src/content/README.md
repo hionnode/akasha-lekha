@@ -78,20 +78,17 @@ You can use components directly:
 - **`<PostCard>`** - Post preview cards
 - **`<Badge>`** - Status indicators and labels
 - **`<CodeSwitcher>`** - Code block switchers (also available via markdown directives)
-- **Code-Focused Components** - See [Part 4 of MDX Mastery series](/blog/mdx-mastery-series/04-code-focused-components) for:
+- **Code Display** (`components/blog/code/`):
   - `<PanelSwitcher>` / `<Panel>` - Tabbed content switching
   - `<FileTree>` - File/directory structure display
-  - `<DiffViewer>` / `<DiffBlock>` - Code diff comparison
-  - `<CommandReference>` / `<Command>` - CLI command documentation
-  - `<ApiEndpoint>` / `<ResponseExample>` - API documentation
+  - `<Command>` / `<CommandReference>` - CLI command documentation
+  - `<TerminalOutput>` - Terminal output with copy button
+- **Guide Components** (`components/blog/guide/`):
+  - `<GuideStep>` / `<Step>` - Step-by-step workflows
+  - `<ValidationChecklist>` - Verification checklists
   - `<ComparisonTable>` / `<ComparisonHeader>` / `<ComparisonRow>` - Feature comparison tables
-  - `<K8sManifest>` - Kubernetes manifest viewer
-  - `<TerminalOutput>` - Enhanced terminal output with search
-  - `<ResourceStatus>` - Kubernetes resource status indicators
-  - `<CommandSequence>` / `<Step>` - Multi-step command workflows
   - `<EnvVars>` / `<EnvVar>` - Environment variable documentation
-  - `<ServiceMapping>` / `<Service>` / `<Ingress>` - Port/service mapping
-- Any other shared components from `src/components/shared/` or `src/components/blog/`
+- **Shared** (`components/shared/`): `<Alert>`, `<Badge>`, `<Button>`, `<SEO>`, `<AwsRegionLatency>`
 
 ##### JSX Expressions
 

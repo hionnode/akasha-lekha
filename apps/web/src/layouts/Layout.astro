@@ -1,6 +1,5 @@
 ---
 import '../styles/global.css';
-import GlobalLoader from '../components/shared/GlobalLoader.astro';
 
 interface Props {
   title: string;
@@ -37,7 +36,6 @@ const { title, description } = Astro.props;
     </script>
   </head>
   <body>
-    <GlobalLoader />
     <!-- Skip to content link for accessibility -->
     <a
       href="#main-content"

@@ -1,11 +1,10 @@
 ---
 interface Props {
   title?: string;
-  searchable?: boolean;
   class?: string;
 }
 
-const { title, searchable = false, class: className = '' } = Astro.props;
+const { title, class: className = '' } = Astro.props;
 const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
 ---
 
@@ -17,18 +16,6 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
       <div class="terminal-dot"></div>
     </div>
     {title && <span class="terminal-title">{title}</span>}
-    {
-      searchable && (
-        <div class="terminal-search">
-          <input
-            type="text"
-            class="terminal-search-input"
-            placeholder="Search..."
-            data-output-id={outputId}
-          />
-        </div>
-      )
-    }
     <button class="terminal-copy-button" data-output-id={outputId} aria-label="Copy output">
       <svg
         xmlns="http://www.w3.org/2000/svg"
@@ -60,84 +47,9 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
       if (!outputId) return;
 
       const content = output.querySelector(`.terminal-content[data-output-id="${outputId}"]`);
-      const searchInput = output.querySelector(
-        `.terminal-search-input[data-output-id="${outputId}"]`
-      );
       const copyButton = output.querySelector(
         `.terminal-copy-button[data-output-id="${outputId}"]`
       );
-
-      // Add line numbers
-      if (content) {
-        const text = content.textContent || '';
-        const pre = content.querySelector('pre');
-
-        if (pre && !pre.querySelector('.line-numbers')) {
-          const lines = text.split('\n');
-          const lineNumbers = document.createElement('div');
-          lineNumbers.className = 'line-numbers';
-          lines.forEach((_, i) => {
-            const lineNum = document.createElement('span');
-            lineNum.className = 'line-number';
-            lineNum.textContent = String(i + 1);
-            lineNumbers.appendChild(lineNum);
-          });
-
-          const wrapper = document.createElement('div');
-          wrapper.className = 'terminal-content-wrapper';
-          wrapper.appendChild(lineNumbers);
-          wrapper.appendChild(pre.cloneNode(true));
-          content.innerHTML = '';
-          content.appendChild(wrapper);
-        }
-      }
-
-      // Search functionality
-      if (searchInput && content) {
-        let originalText = '';
-        const pre = content.querySelector('pre');
-        if (pre) {
-          originalText = pre.textContent || '';
-        }
-
-        searchInput.addEventListener('input', (e) => {
-          const query = (e.target as HTMLInputElement).value.toLowerCase();
-          const codeElement = content.querySelector('pre code') || content.querySelector('pre');
-
-          if (!codeElement || !originalText) return;
-
-          if (query) {
-            // Escape special regex characters
-            const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(`(${escapedQuery})`, 'gi');
-
-            // Highlight matches
-            const highlightedText = originalText.replace(
-              regex,
-              '<mark class="search-highlight">$1</mark>'
-            );
-            codeElement.innerHTML = highlightedText;
-
-            // Count matches
-            const matches = originalText.match(regex);
-            const matchCount = matches ? matches.length : 0;
-
-            // Update search input with match count
-            if (matchCount > 0) {
-              searchInput.setAttribute(
-                'placeholder',
-                `${matchCount} match${matchCount > 1 ? 'es' : ''}`
-              );
-            } else {
-              searchInput.setAttribute('placeholder', 'No matches');
-            }
-          } else {
-            // Reset to original text
-            codeElement.textContent = originalText;
-            searchInput.setAttribute('placeholder', 'Search...');
-          }
-        });
-      }
 
       // Copy functionality
       if (copyButton && content) {
@@ -163,14 +75,12 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
     });
   }
 
-  // Initialize on page load
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initTerminalOutput);
   } else {
     initTerminalOutput();
   }
 
-  // Re-initialize on navigation (Astro View Transitions)
   document.addEventListener('astro:page-load', initTerminalOutput);
 </script>
 
@@ -191,7 +101,6 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
     padding: 0.75rem 1rem;
     background: var(--bg-tertiary);
     border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
   }
 
   .terminal-controls {
@@ -223,28 +132,6 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
     color: var(--fg-secondary);
     font-size: 0.875rem;
     font-weight: 500;
-  }
-
-  .terminal-search {
-    display: flex;
-    align-items: center;
-  }
-
-  .terminal-search-input {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
-    border-radius: 0.25rem;
-    padding: 0.25rem 0.5rem;
-    color: var(--fg-primary);
-    font-size: 0.75rem;
-    font-family: 'Inconsolata', monospace;
-    width: 150px;
-  }
-
-  .terminal-search-input:focus {
-    outline: 2px solid var(--accent-blue);
-    outline-offset: 2px;
-    border-color: var(--accent-blue);
   }
 
   .terminal-copy-button {
@@ -281,26 +168,6 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
     overflow-y: auto;
   }
 
-  .terminal-content-wrapper {
-    display: flex;
-    gap: 1rem;
-  }
-
-  .line-numbers {
-    display: flex;
-    flex-direction: column;
-    color: var(--fg-muted);
-    font-size: 0.875rem;
-    user-select: none;
-    text-align: right;
-    padding-right: 1rem;
-    border-right: 1px solid var(--border);
-  }
-
-  .line-number {
-    line-height: 1.5;
-  }
-
   .terminal-content :global(pre) {
     margin: 0;
     background: transparent;
@@ -310,13 +177,5 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
 
   .terminal-content :global(code) {
     background: transparent;
-  }
-
-  .terminal-content :global(mark.search-highlight) {
-    background: var(--accent-yellow);
-    color: var(--bg-primary);
-    padding: 0.125rem 0.25rem;
-    border-radius: 0.125rem;
-    font-weight: 600;
   }
 </style>
