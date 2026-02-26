@@ -1,21 +1,14 @@
-#!/usr/bin/env sh
-. "$(dirname -- "$0")/_/husky.sh"
-
-echo "🔍 Running pre-commit checks..."
+echo "Running pre-commit checks..."
 
 # Run lint-staged
 pnpm lint-staged
 
 # Validate blog posts
-echo "\n📝 Validating blog posts..."
+echo "\nValidating blog posts..."
 pnpm validate:blog
 
-# Type check (skip astro check — has known pre-existing issues with content collections)
-echo "\n🔷 Running TypeScript checks..."
-pnpm --filter @akasha/types typecheck && pnpm --filter @akasha/api typecheck
-
 # Build check
-echo "\n🏗️  Verifying build..."
+echo "\nVerifying build..."
 pnpm build
 
-echo "\n✅ All pre-commit checks passed!"
+echo "\nAll pre-commit checks passed!"

@@ -11,7 +11,7 @@ import ObjectivesList from '../../../components/labs/ObjectivesList.astro';
 import VerificationChecklist from '../../../components/labs/VerificationChecklist.astro';
 import HintAccordion from '../../../components/labs/HintAccordion.astro';
 import CLICommand from '../../../components/labs/CLICommand.astro';
-import { mockModules } from '../../../utils/labs/mocks';
+import { labModules } from '../../../data/labs-modules';
 
 export async function getStaticPaths() {
   const modules = await getCollection('labs/modules');
@@ -59,7 +59,7 @@ const { slug } = Astro.params;
 const sortedExercises = [...exercises].sort((a, b) => a.data.order - b.data.order);
 
 // For sidebar
-const sidebarModules = mockModules;
+const sidebarModules = labModules;
 
 // Render content if exercise
 let Content;
@@ -159,12 +159,7 @@ if (type === 'exercise' && exercise) {
                     showLabel
                     showPercentage
                   />
-                  <p class="mt-2 text-xs text-fg-muted">
-                    <a href="/labs/login" class="text-accent-blue hover:underline">
-                      Login
-                    </a>{' '}
-                    to track your progress
-                  </p>
+                  <p class="mt-2 text-xs text-fg-muted">Progress tracking coming soon</p>
                 </div>
 
                 {/* Exercise list */}

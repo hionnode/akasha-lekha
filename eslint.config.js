@@ -7,7 +7,7 @@ export default [
   ...tseslint.configs.recommended,
   ...eslintPluginAstro.configs.recommended,
   {
-    ignores: ['dist/**', 'node_modules/**', '.astro/**', '*.config.*'],
+    ignores: ['dist/**', 'node_modules/**', '.astro/**', '*.config.*', '_draft/**'],
   },
   {
     rules: {
