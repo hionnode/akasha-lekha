@@ -1,0 +1,374 @@
+---
+title: "Branch Protection & PR Workflow: Quality Gates for Humans and Agents"
+description: "Configure branch protection rules and PR templates that catch mistakes from both human developers and AI coding agents. CODEOWNERS, required reviews, and agent-specific checklists."
+excerpt: "Quality gates that catch both human and agent mistakes. Branch protection, PR templates with agent-review sections, and CODEOWNERS for your growing team."
+date: "2026-02-26"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "git"]
+series: "AWS From Zero to Production"
+seriesPart: 7
+featured: false
+draft: false
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+
+Your agent generates a PR that touches three Terraform files. CI runs `terraform validate` and `tflint`. Both pass. You glance at the green checkmark, click merge, and go back to building your feature. Two days later, AWS emails you: your account hit the NAT Gateway quota for the region. The agent added a NAT Gateway per subnet instead of per AZ, and your bill jumped $200/day. CI does not check business logic. CI does not check cost.
+
+**Time:** About 25 minutes.
+
+**Outcome:** Branch protection rules that prevent direct pushes to `main`, require human review before merge, and enforce status checks. Plus CODEOWNERS for critical paths, PR labels that distinguish agent work from human work, and an expanded PR template.
+
+---
+
+## Why This Matters
+
+In [Part 6](/blog/aws-for-startups/06-git-github-agents), you set up git conventions: conventional commits, agent attribution, a PR template. Those are conventions. They rely on everyone following the rules. This part adds enforcement.
+
+Without branch protection, conventions are suggestions. Any developer (or agent) can push directly to `main`. Any PR can be merged without review. Status checks can be ignored. One `git push origin main` from an agent session at 2 AM, and your production Terraform state includes an untested change nobody reviewed.
+
+Three facts drive this entire post:
+
+1. **CI passing does not mean safe to merge.** CI checks syntax, formatting, and basic validation. It does not check whether a NAT Gateway costs $32/month or $192/month. It does not check whether an IAM policy is broader than it needs to be. It does not check whether anyone actually looked at the diff.
+
+2. **Agent PRs need different review criteria.** Humans rarely create IAM policies with `Action: "*"`. Agents do it routinely because it is the fastest path to working code. The review checklist for agent-generated infrastructure is fundamentally different from the review checklist for human code.
+
+3. **Protection rules apply equally.** Agents do not get special treatment. They go through the same branch protection, the same review process, the same status checks. The enforcement mechanism does not care who authored the code.
+
+---
+
+## What We're Building
+
+- Branch protection rules on `main` (required reviews, status checks, no force push)
+- An expanded PR template with infrastructure-specific sections
+- CODEOWNERS for infrastructure and CI paths
+- PR labels: `agent-generated`, `agent-assisted`, `human`
+
+---
+
+## Branch Protection Rules
+
+GitHub branch protection is the simplest, highest-value guardrail you can add. Five minutes of configuration prevents an entire class of mistakes.
+
+### Setting Up via GitHub UI
+
+:::steps
+1. Go to your repository on GitHub
+2. Navigate to **Settings > Branches**
+3. Click **Add branch protection rule** (or **Add classic branch protection rule** if you see rulesets)
+4. Set **Branch name pattern** to `main`
+5. Enable these settings:
+   - **Require a pull request before merging** (checked)
+   - **Require approvals:** 1
+   - **Dismiss stale pull request approvals when new commits are pushed** (checked)
+   - **Require status checks to pass before merging** (checked)
+   - **Require branches to be up to date before merging** (checked)
+   - **Do not allow bypassing the above settings** (checked)
+6. Under "Restrict who can push to matching branches," leave it unrestricted for now (you are a small team)
+7. Click **Create** (or **Save changes**)
+:::
+
+**Why each rule matters:**
+
+| Rule | What It Prevents |
+|------|-----------------|
+| Require PR | Direct pushes to `main` (from humans or agents) |
+| 1 approval | Merging without anyone reviewing the diff |
+| Dismiss stale approvals | Approving a PR, then pushing new commits that skip review |
+| Require status checks | Merging when CI is failing |
+| Up-to-date branches | Merging a PR that conflicts with recent `main` changes |
+| No bypass | Even repo admins go through the process |
+
+The "no bypass" rule is important. Without it, the repo owner (you) can skip all protections. That feels convenient until the day you merge something at midnight without review and spend the next morning fixing it.
+
+### Setting Up via `gh` CLI
+
+If you prefer reproducibility over clicking, use the GitHub CLI:
+
+```bash terminal
+gh api repos/{owner}/{repo}/branches/main/protection \
+  --method PUT \
+  --field required_status_checks='{"strict":true,"contexts":["ci"]}' \
+  --field enforce_admins=true \
+  --field required_pull_request_reviews='{"dismiss_stale_reviews":true,"require_code_owner_reviews":true,"required_approving_review_count":1}' \
+  --field restrictions=null \
+  --field allow_force_pushes=false \
+  --field allow_deletions=false
+```
+
+Replace `{owner}/{repo}` with your actual repository path. The `contexts` array under `required_status_checks` should list your CI job names. If your CI workflow is called `ci`, use `["ci"]`. If you have multiple jobs, list them all.
+
+:::tip
+Store this command in a `scripts/setup-branch-protection.sh` file in your repo. When you create new repositories (or new protected branches for staging), you run the script instead of clicking through the UI again.
+:::
+
+---
+
+## Expanding the PR Template
+
+In [Part 6](/blog/aws-for-startups/06-git-github-agents), you created `.github/pull_request_template.md` with a Generation Method section and an Agent Review Checklist. That template works for application code. Infrastructure changes need more.
+
+Create a second template for infrastructure-heavy PRs:
+
+```markdown title=".github/PULL_REQUEST_TEMPLATE/infrastructure.md"
+## Summary
+
+<!-- What infrastructure does this PR change? Which Terraform modules? -->
+
+## Generation Method
+
+- [ ] Fully human-written
+- [ ] Human-written with agent suggestions
+- [ ] Agent-generated with human review
+- [ ] Agent-generated with minimal review
+
+## Infrastructure Impact
+
+### Resources Changed
+<!-- List resources being created, modified, or destroyed -->
+
+-
+
+### Cost Impact
+<!-- Estimate monthly cost change. Use `infracost` if available, otherwise estimate manually. -->
+
+- Before: $___/month
+- After: $___/month
+- Delta: $___/month
+
+### Blast Radius
+<!-- What breaks if this change is wrong? -->
+
+- [ ] Affects production traffic
+- [ ] Modifies IAM permissions
+- [ ] Changes networking (VPC, subnets, security groups)
+- [ ] Modifies database configuration
+- [ ] None of the above
+
+## Agent Review Checklist
+
+<!-- Complete if any agent involvement -->
+
+- [ ] IAM permissions follow least privilege (no `Action: "*"` or `Resource: "*"`)
+- [ ] No hardcoded account IDs, regions, or AMI IDs
+- [ ] All resources have required tags (Environment, Project, Owner, ManagedBy)
+- [ ] Security group ingress rules are scoped (no `0.0.0.0/0` except ALB 443)
+- [ ] No credentials or secrets in code
+- [ ] Cost implications reviewed (instance types, storage, NAT Gateways)
+- [ ] Resource naming follows `{project}-{env}-{resource}` convention
+- [ ] Commit messages follow conventional format with Co-Authored-By
+
+## Terraform Plan Output
+
+<!-- Paste the output of `terraform plan` -->
+
+```
+Plan: X to add, Y to change, Z to destroy.
+```
+
+## Testing
+
+<!-- How was this tested? -->
+
+-
+```
+
+The key difference is the **Infrastructure Impact** section. It forces the PR author (human or agent) to state the cost delta and blast radius before anyone reviews the code. A reviewer who sees "Modifies IAM permissions" and "Affects production traffic" reads the diff differently than one who sees "None of the above."
+
+### Using Multiple Templates
+
+When you have multiple PR templates in `.github/PULL_REQUEST_TEMPLATE/`, GitHub does not auto-populate any of them. Contributors select a template by appending `?template=infrastructure.md` to the PR creation URL, or by choosing from the template picker.
+
+Keep the default template at `.github/pull_request_template.md` (the one from Part 6) for general use. Use the infrastructure template when the PR touches `terraform/`, `infra/`, or `.github/workflows/`.
+
+<FileTree>
+.github/
+  pull_request_template.md
+  PULL_REQUEST_TEMPLATE/
+    infrastructure.md
+</FileTree>
+
+:::note
+**Coming in Part 27:** Your CI pipeline will auto-detect infrastructure PRs based on changed file paths and apply the infrastructure template checklist as required status checks.
+:::
+
+---
+
+## CODEOWNERS
+
+CODEOWNERS assigns reviewers automatically based on which files a PR touches. When someone (or something) modifies `terraform/`, the infrastructure lead gets tagged for review without anyone remembering to do it manually.
+
+Create a `CODEOWNERS` file at the root of your repository:
+
+```text title="CODEOWNERS"
+# Default: the repo owner reviews everything
+*                       @your-github-username
+
+# Infrastructure: requires infrastructure-aware reviewer
+/terraform/             @your-github-username
+/infra/                 @your-github-username
+*.tf                    @your-github-username
+
+# CI/CD: changes to workflows need review
+/.github/               @your-github-username
+
+# Secrets and credentials: always reviewed
+*.pem                   @your-github-username
+*.key                   @your-github-username
+```
+
+For a solo founder or two-person team, every path points to you. That is fine. The value is not in distributing reviews across a large team. The value is that CODEOWNERS combined with the "Require review from Code Owners" branch protection setting guarantees that infrastructure changes cannot be merged without your explicit approval.
+
+As your team grows, CODEOWNERS scales with you:
+
+```text title="CODEOWNERS (team of 4+)"
+# Application code
+/src/                   @frontend-team
+/api/                   @backend-team
+
+# Infrastructure: senior engineer or founder
+/terraform/             @infra-lead
+/infra/                 @infra-lead
+
+# CI/CD
+/.github/               @platform-team
+
+# Security-sensitive
+*.tf                    @infra-lead @security-reviewer
+```
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate CODEOWNERS files with teams that do not exist in your GitHub organization. The agent pulls team names from its training data (`@devops-team`, `@platform-engineering`, `@sre-team`) instead of your actual GitHub usernames or teams. GitHub silently ignores invalid CODEOWNERS entries, so you think you have review requirements, but nobody gets tagged.
+
+**What catches it:** Run `gh api repos/{owner}/{repo}/codeowners/errors` after committing. GitHub validates CODEOWNERS and reports invalid patterns or unknown users.
+
+</Alert>
+
+### Enabling CODEOWNERS in Branch Protection
+
+CODEOWNERS only works if you enable "Require review from Code Owners" in your branch protection settings. Go back to Settings > Branches > Edit your `main` protection rule, and check **Require review from Code Owners**. Without this, CODEOWNERS is a suggestion file that GitHub ignores.
+
+---
+
+## Agent PR Labels
+
+Labels give you a way to filter, search, and eventually automate based on how code was created. Create three labels in your repository:
+
+```bash terminal
+gh label create "agent-generated" \
+  --description "PR contains fully agent-generated code" \
+  --color "7057ff"
+
+gh label create "agent-assisted" \
+  --description "PR contains agent-assisted code with human edits" \
+  --color "0075ca"
+
+gh label create "human" \
+  --description "PR is fully human-written" \
+  --color "008672"
+```
+
+For now, you apply these manually when creating a PR. The label tells reviewers what lens to use:
+
+| Label | Review Approach |
+|-------|----------------|
+| `human` | Standard code review: logic, architecture, edge cases |
+| `agent-assisted` | Standard review plus spot-check for agent patterns (broad permissions, hardcoded values) |
+| `agent-generated` | Full agent review checklist: IAM scope, cost, naming, tags, credentials, resource sizing |
+
+The difference is time. A `human` PR might take 10 minutes to review. An `agent-generated` PR of the same size takes 20-30 minutes because you are checking for a different class of mistakes.
+
+:::note
+**Coming in Part 27:** CI will automatically detect `Co-Authored-By` trailers from [Part 6](/blog/aws-for-startups/06-git-github-agents) and apply the correct label. No manual labeling needed.
+:::
+
+---
+
+## Putting It All Together
+
+Here is the workflow after this part:
+
+:::steps
+1. Create a branch following the naming convention from Part 6 (`feature/`, `fix/`, `chore/`)
+2. Make changes (you or your agent)
+3. Commit with conventional format and `Co-Authored-By` if agent-involved
+4. Push the branch and open a PR (select the infrastructure template if applicable)
+5. Apply the appropriate label (`human`, `agent-assisted`, `agent-generated`)
+6. CODEOWNERS auto-assigns the reviewer
+7. Reviewer uses the label to decide review depth
+8. Status checks must pass (CI green)
+9. Reviewer approves
+10. Merge to `main`
+:::
+
+No step is optional. Branch protection enforces steps 8-10. Conventions enforce 1-5. CODEOWNERS enforces 6. The review depth in step 7 is the only part that relies on human judgment, and that is exactly where human judgment belongs.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No branch protection. Anyone pushes directly to `main`. Agent merges its own PR at 3 AM. Nobody reviews infrastructure changes until the bill arrives. |
+| ✅ **Right** | 1 required reviewer. Status checks enforced. PR template with generation method and infrastructure impact. CODEOWNERS on `terraform/` and `.github/`. Agent PR labels for review depth. |
+| ❌ **Over** | 3 required approvers, mandatory pair programming sessions, separate approval workflows for every file path, CODEOWNERS with 12 different teams for a 3-person startup. |
+| 🤖 **Agent Trap** | Agent creates a PR with the title "Update infrastructure" and a body that says "Made some changes to the Terraform configuration." No cost impact, no blast radius, no context. The reviewer has to reverse-engineer intent from the diff, which means the PR either gets rubber-stamped or sits unreviewed for days. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 8: Pre-Commit Hooks & Code Quality**, we add automated enforcement for everything that is still convention-only. Commitlint rejects bad commit messages before they reach your branch. Gitleaks catches secrets before they reach GitHub. Terraform validation runs before you push. The guardrails move from "please follow the rules" to "you cannot break the rules."
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Branch Protection",
+    tasks: [
+      { text: "Main branch has protection rules enabled", syncKey: "part-07-protection-enabled" },
+      { text: "Pull request required before merging to main", syncKey: "part-07-pr-required" },
+      { text: "At least 1 approval required", syncKey: "part-07-approval-required" },
+      { text: "Status checks required and must pass before merging", syncKey: "part-07-status-checks" },
+      { text: "Force push to main disabled", syncKey: "part-07-no-force-push" }
+    ]
+  },
+  {
+    category: "PR Workflow",
+    tasks: [
+      { text: "Default PR template exists (.github/pull_request_template.md)", syncKey: "part-07-default-template" },
+      { text: "Infrastructure PR template exists (.github/PULL_REQUEST_TEMPLATE/infrastructure.md)", syncKey: "part-07-infra-template" },
+      { text: "CODEOWNERS file created with infrastructure paths", syncKey: "part-07-codeowners" },
+      { text: "Require review from Code Owners enabled in branch protection", syncKey: "part-07-codeowners-enabled" }
+    ]
+  },
+  {
+    category: "Labels",
+    tasks: [
+      { text: "agent-generated label created", syncKey: "part-07-label-agent" },
+      { text: "agent-assisted label created", syncKey: "part-07-label-assisted" },
+      { text: "human label created", syncKey: "part-07-label-human" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. CI passing means the code is syntactically valid, not that it is safe, cost-effective, or correctly scoped. Branch protection with required reviews ensures a human verifies what automation cannot.
+2. PR templates should force context before review starts: generation method, cost impact, blast radius. The reviewer's job is to evaluate, not to investigate.
+3. CODEOWNERS guarantees that infrastructure changes always route to someone who understands the cost and security implications, regardless of who (or what) generated the code.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
