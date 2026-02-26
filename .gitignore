@@ -121,6 +121,8 @@ yarn.lock
 # Local development
 .local/
 
+# Claude Code
+.claude/
 
 # Keep pnpm-lock.yaml (don't ignore it)
 !pnpm-lock.yaml

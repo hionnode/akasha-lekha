@@ -1,0 +1,658 @@
+---
+title: "Propositions and Logic Gates: What if Statements Really Mean"
+description: "Learn propositional logic through code. Truth tables, De Morgan's laws, logical equivalence, and a Python truth table generator for developers."
+excerpt: "A production access control bug took three days to find. The fix was one line. The rule that prevents it — De Morgan's law — takes 10 seconds to apply. This post teaches you the formal rules behind every boolean expression."
+date: "2026-02-17"
+author: "works-on-my.cloud"
+tags: ["discrete-math", "cs-fundamentals", "logic"]
+series: "Discrete Mathematics for Developers"
+seriesPart: 1
+featured: false
+draft: false
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/shared/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/shared/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/shared/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/shared/ComparisonRow.astro';
+import TruthTable from '../../../components/discrete-math/truth-table/TruthTable.tsx';
+import LogicGateEditor from '../../../components/discrete-math/logic-gate/LogicGateEditor.tsx';
+import ProofStepper from '../../../components/discrete-math/proof-stepper/ProofStepper.tsx';
+import { deMorgansFirstLaw, accessControlBug } from '../../../components/discrete-math/truth-table/presets';
+import { deMorgansLawCircuit, accessControlBugCircuit } from '../../../components/discrete-math/logic-gate/presets';
+import { deMorgansFirstLawProof } from '../../../components/discrete-math/proof-stepper/proof-data';
+
+A production system checks whether to deny access like this:
+
+```python title="access_check.py"
+if not user.is_active and not user.is_admin:
+    deny_access()
+```
+
+The intent: deny access when the user should not have access. The original grant condition was `user.is_active and user.is_admin`. Someone needed the opposite. They negated each piece: `not active` and `not admin`. Looks right. Every reviewer thought so.
+
+It went to production. For three days, inactive admins bypassed the access check. The wrong version only denies access when the user is *both* inactive *and* not an admin. An inactive admin passes through.
+
+The fix:
+
+```python title="access_check_fixed.py"
+if not user.is_active or not user.is_admin:
+    deny_access()
+```
+
+One word changed: `and` to `or`. The rule that prevents this bug has a name: **De Morgan's law**. Push the negation in, flip the operator. AND becomes OR. It takes 10 seconds to apply once you know it.
+
+This is just the first rule. There are dozens. They are the algebra of boolean expressions, and not knowing them means you are doing arithmetic by guessing.
+
+**By the end of this post,** you will know the formal rules behind boolean expressions, be able to simplify any compound condition using algebraic laws, and have a Python truth table generator that verifies your work.
+
+---
+
+## Why This Matters
+
+The access control bug is not unusual. It is a specific instance of a general problem: developers work with boolean logic every day without knowing the rules.
+
+Consider what "not knowing the rules" looks like in practice:
+
+- Complex conditions in production code that no reviewer can confidently verify
+- Boolean expressions that "probably work" but no one can prove
+- Code review comments that say "I think this is right?" instead of "this is equivalent because De Morgan's law"
+- Debugging by adding `print` statements to check every combination, instead of reading the expression and knowing
+
+The gap between "I can write code" and "I can reason about code" is the gap between informal intuition and formal rules. Every `if` statement evaluates a proposition. Every compound condition uses logical connectives. Every boolean refactor is an algebraic simplification. The rules exist. They are not hard. This post gives them names.
+
+---
+
+## Propositions
+
+You already work with propositions. Every boolean variable is one. `isActive`, `hasPermission`, `isConnected`. Each holds a value that is either true or false, nothing else. The formal name for this kind of statement is **proposition**. The formal rule: exactly two possible values, true or false, never both, never neither.
+
+<Alert type="important" title="Definition: Proposition">
+
+A **proposition** is a declarative sentence that is either true or false, but not both.
+
+</Alert>
+
+"The server is running" is a proposition. It is either true or false at any given moment.
+
+"Is the server running?" is not a proposition. Questions are not declarative sentences. "Start the server" is not a proposition. Commands are not declarative sentences. `x + 1 > 3` is not a proposition until you know the value of `x` (it becomes a **predicate**, which we cover in Part 2).
+
+In code, every boolean expression that evaluates to `true` or `false` is a proposition. The variable `isActive` holds a propositional value. The expression `user.age >= 18` is a proposition (once `user.age` has a value).
+
+We use lowercase letters to represent propositions: p, q, r, s. This is the standard mathematical convention, and it matches what you already do in code when you write `const p = user.isActive`.
+
+:::tip
+Every boolean variable in your code is a propositional variable. Every boolean expression is a compound proposition. The type system enforces that propositions can only be true or false.
+:::
+
+---
+
+## Logical Connectives
+
+Propositions become powerful when you combine them. There are six standard connectives. You already know five of them from code.
+
+### Negation (NOT)
+
+The simplest connective flips the truth value. If something is true, its negation is false. You use this every time you write `!` or `not`.
+
+<Alert type="important" title="Definition: Negation">
+
+The **negation** of a proposition p, written **¬p**, is the proposition "it is not the case that p." ¬p is true when p is false, and false when p is true.
+
+</Alert>
+
+| p | ¬p |
+|---|---|
+| T | F |
+| F | T |
+
+In code: `!p` (JavaScript), `not p` (Python).
+
+### Conjunction (AND)
+
+When you check two conditions together, you are using conjunction. Both must hold.
+
+<Alert type="important" title="Definition: Conjunction">
+
+The **conjunction** of propositions p and q, written **p ∧ q**, is the proposition "p and q." It is true when both p and q are true, and false otherwise.
+
+</Alert>
+
+| p | q | p ∧ q |
+|---|---|-------|
+| T | T | T |
+| T | F | F |
+| F | T | F |
+| F | F | F |
+
+In code: `p && q` (JavaScript), `p and q` (Python).
+
+The truth table has exactly four rows because there are two variables, each with two possible values: 2² = 4 combinations. Three variables would give 2³ = 8 rows. The number of rows is always 2ⁿ where n is the number of variables.
+
+### Disjunction (OR)
+
+At least one condition must hold. This is the `||` you write when checking alternatives.
+
+<Alert type="important" title="Definition: Disjunction">
+
+The **disjunction** of propositions p and q, written **p ∨ q**, is the proposition "p or q." It is true when at least one of p or q is true, and false only when both are false.
+
+</Alert>
+
+| p | q | p ∨ q |
+|---|---|-------|
+| T | T | T |
+| T | F | T |
+| F | T | T |
+| F | F | F |
+
+In code: `p || q` (JavaScript), `p or q` (Python).
+
+This is **inclusive or**. "Soup or salad" in a restaurant is exclusive or (pick one). "Users who like Python or JavaScript" in a database query is inclusive or (could be both). Logic uses inclusive or by default.
+
+### Exclusive Or (XOR)
+
+<Alert type="important" title="Definition: Exclusive Or">
+
+The **exclusive or** of p and q, written **p ⊕ q**, is true when exactly one of p and q is true, and false otherwise.
+
+</Alert>
+
+| p | q | p ⊕ q |
+|---|---|-------|
+| T | T | F |
+| T | F | T |
+| F | T | T |
+| F | F | F |
+
+In code: `p ^ q` (for booleans in Python and JavaScript).
+
+XOR has a useful property: `p ⊕ p` is always false, and `p ⊕ false` is always p. This is why XOR is used in encryption (XOR with a key, XOR again to decrypt) and in the classic swap trick (`a ^= b; b ^= a; a ^= b`).
+
+### Implication (IF...THEN)
+
+Every function contract, every API guarantee, every guard clause is an implication. "If you give me valid input, I give you correct output." Implication is the connective that makes this precise.
+
+<Alert type="important" title="Definition: Implication">
+
+The **implication** p → q (read "if p then q") is false only when p is true and q is false. In all other cases, it is true.
+
+</Alert>
+
+| p | q | p → q |
+|---|---|-------|
+| T | T | T |
+| T | F | F |
+| F | T | T |
+| F | F | T |
+
+This is the most unintuitive connective for programmers. "If pigs fly, then I am the queen of England" is a **true** implication. When the hypothesis (p) is false, the implication is true regardless of the conclusion. This is called **vacuous truth**.
+
+Think of it as a contract: "If you submit a valid request, I will return a 200." The contract is only broken when you submit a valid request AND I return an error. If you submit an invalid request, the contract says nothing. It is not violated.
+
+In code, there is no direct `→` operator. The equivalent is `!p || q`:
+
+```python title="implication.py"
+def implies(p: bool, q: bool) -> bool:
+    return not p or q
+```
+
+:::warning
+Implication is not the same as causation. "If the sky is blue, then 2 + 2 = 4" is a true implication. The sky being blue does not cause 2 + 2 to equal 4. Implication only says: "it is never the case that p is true and q is false."
+:::
+
+:::tip
+If vacuous truth is still bothering you, Book of Proof Chapter 2 has an excellent extended treatment with more examples that make it click.
+:::
+
+### Biconditional (IF AND ONLY IF)
+
+<Alert type="important" title="Definition: Biconditional">
+
+The **biconditional** p ↔ q (read "p if and only if q") is true when p and q have the same truth value, and false otherwise.
+
+</Alert>
+
+| p | q | p ↔ q |
+|---|---|-------|
+| T | T | T |
+| T | F | F |
+| F | T | F |
+| F | F | T |
+
+In code: `p === q` (JavaScript for booleans), `p == q` (Python for booleans).
+
+The biconditional is equivalent to (p → q) ∧ (q → p). "You pass the test if and only if you score above 70" means both: if you score above 70 then you pass, AND if you pass then you scored above 70.
+
+### Connectives Summary
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Math", "Python", "JavaScript", "Name"]} />
+  <ComparisonRow feature="NOT" Math="¬p" Python="not p" JavaScript="!p" Name="Negation" />
+  <ComparisonRow feature="AND" Math="p ∧ q" Python="p and q" JavaScript="p && q" Name="Conjunction" />
+  <ComparisonRow feature="OR" Math="p ∨ q" Python="p or q" JavaScript="p || q" Name="Disjunction" />
+  <ComparisonRow feature="XOR" Math="p ⊕ q" Python="p ^ q" JavaScript="p ^ q" Name="Exclusive or" />
+  <ComparisonRow feature="IF-THEN" Math="p → q" Python="not p or q" JavaScript="!p || q" Name="Implication" />
+  <ComparisonRow feature="IFF" Math="p ↔ q" Python="p == q" JavaScript="p === q" Name="Biconditional" />
+</ComparisonTable>
+
+---
+
+## Compound Propositions and Precedence
+
+You build complex expressions by combining connectives, just like in code. And just like in code, precedence matters.
+
+The standard precedence, from highest to lowest:
+
+1. **¬** (NOT) — binds tightest
+2. **∧** (AND)
+3. **∨** (OR)
+4. **→** (implication)
+5. **↔** (biconditional)
+
+So `¬p ∧ q` means `(¬p) ∧ q`, not `¬(p ∧ q)`.
+
+:::tip
+This matches programming languages exactly. `!` binds before `&&`, which binds before `||`. The precedence is not arbitrary. It was designed this way because negation is unary (applies to one thing), conjunction is "multiplication-like," and disjunction is "addition-like."
+:::
+
+When in doubt, use parentheses. In proofs and in code, explicit parentheses are never wrong.
+
+---
+
+## De Morgan's Laws
+
+<Alert type="important" title="Theorem: De Morgan's Laws">
+
+For any propositions p and q:
+
+```
+¬(p ∧ q) ≡ ¬p ∨ ¬q
+¬(p ∨ q) ≡ ¬p ∧ ¬q
+```
+
+In words: when you push a negation through a conjunction, it becomes a disjunction (and vice versa).
+
+</Alert>
+
+**Proof.** We prove the first law by truth table. If both sides have the same truth values for every possible input, they are logically equivalent.
+
+| p | q | p ∧ q | ¬(p ∧ q) | ¬p | ¬q | ¬p ∨ ¬q |
+|---|---|-------|----------|----|----|---------|
+| T | T | T | F | F | F | F |
+| T | F | F | T | F | T | T |
+| F | T | F | T | T | F | T |
+| F | F | F | T | T | T | T |
+
+The ¬(p ∧ q) column and the ¬p ∨ ¬q column are identical. The expressions are logically equivalent.  ∎
+
+**Try it yourself.** Toggle inputs and watch the equivalence in an interactive truth table:
+
+<TruthTable client:visible {...deMorgansFirstLaw} />
+
+**Step through the proof.** Walk through De Morgan's first law one step at a time:
+
+<ProofStepper client:visible proof={deMorgansFirstLawProof} />
+
+:::tip
+MIT 6.042J Lecture 1 walks through this same proof in the first 20 minutes. Useful if you prefer video, or if you want to see how a professor presents truth table proofs at a whiteboard.
+:::
+
+<Alert type="tip" title="Developer Intuition">
+
+De Morgan's laws are the most practically useful rule in this entire post. In code:
+
+```
+!(a && b)  ≡  (!a || !b)
+!(a || b)  ≡  (!a && !b)
+```
+
+The rule: **push the negation in, flip the operator.** AND becomes OR. OR becomes AND. Every operand gets negated.
+
+</Alert>
+
+### The Access Control Bug, Formally
+
+Remember the bug from the opening? Here is exactly what went wrong.
+
+The original grant condition: `active ∧ admin`
+
+To deny access, the developer needed the negation: `¬(active ∧ admin)`
+
+What they wrote: `¬active ∧ ¬admin`. They negated each piece but did not flip the operator.
+
+What De Morgan's law gives: `¬active ∨ ¬admin`. Push the negation in, flip AND to OR.
+
+The difference shows up when `active` is false and `admin` is true (the inactive admin case):
+
+| active | admin | ¬active ∧ ¬admin (wrong) | ¬active ∨ ¬admin (right) |
+|--------|-------|--------------------------|--------------------------|
+| T | T | F | F |
+| T | F | F | T |
+| **F** | **T** | **F** | **T** |
+| F | F | T | T |
+
+Row 3 is the bug. The wrong version says F (do not deny), so the inactive admin gets through. The correct version says T (deny). One operator, one row, one bug. De Morgan's law catches it every time.
+
+**See it as a circuit.** Toggle the admin and owner inputs to watch the bug in action — the AND gate (Bug) vs the OR gate (Fix):
+
+<LogicGateEditor client:visible preset={accessControlBugCircuit} editable={false} animateSignals={true} />
+
+**Compare in a truth table:**
+
+<TruthTable client:visible {...accessControlBug} />
+
+:::note
+What we just did — checking every row of a truth table — is a proof technique called **proof by exhaustion**. It works when there are finitely many cases (here, 4 rows). In Part 4, we will learn proof techniques that work when there are infinitely many cases.
+:::
+
+---
+
+## Short-Circuit Evaluation Is Logic
+
+Programming languages evaluate `&&` and `||` with **short-circuit evaluation**: if the result can be determined from the first operand alone, the second operand is not evaluated.
+
+For `&&`: if the first operand is false, the result is false regardless of the second. This IS the truth table for conjunction. Look at the rows where p is F: the result is always F.
+
+For `||`: if the first operand is true, the result is true regardless of the second. This IS the truth table for disjunction. Look at the rows where p is T: the result is always T.
+
+Short-circuit evaluation is not a performance hack. It is a direct implementation of the logical definition.
+
+This has practical consequences:
+
+```javascript
+// Safe: if ptr is null, the && short-circuits and ptr.value is never accessed
+if (ptr !== null && ptr.value > 0) { ... }
+
+// Unsafe: both sides always evaluate
+if (ptr.value > 0 && ptr !== null) { ... }  // crashes if ptr is null
+```
+
+The order matters because of short-circuit evaluation. But it also matters logically: you cannot evaluate `ptr.value` if `ptr` is null. The implication is: if ptr is not null, THEN check its value. That is p → q, which is only evaluated when p is true.
+
+---
+
+## Tautologies, Contradictions, and Contingencies
+
+Every compound proposition falls into one of three categories, and knowing which category tells you something important about your code.
+
+<Alert type="important" title="Definition: Tautology, Contradiction, Contingency">
+
+A **tautology** is a compound proposition that is always true, regardless of the truth values of its variables. Example: p ∨ ¬p (law of excluded middle).
+
+A **contradiction** is a compound proposition that is always false. Example: p ∧ ¬p.
+
+A **contingency** is a compound proposition that is neither a tautology nor a contradiction. Its truth value depends on the inputs.
+
+</Alert>
+
+Tautologies are important because they represent logical truths. Assertions in code are propositions you believe to be tautologies in your program's context. If an assertion fires, your "tautology" was actually a contingency, and you have a bug.
+
+Contradictions tell you that a set of conditions can never be simultaneously satisfied. If you write `if (x > 5 && x < 3)`, that is a contradiction. The branch is dead code. Some static analyzers catch this.
+
+---
+
+## Logical Equivalence
+
+Two boolean expressions that always produce the same output for the same inputs are interchangeable. You can replace one with the other and your program's behavior does not change. This is the idea behind code simplification, and it has a formal name.
+
+<Alert type="important" title="Definition: Logical Equivalence">
+
+Two propositions p and q are **logically equivalent**, written **p ≡ q**, if they have the same truth value for every possible assignment of truth values to their variables. Equivalently, p ↔ q is a tautology.
+
+</Alert>
+
+Logical equivalence is the foundation of code simplification. If two boolean expressions are logically equivalent, they produce the same result for every possible input. You can replace one with the other without changing behavior.
+
+Here are the most useful logical equivalences. These are the "algebra rules" for boolean expressions.
+
+### Identity Laws
+```
+p ∧ T ≡ p
+p ∨ F ≡ p
+```
+
+### Domination Laws
+```
+p ∨ T ≡ T
+p ∧ F ≡ F
+```
+
+### Idempotent Laws
+```
+p ∧ p ≡ p
+p ∨ p ≡ p
+```
+
+### Double Negation
+```
+¬(¬p) ≡ p
+```
+
+### Commutative Laws
+```
+p ∧ q ≡ q ∧ p
+p ∨ q ≡ q ∨ p
+```
+
+### Associative Laws
+```
+(p ∧ q) ∧ r ≡ p ∧ (q ∧ r)
+(p ∨ q) ∨ r ≡ p ∨ (q ∨ r)
+```
+
+### Distributive Laws
+```
+p ∧ (q ∨ r) ≡ (p ∧ q) ∨ (p ∧ r)
+p ∨ (q ∧ r) ≡ (p ∨ q) ∧ (p ∨ r)
+```
+
+### De Morgan's Laws
+```
+¬(p ∧ q) ≡ ¬p ∨ ¬q
+¬(p ∨ q) ≡ ¬p ∧ ¬q
+```
+
+### Absorption Laws
+```
+p ∧ (p ∨ q) ≡ p
+p ∨ (p ∧ q) ≡ p
+```
+
+### Implication Equivalence
+```
+p → q ≡ ¬p ∨ q
+```
+
+:::note
+You do not need to memorize this entire table. The ones you will use most often are De Morgan's laws, double negation, distributive laws, and the implication equivalence. The rest are useful when simplifying complex expressions, and you can always verify any equivalence with a truth table.
+:::
+
+:::tip
+Rosen Section 1.2 has 25+ exercises drilling these equivalences. Worth doing if you want them to feel automatic rather than something you have to look up.
+:::
+
+---
+
+## Code Companion: Truth Table Generator
+
+This program generates a truth table for any propositional logic expression. You give it variables and an expression, and it evaluates every possible combination.
+
+```python title="truth_table.py"
+from itertools import product
+
+
+def truth_table(
+    variables: list[str],
+    expressions: dict[str, str],
+) -> None:
+    """Generate a truth table for one or more logical expressions.
+
+    Args:
+        variables: List of variable names (e.g., ["p", "q"])
+        expressions: Dict of label -> Python boolean expression
+                     (e.g., {"p ∧ q": "p and q"})
+    """
+    # Header
+    header = variables + list(expressions.keys())
+    widths = [max(len(h), 5) for h in header]
+    header_line = " | ".join(h.center(w) for h, w in zip(header, widths))
+    separator = "-+-".join("-" * w for w in widths)
+
+    print(header_line)
+    print(separator)
+
+    # Evaluate for every combination of truth values
+    for values in product([True, False], repeat=len(variables)):
+        env = dict(zip(variables, values))
+
+        row = []
+        for val in values:
+            row.append("T" if val else "F")
+
+        for expr_code in expressions.values():
+            result = eval(expr_code, {"__builtins__": {}}, env)
+            row.append("T" if result else "F")
+
+        print(" | ".join(r.center(w) for r, w in zip(row, widths)))
+
+
+if __name__ == "__main__":
+    print("=== Basic Connectives ===\n")
+    truth_table(
+        ["p", "q"],
+        {
+            "¬p": "not p",
+            "p ∧ q": "p and q",
+            "p ∨ q": "p or q",
+            "p ⊕ q": "p ^ q",
+            "p → q": "not p or q",
+            "p ↔ q": "p == q",
+        },
+    )
+
+    print("\n=== De Morgan's Laws ===\n")
+    truth_table(
+        ["p", "q"],
+        {
+            "¬(p ∧ q)": "not (p and q)",
+            "¬p ∨ ¬q": "(not p) or (not q)",
+            "Match": "not (p and q) == ((not p) or (not q))",
+        },
+    )
+
+    print("\n=== Three Variables ===\n")
+    truth_table(
+        ["p", "q", "r"],
+        {
+            "(p ∧ q) ∨ r": "(p and q) or r",
+            "p ∧ (q ∨ r)": "p and (q or r)",
+        },
+    )
+
+    print("\n=== Access Control Bug ===\n")
+    print("Original: active AND admin")
+    print("Wrong negation vs correct negation:\n")
+    truth_table(
+        ["active", "admin"],
+        {
+            "Original": "active and admin",
+            "Wrong ¬": "not active and not admin",
+            "Right ¬": "not active or not admin",
+        },
+    )
+```
+
+Run it:
+
+```bash terminal
+python truth_table.py
+```
+
+The output for De Morgan's laws will show "Match" as T in every row, confirming the equivalence. The access control example will show exactly which rows differ between the wrong and correct negations — specifically, the row where `active` is F and `admin` is T.
+
+Modify the expressions dictionary to verify any equivalence you want. Add more variables by extending the variables list. The program handles any number of variables, though tables get large past 4 (2⁴ = 16 rows).
+
+### Interactive Sandbox
+
+**Build your own truth table.** Type formulas using `p ∧ q`, `!(p || q)`, `p → q`, or use the symbol toolbar. The table auto-generates, detects equivalences, and classifies each expression:
+
+<TruthTable client:visible editable={true} highlightEquivalent={true} showClassification={true} />
+
+**Build your own circuit.** Drag gates from the palette, click to connect wires, and toggle inputs to see signals propagate:
+
+<LogicGateEditor client:visible editable={true} animateSignals={true} />
+
+---
+
+<Alert type="warning" title="The Formality Spectrum">
+
+| | |
+|---|---|
+| :x: **Too Informal** | "AND means both things are true, OR means one of them is true" — breaks when you hit implication (vacuous truth), three-valued logic (SQL NULL), or need to negate a compound expression without guessing |
+| :white_check_mark: **Right** | Six connectives with precise truth tables. De Morgan's laws for pushing negation through conjunctions and disjunctions. Logical equivalence verified by truth table. Enough to simplify any boolean expression with confidence. |
+| :x: **Too Formal** | Deriving all connectives from NAND (the Sheffer stroke) to prove functional completeness, or axiomatizing propositional logic to prove soundness and completeness of the proof system |
+| :warning: **Common Mistake** | Treating implication as biconditional. "If it rains, the ground is wet" does NOT mean "if the ground is wet, it rained." The sprinkler exists. p → q is not the same as q → p. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 2: Predicate Logic**, we move from simple true/false propositions to statements about *all* or *some* elements in a set. You will meet quantifiers (∀ and ∃), which are the formal version of `.every()` and `.some()` in JavaScript, and `WHERE` clauses in SQL. The rules for negating quantified statements explain why a surprising number of bugs come from getting "for all" and "there exists" confused.
+
+---
+
+## Practice with Rosen (8th Edition)
+
+**Essential (do these):** Section 1.1: 1, 3, 5, 7, 11, 15, 23, 25; Section 1.2: 1, 3, 5, 7
+**Recommended (if time):** Section 1.1: 27, 29, 31, 33; Section 1.2: 11, 15
+**Challenge (stretch):** Section 1.1: 41, 43; Section 1.2: 23, 25
+
+---
+
+## Further Resources
+
+- **MIT 6.042J Lecture 1** — Propositional logic, truth tables, and the first proof. The first 20 minutes cover exactly this material.
+- **Book of Proof, Chapter 2** (Richard Hammack) — Logic chapter covering connectives, implication, and vacuous truth in depth. Free at [bookofproof.com](https://www.bookofproof.com/).
+- **Rosen Section 1.2** — 25+ exercises drilling logical equivalences, if you want them to feel automatic.
+- **Coursera: Introduction to Discrete Mathematics (UCSD), Week 1** — Propositional logic with autograded exercises.
+
+---
+
+<ValidationChecklist items={[
+  {
+    category: "Concepts",
+    tasks: [
+      "Can define what a proposition is and identify non-propositions",
+      "Can build a truth table for a compound expression with 2-3 variables",
+      "Can apply De Morgan's laws to negate a compound boolean expression",
+      "Can explain why p → q is true when p is false"
+    ]
+  },
+  {
+    category: "Code",
+    tasks: [
+      "truth_table.py runs and produces correct output",
+      "Can add a new expression to the truth table generator",
+      "Can map between math notation and Python/JavaScript operators"
+    ]
+  },
+  {
+    category: "Practice",
+    tasks: [
+      "Completed Essential exercises from Rosen 1.1-1.2",
+      "Verified De Morgan's laws match in the truth table output"
+    ]
+  }
+]} />
+
+## Key Takeaways
+
+1. Every `if` statement is a proposition, every `&&` is conjunction, every `||` is disjunction, and the rules of logic are the specification your programming language implements.
+2. De Morgan's laws (push the negation in, flip the operator) are the single most useful logical rule for simplifying code, and getting them wrong is the source of real production bugs.
+3. A truth table is an exhaustive test suite for a logical expression: if two expressions produce the same column, they are equivalent, period. This is proof by exhaustion, and it is the first proof technique in your toolkit.
+4. Implication (p → q) is true when p is false, which is unintuitive but correct: a contract is only broken when the precondition holds and the postcondition does not.
+5. The precedence of logical operators (¬ before ∧ before ∨) matches programming languages exactly, and this is not a coincidence.
