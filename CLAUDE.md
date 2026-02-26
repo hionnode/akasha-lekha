@@ -60,12 +60,14 @@ akasha-lekha/
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── blog/              # Blog-specific components
+│   │   │   │   ├── code/          # Code display (PanelSwitcher, FileTree, TerminalOutput, Command)
+│   │   │   │   └── guide/         # Instructional (GuideStep, ValidationChecklist, ComparisonTable, EnvVars)
+│   │   │   ├── discrete-math/     # Interactive math components (TruthTable, LogicGateEditor, ProofStepper)
 │   │   │   ├── labs/              # Labs components
 │   │   │   │   ├── islands/       # Solid.js interactive (CLICommandCopy)
 │   │   │   │   └── layout/        # LabsHeader.astro, LabsSidebar.astro
-│   │   │   ├── landing/           # Homepage (TerminalHero, FastfetchOutput)
-│   │   │   ├── layout/            # Header, Footer, Container, BlogSidebar, SeriesSidebar, MobileSidebarDrawers
-│   │   │   └── shared/            # 35+ reusable components (Alert, CodeSwitcher, FileTree, SEO, etc.)
+│   │   │   ├── layout/            # Header, Footer, Container, BlogSidebar, SeriesSidebar
+│   │   │   └── shared/            # Truly shared (Alert, Badge, Button, SEO, CodeSwitcher, TOCMinimap)
 │   │   ├── content/
 │   │   │   ├── blog/              # Blog posts (MDX) - standalone + series folders
 │   │   │   └── labs/
@@ -297,19 +299,14 @@ seriesPart: 1              # seriesTotal auto-calculated from folder contents
 | Preview | preview.works-on-my.cloud | PR previews |
 | Production | works-on-my.cloud | Live site |
 
-## Deferred Backend (`_draft/`)
+## Deferred Content (`_draft/`)
 
-The `_draft/` directory contains backend code that was moved out of the active build scope. It includes:
-- `_draft/backend/packages-api/` — Lambda functions (auth, exercises, progress)
-- `_draft/backend/packages-types/` — Shared TypeScript types
-- `_draft/backend/infra/` — SST infrastructure-as-code (API Gateway, DynamoDB)
-- `_draft/backend/sst.config.ts` — SST app config
-- `_draft/backend/islands/` — AuthStatus, ProgressTracker Solid.js components
-- `_draft/backend/web-utils/` — Labs API client, auth helpers, mock data
-- `_draft/backend/pages/` — Labs login, dashboard, auth callback pages
+The `_draft/` directory contains code and content moved out of the active build scope. It includes:
+- `_draft/backend/` — Deferred backend (API, types, infra, SST config, Solid.js islands, web utils, pages)
+- `_draft/content/blog/` — Meta-content blog posts (component-guide, mdx-mastery-series, MDX showcase)
 - `_draft/docs/` — Archived session notes and implementation docs
 
-This code is tracked in git but excluded from the build. To restore the backend, move the relevant pieces back to their original locations and update `pnpm-workspace.yaml`.
+This code is tracked in git but excluded from the build.
 
 ## AWS Series Content Plan
 

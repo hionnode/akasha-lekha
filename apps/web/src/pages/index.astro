@@ -5,8 +5,6 @@ import Header from '../components/layout/Header.astro';
 import Footer from '../components/layout/Footer.astro';
 import PostList from '../components/blog/PostList.astro';
 import BlogSidebar from '../components/layout/BlogSidebar.astro';
-import MobileSidebarDrawers from '../components/layout/MobileSidebarDrawers.astro';
-import VimShortcuts from '../components/shared/VimShortcuts.astro';
 
 const allPosts = await getCollection('blog', ({ data }) => !data.draft);
 const posts = allPosts.sort(
@@ -145,8 +143,6 @@ const featuredPosts = posts.filter((post) => post.data.featured).slice(0, 5);
       </div>
     </main>
     <Footer />
-    <VimShortcuts />
-    <MobileSidebarDrawers />
   </div>
 </Layout>
 
