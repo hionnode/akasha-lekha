@@ -18,10 +18,10 @@ import Button from '../components/shared/Button.astro';
    .--.
   |o_o |
   |:_/ |
- //   \\ \\
+ //   \ \
 (|     | )
-/'\\_   _/\`\\
-\\___)=(___/
+/'\_   _/`\
+\___)=(___/
             </pre>
           </div>
 
@@ -31,9 +31,11 @@ import Button from '../components/shared/Button.astro';
           </p>
 
           <div class="flex flex-col sm:flex-row gap-4 justify-center items-center mb-12">
-            <Button href="/" variant="primary"> ← Back to Home </Button>
-            <Button href="/blog" variant="secondary"> Browse Blog </Button>
-            <Button href="/blog" variant="secondary"> View Blog </Button>
+            <Button href="/" variant="primary"> Home </Button>
+            <Button href="/blog" variant="secondary"> Blog </Button>
+            <Button href="/blog/aws-for-startups/01-what-is-cloud" variant="secondary">
+              AWS Series
+            </Button>
           </div>
 
           <div class="border-t border-border pt-8">
@@ -42,9 +44,16 @@ import Button from '../components/shared/Button.astro';
               <a href="/blog" class="text-accent-blue hover:text-accent-cyan transition-colors">
                 Blog
               </a>
-              <span class="text-fg-muted">•</span>
-              <a href="/blog" class="text-accent-blue hover:text-accent-cyan transition-colors">
-                Blog
+              <span class="text-fg-muted">&bull;</span>
+              <a href="/labs" class="text-accent-blue hover:text-accent-cyan transition-colors">
+                Labs
+              </a>
+              <span class="text-fg-muted">&bull;</span>
+              <a
+                href="/tools/aws-latency"
+                class="text-accent-blue hover:text-accent-cyan transition-colors"
+              >
+                Tools
               </a>
             </nav>
           </div>

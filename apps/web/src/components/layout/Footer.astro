@@ -6,12 +6,23 @@ const currentYear = new Date().getFullYear();
   <div class="container mx-auto px-4 py-8 max-w-[1200px]">
     <div class="flex flex-col md:flex-row justify-between items-center gap-4">
       <div class="text-fg-muted text-sm">
-        <p>© {currentYear} works-on-my.cloud</p>
+        <p>&copy; {currentYear} works-on-my.cloud</p>
         <p class="mt-1">Built with Astro</p>
       </div>
-      <div class="text-fg-muted text-sm">
+      <nav class="flex flex-wrap gap-4 text-fg-muted text-sm">
+        <a href="/blog" class="hover:text-accent-blue transition-colors">Blog</a>
+        <a href="/labs" class="hover:text-accent-blue transition-colors">Labs</a>
+        <a href="/tools/aws-latency" class="hover:text-accent-blue transition-colors">Tools</a>
         <a href="/rss.xml" class="hover:text-accent-blue transition-colors">RSS</a>
-      </div>
+        <a
+          href="https://github.com/hionnode/akasha-lekha"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="hover:text-accent-blue transition-colors"
+        >
+          GitHub
+        </a>
+      </nav>
     </div>
   </div>
 </footer>
