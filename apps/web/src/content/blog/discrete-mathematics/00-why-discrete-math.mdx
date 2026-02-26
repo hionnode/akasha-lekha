@@ -1,0 +1,145 @@
+---
+title: "Discrete Mathematics for Developers: Why This Math Is Your Math"
+description: "Why discrete math matters for working developers. Real bugs, real systems, real consequences — and a roadmap for the 39-part series."
+excerpt: "You use discrete math every day. You just don't have the vocabulary for it yet. This post shows you what you're missing and maps the 39-part journey ahead."
+date: "2026-02-17"
+author: "works-on-my.cloud"
+tags: ["discrete-math", "cs-fundamentals"]
+series: "Discrete Mathematics for Developers"
+seriesPart: 0
+featured: false
+draft: false
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+
+An access control check uses `not active and not admin` instead of `not (active and admin)`. The code ships. Inactive admins bypass the check for three days. Every reviewer looked at the condition and thought "that looks right." The fix is one line. The rule that prevents the bug has a name: De Morgan's law. It takes 10 seconds to apply once you know it.
+
+A startup's search feature uses a nested loop. Works fine with 1,000 users. At 50,000 users, page loads hit 12 seconds. The developer adds caching instead of fixing the algorithm. Someone who understood complexity analysis would have caught the O(n^2) in the code review, before it reached production.
+
+A custom hash function uses modular arithmetic with a non-prime table size. The distribution is biased: certain buckets get 10x more entries. The load balancer crumbles. The fix is changing one constant to a prime number. The reason it works: properties of modular arithmetic that have been proven for centuries.
+
+A candidate implements BFS correctly but cannot explain why it finds the shortest path. "It just works" is not an answer. The interviewer wanted a proof sketch. Three sentences about BFS exploring nodes in order of distance. The candidate did not have them.
+
+---
+
+## Four Problems, One Gap
+
+Each of those is a discrete math problem:
+
+- The boolean bug is **propositional logic**
+- The scaling failure is **algorithm complexity analysis**
+- The hash function disaster is **number theory**
+- The interview gap is **graph theory**
+
+The developers in these scenarios were not missing "math skills." They were missing the formal vocabulary to think precisely about things they already do every day. They could write the code. They could not reason about it.
+
+The gap is not between "developers" and "math people." The gap is between "I think this is right" and "I can prove this is right." This series closes that gap.
+
+---
+
+## What Discrete Math Actually Is
+
+Discrete math is the math of distinct, countable structures. Not calculus (continuous curves). Not statistics (probabilistic inference). The math that describes how code works.
+
+Logic, sets, graphs, counting, proofs. That is the whole field.
+
+Computers are discrete machines. Every bit is 0 or 1. Every data structure is a finite collection. Every algorithm operates on discrete steps. Discrete math is the native mathematics of computation.
+
+You already use it:
+
+- Boolean expressions in your `if` statements? Propositional logic.
+- SQL `WHERE` clauses and `JOIN` operations? Predicate logic and set operations.
+- Hash maps and load balancing? Modular arithmetic.
+- Dependency trees and package resolution? Graph theory.
+- "How many test cases do I need?" Combinatorics.
+
+You have been doing discrete math your entire career. You just have not had the vocabulary for it. This series gives you the vocabulary, the rules, and the proof techniques to use them with confidence.
+
+---
+
+## The Map: 9 Phases, 39 Parts
+
+The series is organized into 9 phases, each building on the previous. The order is intentional and differs from textbooks. It is sequenced for developers, not math departments.
+
+| Phase | Parts | Topic | What You Will Be Able to Do |
+|:-----:|:-----:|-------|---------------------------|
+| 1 | 1-7 | **Logic** | Read and write formal proofs |
+| 2 | 8-12 | **Sets, Functions, Relations** | Formalize data modeling |
+| 3 | 13-16 | **Induction and Recursion** | Prove recursive algorithms correct |
+| 4 | 17-19 | **Algorithms and Complexity** | Prove Big-O bounds (not memorize them) |
+| 5 | 20-23 | **Counting and Combinatorics** | Reason precisely about "how many" |
+| 6 | 24-26 | **Number Theory and Cryptography** | Understand why RSA and HTTPS work |
+| 7 | 27-29 | **Probability** | Reason about probabilistic systems and SLAs |
+| 8 | 30-35 | **Graphs and Trees** | Model and solve graph problems |
+| 9 | 36-39 | **Boolean Algebra and Computation** | Bridge to computer architecture and theory of computation |
+
+Phase 1 starts with what you already know (boolean expressions) and builds to proof techniques. Proofs are the key skill barrier. If you can write proofs, everything else in the series opens up. That is why Phase 1 gets 7 parts.
+
+---
+
+## How to Use This Series
+
+Every post has three active layers:
+
+**Layer 1: Read the post, run the Python code.** Every part includes a complete, runnable Python program that makes the math executable. You do not just read theorems. You run code that verifies claims computationally.
+
+**Layer 2: Practice with Rosen exercises.** Kenneth Rosen's *Discrete Mathematics and Its Applications* (8th edition) is the companion textbook. Each post ends with curated exercises at three tiers: Essential (do these), Recommended (if time), Challenge (stretch). You do not need the textbook to follow the series, but the exercises cement understanding.
+
+**Layer 3: Go deeper with linked resources.** Each post references the best supplementary materials for that topic: MIT 6.042J lectures (free video), *Book of Proof* by Richard Hammack (free online), and topic-specific resources.
+
+### Pacing
+
+| Pace | Time per Part | Total Duration | For |
+|------|:------------:|:--------------:|-----|
+| Intensive | 3-4 hours | ~4 months | Full-time students |
+| Steady | 5-6 hours | ~6 months | Working developers, 1 part per week |
+| Relaxed | 8-10 hours | ~9 months | Working developers, deep practice |
+
+The time includes reading, running Python code, and doing Rosen exercises. Proof-heavy parts (Phase 1) take longer than algorithm parts (Phase 8) where developers already have intuition.
+
+---
+
+## Who This Is For
+
+**This is for you if:**
+
+- You have 1-5 years of development experience
+- You want to understand *why* algorithms work, not just memorize Big-O tables
+- You have been intimidated by math notation but are curious about the foundations
+- You would rather see Python alongside a theorem than a page of symbols
+- You are willing to spend your own time, so every paragraph must earn its place
+
+**This is not for you if:**
+
+- You are a complete beginner who needs to learn what a variable or loop is (this series assumes basic programming fluency)
+- You are a math undergraduate preparing for a pure math exam (this series prioritizes developer applications over mathematical generality)
+- You want a reference manual, not a learning path (this series is sequential and builds on itself)
+
+---
+
+## What You Will Find in Every Post
+
+A few conventions to orient you before Part 1:
+
+**Proof Portfolio.** Starting Part 4, you build a growing collection of proofs. By the end of the series: roughly 35 proofs using every major technique (direct, contraposition, contradiction, induction, and more). Parts 1-3 build the vocabulary. Parts 4-6 build the skill.
+
+**Code Companion.** Every post includes a substantial Python program. Not a toy example. A complete, runnable program that makes the math executable. Copy-paste it, run it, modify it.
+
+**The Formality Spectrum.** Every post includes a box showing exactly how formal you need to be: not too hand-wavy (breaks on edge cases), not too academic (kills motivation). The right level of rigor for a working developer.
+
+**Practice with Rosen.** Curated exercises from Rosen's textbook at three difficulty tiers. The exercises are where understanding becomes skill.
+
+---
+
+## What's Coming
+
+Next in **Part 1: Propositions and Logic Gates**, we start with the math you use most often: boolean logic. You will learn why De Morgan's law prevents the exact access control bug from the opening of this post, build a truth table generator in Python, and discover that every `if` statement in your code is a proposition with formal rules you can learn in an afternoon.
+
+---
+
+## Key Takeaways
+
+1. Discrete math is not a separate skill from programming. It is the formal vocabulary for the reasoning you already do every day with boolean expressions, data structures, and algorithms.
+2. The gap between "I think this works" and "I can prove this works" is the gap this series closes, in 39 parts across 9 phases.
+3. You need basic programming experience and high school algebra. Nothing else. The series builds everything from there.
