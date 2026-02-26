@@ -1,6 +1,6 @@
 # .github/workflows/ci.yml
 #
-# Continuous Integration - Quality checks for all packages
+# Continuous Integration - Quality checks for web app and blog
 # Runs on every PR and push to main
 # Path-filtered to only run relevant checks
 
@@ -26,9 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       web: ${{ steps.filter.outputs.web }}
-      api: ${{ steps.filter.outputs.api }}
-      types: ${{ steps.filter.outputs.types }}
-      infra: ${{ steps.filter.outputs.infra }}
       blog: ${{ steps.filter.outputs.blog }}
     steps:
       - uses: actions/checkout@v4
@@ -38,17 +35,7 @@ jobs:
           filters: |
             web:
               - 'apps/web/**'
-              - 'packages/types/**'
               - 'pnpm-lock.yaml'
-            api:
-              - 'packages/api/**'
-              - 'packages/types/**'
-              - 'pnpm-lock.yaml'
-            types:
-              - 'packages/types/**'
-            infra:
-              - 'infra/**'
-              - 'sst.config.ts'
             blog:
               - 'apps/web/src/content/blog/**'
               - 'scripts/validate-blog-posts.mjs'
@@ -91,70 +78,6 @@ jobs:
 
       - name: Build
         run: pnpm build
-
-  # Quality checks for API package
-  api:
-    name: API Quality
-    needs: changes
-    if: needs.changes.outputs.api == 'true'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/api
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-
-      - name: Install Dependencies
-        run: pnpm install
-        working-directory: .
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Type Check
-        run: pnpm typecheck
-        continue-on-error: true  # SST generates types from deployed resources
-
-  # Quality checks for types package
-  types:
-    name: Types Quality
-    needs: changes
-    if: needs.changes.outputs.types == 'true'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/types
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-
-      - name: Install Dependencies
-        run: pnpm install
-        working-directory: .
-
-      - name: Type Check
-        run: pnpm typecheck
 
   # Blog validation
   blog:
@@ -218,15 +141,13 @@ jobs:
   # Summary job for branch protection
   ci-success:
     name: CI Success
-    needs: [changes, web, api, types, blog]
+    needs: [changes, web, blog]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check Results
         run: |
           if [[ "${{ needs.web.result }}" == "failure" ]] || \
-             [[ "${{ needs.api.result }}" == "failure" ]] || \
-             [[ "${{ needs.types.result }}" == "failure" ]] || \
              [[ "${{ needs.blog.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
