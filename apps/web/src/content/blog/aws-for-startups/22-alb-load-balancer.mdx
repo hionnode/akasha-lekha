@@ -1,0 +1,556 @@
+---
+title: "ALB: The Front Door to Your Backend"
+description: "Deploy an Application Load Balancer with HTTPS termination, health checks, and target groups. The entry point for EC2, ECS, and Lambda backends."
+excerpt: "The front door to your backend. ALB with HTTPS, health checks, and target groups, ready for EC2, ECS, or Lambda behind it."
+date: "2026-04-01"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "alb", "networking", "terraform"]
+series: "AWS From Zero to Production"
+seriesPart: 22
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+VPC ready. Security groups locked down. Now you need a front door that accepts HTTPS traffic, checks whether your backend is alive, and routes requests to healthy instances. That front door is the Application Load Balancer. Every backend deployment pattern in this series (EC2 in Part 28, ECS in Parts 41-42, Lambda in Parts 48-51) connects through the ALB you build today.
+
+**Time:** About 40 minutes.
+
+**Outcome:** An ALB deployed in public subnets with an HTTPS listener using your ACM certificate from [Part 14](/blog/aws-for-startups/14-route53-acm-dns), an HTTP-to-HTTPS redirect, a target group with health checks, and Route 53 pointing your API subdomain at the ALB.
+
+---
+
+## Why This Matters
+
+Without a load balancer, your backend is an EC2 instance with a public IP. Users connect directly to it. When that instance dies (and it will), your application goes down. When you deploy a new version, you have to swap IP addresses or accept downtime. There is no health checking, no HTTPS termination, no path-based routing.
+
+The ALB solves all of this:
+
+- **Single entry point.** Users hit `api.yourdomain.com`. The ALB decides which backend instance handles each request. You never expose individual instance IPs.
+- **HTTPS termination.** The ALB handles TLS certificates. Your backend application serves plain HTTP on port 8080. This simplifies your application code and centralizes certificate management.
+- **Health checks.** The ALB pings your backend every 30 seconds. If an instance fails the health check, the ALB stops routing traffic to it. When you deploy a new version, the ALB waits for the new instance to pass health checks before sending it traffic. This is how zero-downtime deployments work.
+- **Path-based routing.** One ALB, multiple services. `/api/*` goes to your API. `/admin/*` goes to your admin panel. You add routing rules as you add services, without adding load balancers.
+
+For a startup, the ALB is the most cost-effective way to get production-grade traffic management. One ALB costs roughly $16/month base plus $0.008 per LCU-hour. That is significantly cheaper than running an Nginx reverse proxy on a dedicated instance, and it is managed by AWS.
+
+---
+
+## ALB Architecture
+
+<Alert type="important" title="ALB Architecture">
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                          INTERNET                                     │
+│                              │                                        │
+│                    HTTPS (443) / HTTP (80)                            │
+│                              │                                        │
+│  ┌───────────────────────────┼──────────────────────────────────┐    │
+│  │                      VPC  │                                   │    │
+│  │  ┌────────────────────────┼─────────────────────────────┐    │    │
+│  │  │              PUBLIC SUBNETS                            │    │    │
+│  │  │                        │                               │    │    │
+│  │  │    ┌───────────────────┴────────────────────┐         │    │    │
+│  │  │    │     ALB (sg-alb)                        │         │    │    │
+│  │  │    │     - HTTPS listener (443)              │         │    │    │
+│  │  │    │     - HTTP → HTTPS redirect (80)        │         │    │    │
+│  │  │    │     - ACM certificate attached          │         │    │    │
+│  │  │    └───────────────────┬────────────────────┘         │    │    │
+│  │  └────────────────────────┼─────────────────────────────┘    │    │
+│  │                           │                                   │    │
+│  │                    8080 (app port)                            │    │
+│  │                           │                                   │    │
+│  │  ┌────────────────────────┼─────────────────────────────┐    │    │
+│  │  │              PRIVATE SUBNETS                           │    │    │
+│  │  │                        │                               │    │    │
+│  │  │    ┌───────────────────┴────────────────────┐         │    │    │
+│  │  │    │     Target Group                        │         │    │    │
+│  │  │    │     ┌──────────┐  ┌──────────┐         │         │    │    │
+│  │  │    │     │ EC2 / ECS│  │ EC2 / ECS│         │         │    │    │
+│  │  │    │     │ (sg-app) │  │ (sg-app) │         │         │    │    │
+│  │  │    │     └──────────┘  └──────────┘         │         │    │    │
+│  │  │    └────────────────────────────────────────┘         │    │    │
+│  │  └──────────────────────────────────────────────────────┘    │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+</Alert>
+
+The ALB sits in public subnets. Your backends sit in private subnets. The ALB security group (`sg-alb` from [Part 21](/blog/aws-for-startups/21-security-groups)) allows HTTPS from the internet. The app security group (`sg-app`) allows traffic from `sg-alb` only. Traffic flows one direction: internet to ALB to target group. Nothing in the private subnet is directly reachable.
+
+---
+
+## ALB Terraform Module
+
+### The ALB Resource
+
+```hcl title="infra/modules/alb/main.tf"
+resource "aws_lb" "main" {
+  name               = "${var.project}-${var.environment}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [var.alb_security_group_id]
+  subnets            = var.public_subnet_ids
+
+  enable_deletion_protection = var.environment == "prod" ? true : false
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-alb"
+  })
+}
+```
+
+Three things to note:
+
+1. **`internal = false`** makes this an internet-facing ALB. It gets a public DNS name and a public IP in each subnet. Internal ALBs (`internal = true`) are for service-to-service communication where no internet access is needed.
+2. **`subnets`** must be public subnets. The ALB needs subnets in at least two Availability Zones. These must be the public subnets from [Part 20](/blog/aws-for-startups/20-vpc-fundamentals) with an Internet Gateway route.
+3. **`enable_deletion_protection`** prevents accidental `terraform destroy` from taking down your load balancer in production. Disable it in dev so you can tear down environments cleanly.
+
+<Alert type="caution" title="Agent Trap">
+
+Agent creates the ALB in private subnets instead of public subnets. The `terraform apply` succeeds. The ALB shows as "active" in the console. But no traffic reaches it because private subnets have no Internet Gateway route. You spend 30 minutes debugging DNS and security groups before realizing the ALB is in the wrong subnets.
+
+**Why agents do this:** The agent sees `private_subnet_ids` and `public_subnet_ids` in your VPC module outputs and picks the wrong one. Private subnets sound more "secure," and the agent optimizes for security-sounding choices.
+
+**What catches it:** After `terraform apply`, run `aws elbv2 describe-load-balancers` and check the `Scheme` field. It should say `internet-facing`, not `internal`. Then verify the subnets have an Internet Gateway route with `aws ec2 describe-route-tables`.
+
+</Alert>
+
+### HTTPS Listener with ACM Certificate
+
+The HTTPS listener is where TLS termination happens. The ALB handles encryption and decryption. Your backend receives plain HTTP.
+
+```hcl title="infra/modules/alb/listeners.tf"
+# HTTPS listener (primary)
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.acm_certificate_arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+}
+
+# HTTP listener (redirects to HTTPS)
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+```
+
+The `ssl_policy` matters. `ELBSecurityPolicy-TLS13-1-2-2021-06` enforces TLS 1.2 as the minimum and supports TLS 1.3. Older policies allow TLS 1.0 and 1.1, which have known vulnerabilities. Do not use `ELBSecurityPolicy-2016-08` (the default) for anything handling real user traffic.
+
+The HTTP listener exists solely to redirect to HTTPS. Every request to port 80 gets a 301 redirect to port 443. Without this listener, users who type `http://api.yourdomain.com` get a connection refused error instead of being redirected to HTTPS.
+
+:::note
+The `acm_certificate_arn` comes from the ACM certificate you created in [Part 14](/blog/aws-for-startups/14-route53-acm-dns). If you have not completed Part 14, you can skip HTTPS for now and use an HTTP-only listener on port 80. But do not deploy to production without HTTPS.
+:::
+
+### Target Group
+
+The target group tells the ALB where to send traffic. You create the target group now, and register actual targets (EC2 instances, ECS tasks) when you deploy your first backend.
+
+```hcl title="infra/modules/alb/target-group.tf"
+resource "aws_lb_target_group" "app" {
+  name_prefix = "app-"
+  port        = var.app_port
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    path                = var.health_check_path
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+    matcher             = "200"
+  }
+
+  deregistration_delay = 30
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-app-tg"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+The `target_type = "ip"` setting is intentional. It works with EC2 instances, ECS Fargate tasks, and Lambda functions (via IP-based registration). If you use `target_type = "instance"`, you lock yourself into EC2 and have to recreate the target group when you migrate to ECS. Start with `ip` and you never need to change it.
+
+The `deregistration_delay` of 30 seconds gives in-flight requests time to complete before the ALB stops sending new requests to a deregistering target. The default is 300 seconds (5 minutes), which is too long for most startup workloads. During a deployment, you do not want to wait 5 minutes per target for the old instances to drain.
+
+---
+
+## Health Checks
+
+Health checks are not a nice-to-have. They are the mechanism that makes zero-downtime deployments possible. Without health checks, the ALB sends traffic to instances that are booting, crashing, or running old code.
+
+### How Health Checks Work
+
+The ALB sends an HTTP request to `health_check_path` on each registered target every `interval` seconds. If the target returns a status code matching `matcher` within `timeout` seconds, it counts as healthy. If it fails `unhealthy_threshold` consecutive checks, the ALB marks it unhealthy and stops routing traffic to it. When it passes `healthy_threshold` consecutive checks, traffic resumes.
+
+| Parameter | Value | Why |
+|---|---|---|
+| `path` | `/health` | Dedicated endpoint, not the homepage |
+| `interval` | 30s | Balance between responsiveness and request volume |
+| `healthy_threshold` | 2 | Two consecutive passes to resume traffic (fast recovery) |
+| `unhealthy_threshold` | 3 | Three consecutive failures before removing (avoids flapping) |
+| `timeout` | 5s | If the health endpoint takes longer than 5 seconds, something is wrong |
+| `matcher` | `200` | Only a 200 means healthy. Not 301, not 404 |
+
+<Alert type="caution" title="Agent Trap">
+
+Agent configures the health check with `path = "/"`, which returns 200 on your marketing landing page or a generic welcome response. Your actual health endpoint is `/health`, which checks database connectivity, Redis availability, and external service reachability. The agent's health check passes even when the database is down because the default path never checks the database.
+
+**Why agents do this:** The root path `"/"` is the most common health check path in training data. Most tutorials use it. The agent does not know that your application has a dedicated health endpoint with dependency checks.
+
+**What to do:** Always set `health_check_path` in your variables, never rely on the default. Your health endpoint should verify that the application can actually serve requests, not just that the HTTP server is running.
+
+</Alert>
+
+### Building a Proper Health Endpoint
+
+Your `/health` endpoint should check the things that matter:
+
+```typescript title="src/health.ts"
+app.get('/health', async (req, res) => {
+  const checks = {
+    database: false,
+    redis: false,
+    uptime: process.uptime(),
+  };
+
+  try {
+    await db.query('SELECT 1');
+    checks.database = true;
+  } catch (e) {
+    // Database unreachable
+  }
+
+  try {
+    await redis.ping();
+    checks.redis = true;
+  } catch (e) {
+    // Redis unreachable
+  }
+
+  const healthy = checks.database && checks.redis;
+  res.status(healthy ? 200 : 503).json(checks);
+});
+```
+
+The ALB only looks at the status code. A 200 means "send me traffic." A 503 means "I cannot serve requests right now." The JSON body is for your debugging, not for the ALB.
+
+---
+
+## Path-Based Routing
+
+One ALB can route to multiple target groups based on URL path. This is the foundation for running multiple services behind a single load balancer.
+
+```hcl title="infra/modules/alb/routing.tf"
+# Default action: forward to main app
+# (already defined in the HTTPS listener above)
+
+# Example: route /admin/* to a separate target group
+resource "aws_lb_listener_rule" "admin" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 100
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.admin.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/admin/*"]
+    }
+  }
+}
+```
+
+You do not need path-based routing today. You have one service. But knowing it exists changes how you think about architecture. When you add a second service (an admin panel, a webhook handler, a separate API version), you add a listener rule and a target group. You do not add a second ALB at $16/month.
+
+:::tip
+Listener rules have priorities. Lower numbers are evaluated first. Leave gaps between priorities (100, 200, 300) so you can insert new rules later without renumbering everything.
+:::
+
+---
+
+## DNS Configuration
+
+Point your API subdomain at the ALB using a Route 53 alias record:
+
+```hcl title="infra/modules/alb/dns.tf"
+resource "aws_route53_record" "api" {
+  zone_id = var.route53_zone_id
+  name    = "api.${var.domain}"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.main.dns_name
+    zone_id                = aws_lb.main.zone_id
+    evaluate_target_health = true
+  }
+}
+```
+
+An alias record is not a CNAME. It resolves at the DNS level and does not incur the extra DNS lookup that a CNAME does. It also works at the zone apex (though you are using a subdomain here, so that does not matter yet). Always use alias records for AWS resources.
+
+The `evaluate_target_health = true` setting means Route 53 will not return the ALB's IP if the ALB has no healthy targets. This prevents DNS from sending traffic to a load balancer that has nothing to forward to.
+
+---
+
+## Module Variables and Outputs
+
+```hcl title="infra/modules/alb/variables.tf"
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "VPC ID"
+  type        = string
+}
+
+variable "public_subnet_ids" {
+  description = "Public subnet IDs for the ALB (minimum 2 AZs)"
+  type        = list(string)
+}
+
+variable "alb_security_group_id" {
+  description = "Security group ID for the ALB (from security-groups module)"
+  type        = string
+}
+
+variable "acm_certificate_arn" {
+  description = "ACM certificate ARN for HTTPS"
+  type        = string
+}
+
+variable "app_port" {
+  description = "Port the application listens on"
+  type        = number
+  default     = 8080
+}
+
+variable "health_check_path" {
+  description = "Health check endpoint path"
+  type        = string
+  default     = "/health"
+}
+
+variable "route53_zone_id" {
+  description = "Route 53 hosted zone ID"
+  type        = string
+}
+
+variable "domain" {
+  description = "Base domain name"
+  type        = string
+}
+
+variable "common_tags" {
+  description = "Tags applied to all resources"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```hcl title="infra/modules/alb/outputs.tf"
+output "alb_arn" {
+  description = "ARN of the ALB"
+  value       = aws_lb.main.arn
+}
+
+output "alb_dns_name" {
+  description = "DNS name of the ALB"
+  value       = aws_lb.main.dns_name
+}
+
+output "https_listener_arn" {
+  description = "ARN of the HTTPS listener"
+  value       = aws_lb_listener.https.arn
+}
+
+output "target_group_arn" {
+  description = "ARN of the default target group"
+  value       = aws_lb_target_group.app.arn
+}
+```
+
+The complete file structure:
+
+<FileTree>
+infra/
+  modules/
+    alb/
+      main.tf
+      listeners.tf
+      target-group.tf
+      routing.tf
+      dns.tf
+      variables.tf
+      outputs.tf
+</FileTree>
+
+---
+
+## Wiring It Together
+
+Here is how the ALB module connects to the VPC and security groups from Parts 20 and 21:
+
+```hcl title="infra/environments/prod/main.tf"
+module "vpc" {
+  source = "../../modules/vpc"
+  # ... from Part 20
+}
+
+module "security_groups" {
+  source = "../../modules/security-groups"
+  vpc_id = module.vpc.vpc_id
+  # ... from Part 21
+}
+
+module "alb" {
+  source = "../../modules/alb"
+
+  project               = "shipfast"
+  environment           = "prod"
+  vpc_id                = module.vpc.vpc_id
+  public_subnet_ids     = module.vpc.public_subnet_ids
+  alb_security_group_id = module.security_groups.alb_security_group_id
+  acm_certificate_arn   = var.acm_certificate_arn
+  app_port              = 8080
+  health_check_path     = "/health"
+  route53_zone_id       = var.route53_zone_id
+  domain                = "yourdomain.com"
+  common_tags           = local.common_tags
+}
+```
+
+Three modules. VPC outputs feed into security groups. Security group outputs feed into the ALB. This is the dependency chain you will extend with every backend deployment from here on.
+
+---
+
+## NLB vs ALB
+
+You will hear about Network Load Balancers. Here is when each one makes sense:
+
+<ComparisonTable>
+  <ComparisonHeader columns={["ALB", "NLB"]} />
+  <ComparisonRow feature="Layer" ALB="Layer 7 (HTTP/HTTPS)" NLB="Layer 4 (TCP/UDP)" />
+  <ComparisonRow feature="Routing" ALB="Path, host, header (Best)" NLB="Port only" />
+  <ComparisonRow feature="HTTPS termination" ALB="Yes (Best)" NLB="TLS passthrough" />
+  <ComparisonRow feature="Health checks" ALB="HTTP path checks (Best)" NLB="TCP/HTTP" />
+  <ComparisonRow feature="Latency" ALB="~1-5ms added" NLB="~100us added (Best)" />
+  <ComparisonRow feature="Static IP" ALB="No (use Global Accelerator)" NLB="Yes (Best)" />
+  <ComparisonRow feature="Best for" ALB="Web APIs, microservices" NLB="gRPC, gaming, IoT" />
+  <ComparisonRow feature="Cost (base)" ALB="~$16/month" NLB="~$16/month" />
+</ComparisonTable>
+
+For a startup building a web API, the ALB is the right choice. It gives you path-based routing, HTTP health checks, and HTTPS termination. You would choose an NLB if you needed static IP addresses, extreme low latency, or TCP/UDP passthrough for protocols that are not HTTP.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | EC2 instances with public IPs, accessed directly by users. No health checks, no HTTPS termination, no load distribution. When you deploy, users get connection refused for 30 seconds. When an instance dies, users get connection refused permanently. |
+| ✅ **Right** | ALB in public subnets with HTTPS listener, ACM certificate, HTTP-to-HTTPS redirect, health checks on `/health`, and a target group with `target_type = "ip"` ready for EC2, ECS, or Lambda. One ALB, multiple future services via path-based routing. |
+| ❌ **Over** | NLB in front of ALB for static IPs, weighted target groups with percentage-based traffic splitting, cross-zone load balancing disabled for cost optimization, WAF attached with custom rate limiting rules, all before your first backend serves its first request. |
+| 🤖 **Agent Trap** | Agent configures health check with `path = "/"` which returns 200 from your frontend or a default welcome page. The health check passes even when the database is down, the cache is unreachable, and the app can serve nothing useful. You discover this during your first outage when the ALB keeps routing traffic to broken instances because the health check never checks what matters. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 23: API Design, REST**, you design the API that runs behind this ALB. Request validation, versioning, error formats, and the OpenAPI spec that becomes the contract between your frontend and backend. The target group is empty today. After Part 28, it will have real instances behind it.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "ALB",
+    tasks: [
+      { text: "ALB deployed in public subnets (minimum 2 AZs)", syncKey: "part-22-alb-public-subnets" },
+      { text: "ALB scheme is internet-facing, not internal", syncKey: "part-22-alb-internet-facing" },
+      { text: "HTTPS listener on port 443 with ACM certificate", syncKey: "part-22-https-listener" },
+      { text: "HTTP listener on port 80 with redirect to HTTPS", syncKey: "part-22-http-redirect" },
+      { text: "Deletion protection enabled for prod", syncKey: "part-22-deletion-protection" }
+    ]
+  },
+  {
+    category: "Health Checks",
+    tasks: [
+      { text: "Health check path set to /health (not /)", syncKey: "part-22-health-path" },
+      { text: "Health check interval, thresholds, and timeout configured", syncKey: "part-22-health-config" },
+      { text: "Target group created with target_type = ip", syncKey: "part-22-target-group" }
+    ]
+  },
+  {
+    category: "Networking",
+    tasks: [
+      { text: "ALB uses security group from Part 21 (sg-alb)", syncKey: "part-22-alb-sg" },
+      { text: "Route 53 alias record points to ALB", syncKey: "part-22-dns-alias" },
+      { text: "TLS policy is ELBSecurityPolicy-TLS13-1-2-2021-06 or newer", syncKey: "part-22-tls-policy" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. The ALB is the single entry point for all backend traffic, and every backend pattern from Part 28 onward connects through it.
+2. ALB must be in public subnets with an Internet Gateway route, because agents sometimes place it in private subnets where it is silently unreachable.
+3. Health checks are not monitoring. They are the mechanism that makes zero-downtime deployments possible by routing traffic only to targets that can actually serve requests.
+4. Start with `target_type = "ip"` and one target group. Path-based routing and additional target groups come later, and the ALB does not care what runs behind it (EC2, ECS, or Lambda).
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

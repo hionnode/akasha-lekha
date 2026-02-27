@@ -1,0 +1,497 @@
+---
+title: "Security Groups: The Firewall Rules That Actually Matter"
+description: "Design layered security groups for your VPC. ALB, application, and database tiers with least-privilege ingress — and the agent mistakes that expose everything."
+excerpt: "The firewall rules that actually matter. Layered security groups for ALB, application, and database tiers with the least-privilege ingress that agents consistently get wrong."
+date: "2026-03-28"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "vpc", "networking", "security", "terraform"]
+series: "AWS From Zero to Production"
+seriesPart: 21
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Security group rules with `0.0.0.0/0` on all ports. "Allow all traffic from everywhere." The networking equivalent of leaving your front door open, your windows up, and a sign in the yard that says "come on in." Agents default to this because it eliminates every connectivity error in one line. Your database responds. Your app connects. Everything works. Until someone who is not you connects too.
+
+**Time:** About 35 minutes.
+
+**Outcome:** Three-tier security group architecture (ALB, application, database) with least-privilege ingress, all in Terraform, referencing each other by security group ID instead of CIDR blocks.
+
+---
+
+## Why This Matters
+
+Security groups are stateful firewalls attached to every resource in your VPC. Every EC2 instance, every RDS database, every Lambda function running inside a VPC gets at least one security group. If you get the security group design wrong, the VPC you built in [Part 20](/blog/aws-for-startups/20-vpc-fundamentals) is just an expensive container for publicly accessible resources.
+
+**Stateful** means that if you allow inbound traffic on port 443, the response traffic is automatically allowed out. You do not need to write a separate outbound rule for return traffic. This is different from Network ACLs, which are stateless and require explicit rules in both directions. For a startup, security groups are where you spend your time. NACLs are a later concern.
+
+Two properties make security groups powerful:
+
+1. **Default deny inbound.** A new security group blocks all incoming traffic. You must explicitly allow every port, protocol, and source. This is the right default. Nothing gets in unless you say so.
+2. **Reference by security group ID.** Instead of allowing traffic from a CIDR block like `10.0.0.0/16`, you allow traffic from another security group. This means "allow traffic from anything attached to that group," regardless of what IP address it has. When instances scale up, scale down, or get replaced, the rule still works.
+
+The second property is what agents consistently miss, and it is the foundation of everything in this post.
+
+---
+
+## Three-Tier Security Group Architecture
+
+Your infrastructure has three distinct layers, and each layer needs its own security group with different ingress rules.
+
+<Alert type="important" title="Security Group Architecture">
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           INTERNET                                   │
+│                              │                                       │
+│                         443 (HTTPS)                                  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │              ALB Security Group (sg-alb)                  │       │
+│  │         Inbound: 443 from 0.0.0.0/0                      │       │
+│  │         Inbound: 80 from 0.0.0.0/0 (redirect only)       │       │
+│  └───────────────────────┬──────────────────────────────────┘       │
+│                          │                                           │
+│                   8080 (app port)                                    │
+│                          │                                           │
+│                          ▼                                           │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │              App Security Group (sg-app)                  │       │
+│  │         Inbound: 8080 from sg-alb ONLY                   │       │
+│  └───────────────────────┬──────────────────────────────────┘       │
+│                          │                                           │
+│                    5432 (postgres)                                   │
+│                          │                                           │
+│                          ▼                                           │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │              DB Security Group (sg-db)                    │       │
+│  │         Inbound: 5432 from sg-app ONLY                   │       │
+│  └──────────────────────────────────────────────────────────┘       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+</Alert>
+
+Three groups. Three rules. Each layer only accepts traffic from the layer directly above it.
+
+- **ALB security group:** The only group that allows traffic from `0.0.0.0/0`. Ports 443 (HTTPS) and 80 (for the HTTP-to-HTTPS redirect you will set up in [Part 22](/blog/aws-for-startups/22-alb-load-balancer)). Nothing else touches the public internet.
+- **App security group:** Allows inbound on port 8080 (or whatever your application port is), but only from `sg-alb`. Not from the internet. Not from the VPC CIDR. From the ALB security group specifically.
+- **DB security group:** Allows inbound on port 5432 (PostgreSQL), but only from `sg-app`. Your database is unreachable from everything except your application servers.
+
+This is the **chain of trust** pattern. Each group trusts the group above it, and nothing else. If someone compromises the ALB, they still cannot reach the database directly. They would need to pivot through the application layer first.
+
+---
+
+## Security Group Design Patterns
+
+### Reference by Security Group ID, Not CIDR
+
+This is the single most important rule in this post. Compare these two approaches:
+
+```hcl title="infra/modules/security-groups/bad-example.tf"
+# BAD: CIDR-based reference
+resource "aws_security_group_rule" "app_from_alb" {
+  type              = "ingress"
+  from_port         = 8080
+  to_port           = 8080
+  protocol          = "tcp"
+  cidr_blocks       = ["10.0.1.0/24", "10.0.2.0/24"]  # ALB subnet CIDRs
+  security_group_id = aws_security_group.app.id
+}
+```
+
+```hcl title="infra/modules/security-groups/good-example.tf"
+# GOOD: Security group reference
+resource "aws_security_group_rule" "app_from_alb" {
+  type                     = "ingress"
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.alb.id
+  security_group_id        = aws_security_group.app.id
+}
+```
+
+The CIDR approach breaks when you add subnets, change CIDR ranges, or move to a different VPC. The security group reference works regardless of IP addressing. It says "trust this identity," not "trust this address range." It is the difference between checking a badge and checking a street address.
+
+### Separate Rules from Groups
+
+Define security groups as empty shells, then attach rules as separate resources. This approach avoids Terraform dependency cycles and makes rules easier to manage independently.
+
+```hcl title="infra/modules/security-groups/main.tf"
+# Create the groups first (no inline rules)
+resource "aws_security_group" "alb" {
+  name_prefix = "${var.project}-${var.environment}-alb-"
+  description = "Security group for Application Load Balancer"
+  vpc_id      = var.vpc_id
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-alb-sg"
+    Tier = "public"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_security_group" "app" {
+  name_prefix = "${var.project}-${var.environment}-app-"
+  description = "Security group for application servers"
+  vpc_id      = var.vpc_id
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-app-sg"
+    Tier = "private"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_security_group" "db" {
+  name_prefix = "${var.project}-${var.environment}-db-"
+  description = "Security group for database instances"
+  vpc_id      = var.vpc_id
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-db-sg"
+    Tier = "data"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+Notice `name_prefix` instead of `name`. With `name_prefix` and `create_before_destroy`, Terraform can create a replacement security group before destroying the old one. Using `name` directly causes failures during updates because AWS does not allow two security groups with the same name.
+
+### Chained Ingress Rules
+
+Now attach the rules that create the chain of trust:
+
+```hcl title="infra/modules/security-groups/rules.tf"
+# ─── ALB Rules ────────────────────────────────────────────────
+# ALB accepts HTTPS from the internet
+resource "aws_security_group_rule" "alb_https_in" {
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTPS from internet"
+}
+
+# ALB accepts HTTP from the internet (for redirect to HTTPS)
+resource "aws_security_group_rule" "alb_http_in" {
+  type              = "ingress"
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTP from internet (redirects to HTTPS)"
+}
+
+# ALB can reach application servers
+resource "aws_security_group_rule" "alb_to_app" {
+  type                     = "egress"
+  from_port                = var.app_port
+  to_port                  = var.app_port
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.app.id
+  security_group_id        = aws_security_group.alb.id
+  description              = "To application servers"
+}
+
+# ─── App Rules ────────────────────────────────────────────────
+# App accepts traffic from ALB only
+resource "aws_security_group_rule" "app_from_alb" {
+  type                     = "ingress"
+  from_port                = var.app_port
+  to_port                  = var.app_port
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.alb.id
+  security_group_id        = aws_security_group.app.id
+  description              = "From ALB only"
+}
+
+# App can reach the database
+resource "aws_security_group_rule" "app_to_db" {
+  type                     = "egress"
+  from_port                = var.db_port
+  to_port                  = var.db_port
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.db.id
+  security_group_id        = aws_security_group.app.id
+  description              = "To database"
+}
+
+# App can reach the internet (for external API calls, package downloads)
+resource "aws_security_group_rule" "app_egress_https" {
+  type              = "egress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.app.id
+  description       = "HTTPS to internet (APIs, package registries)"
+}
+
+# ─── DB Rules ─────────────────────────────────────────────────
+# DB accepts traffic from app servers only
+resource "aws_security_group_rule" "db_from_app" {
+  type                     = "ingress"
+  from_port                = var.db_port
+  to_port                  = var.db_port
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.app.id
+  security_group_id        = aws_security_group.db.id
+  description              = "From application servers only"
+}
+```
+
+Every rule has a `description`. This is not optional niceness. When you are debugging connectivity at 11 PM, `aws ec2 describe-security-groups` output with descriptions tells you the intent of each rule. Without descriptions, you are reading port numbers and security group IDs and trying to remember why you allowed port 6379 from `sg-0a1b2c3d4e5f`.
+
+---
+
+## Agent-Assisted Terraform
+
+Here is the complete module with variables and outputs. This is the kind of boilerplate that agents generate well, with one critical caveat.
+
+```hcl title="infra/modules/security-groups/variables.tf"
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "VPC ID where security groups will be created"
+  type        = string
+}
+
+variable "app_port" {
+  description = "Port the application listens on"
+  type        = number
+  default     = 8080
+}
+
+variable "db_port" {
+  description = "Port the database listens on"
+  type        = number
+  default     = 5432
+}
+
+variable "common_tags" {
+  description = "Tags applied to all resources"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```hcl title="infra/modules/security-groups/outputs.tf"
+output "alb_security_group_id" {
+  description = "Security group ID for the ALB"
+  value       = aws_security_group.alb.id
+}
+
+output "app_security_group_id" {
+  description = "Security group ID for application servers"
+  value       = aws_security_group.app.id
+}
+
+output "db_security_group_id" {
+  description = "Security group ID for database instances"
+  value       = aws_security_group.db.id
+}
+```
+
+The file structure for this module:
+
+<FileTree>
+infra/
+  modules/
+    security-groups/
+      main.tf
+      rules.tf
+      variables.tf
+      outputs.tf
+</FileTree>
+
+<Alert type="caution" title="Agent Trap">
+
+Ask an agent to "create security groups for a three-tier architecture" and it will generate three separate `aws_security_group` resources. Good. But look at the ingress rules. The agent creates three groups, then sets every ingress rule to `cidr_blocks = ["0.0.0.0/0"]` instead of referencing the upstream security group with `source_security_group_id`.
+
+The groups exist. They look correct at first glance. But they provide zero isolation. Your database accepts traffic from the entire internet on port 5432, not just from your application servers.
+
+**Why agents do this:** Referencing security groups by ID requires knowing the resource name of the other group, which means the agent needs to plan the dependency graph across multiple resources. Using `0.0.0.0/0` is a single-resource solution that always works.
+
+**What catches it:** Run `checkov -d .` on your Terraform directory. Policy `CKV_AWS_260` flags security groups that allow ingress from `0.0.0.0/0` on any port other than 80 and 443. If your app or database security group triggers this policy, the agent used CIDR blocks instead of security group references.
+
+</Alert>
+
+### Verifying Your Security Groups
+
+After running `terraform apply`, verify the chain of trust:
+
+```bash terminal
+aws ec2 describe-security-groups \
+  --filters "Name=tag:Project,Values=shipfast" \
+  --query "SecurityGroups[].{Name:GroupName,ID:GroupId,Ingress:IpPermissions}" \
+  --output table
+```
+
+Check three things:
+
+1. The ALB security group has `0.0.0.0/0` in its ingress. This is the only group that should.
+2. The app security group has a `UserIdGroupPairs` entry (not `IpRanges`) pointing to the ALB security group ID.
+3. The DB security group has a `UserIdGroupPairs` entry pointing to the app security group ID.
+
+If you see `IpRanges` with `0.0.0.0/0` on the app or DB group, something is wrong. Fix it before deploying anything behind these groups.
+
+---
+
+## Common Patterns
+
+### SSH Access via Bastion Only
+
+Never open port 22 to `0.0.0.0/0`. If you need SSH access (and with modern tooling like SSM Session Manager, you often do not), restrict it to a bastion host security group.
+
+```hcl title="infra/modules/security-groups/ssh.tf"
+# Only create if bastion is enabled
+resource "aws_security_group_rule" "app_ssh_from_bastion" {
+  count = var.enable_bastion ? 1 : 0
+
+  type                     = "ingress"
+  from_port                = 22
+  to_port                  = 22
+  protocol                 = "tcp"
+  source_security_group_id = var.bastion_security_group_id
+  security_group_id        = aws_security_group.app.id
+  description              = "SSH from bastion host only"
+}
+```
+
+:::tip
+AWS Systems Manager Session Manager gives you shell access to instances without opening port 22 at all. No SSH keys to manage, no bastion host to maintain, full audit logging. If you are starting fresh, skip SSH entirely and use SSM.
+:::
+
+### Egress Rules
+
+The default security group allows all outbound traffic. Your custom security groups should be more specific. At minimum, restrict egress to the ports you actually need:
+
+| Destination | Port | Why |
+|---|---|---|
+| `0.0.0.0/0` | 443 | External API calls, package registries, AWS APIs |
+| App SG | `app_port` | ALB to application servers |
+| DB SG | `db_port` | Application to database |
+
+Restrict egress when you can, but do not over-restrict at the start. An application that cannot reach `apt.ubuntu.com` or `registry.npmjs.org` will fail to deploy. Start with HTTPS egress to `0.0.0.0/0`, then tighten after you know which external services your application calls.
+
+### Security Groups per Environment
+
+Use the same module for dev and prod, but with different parameters. Dev might allow SSH from your office IP for debugging. Prod should not have SSH access at all.
+
+```hcl title="infra/environments/prod/main.tf"
+module "security_groups" {
+  source = "../../modules/security-groups"
+
+  project     = "shipfast"
+  environment = "prod"
+  vpc_id      = module.vpc.vpc_id
+  app_port    = 8080
+  db_port     = 5432
+  common_tags = local.common_tags
+}
+```
+
+```hcl title="infra/environments/dev/main.tf"
+module "security_groups" {
+  source = "../../modules/security-groups"
+
+  project        = "shipfast"
+  environment    = "dev"
+  vpc_id         = module.vpc.vpc_id
+  app_port       = 8080
+  db_port        = 5432
+  enable_bastion = true
+  bastion_security_group_id = module.bastion.security_group_id
+  common_tags    = local.common_tags
+}
+```
+
+Same module. Same chain of trust. Different access policies per environment.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | One security group for everything, `0.0.0.0/0` on all ports. Your database is accessible from the internet, your app tier has no isolation, and a port scan reveals every service you are running. |
+| ✅ **Right** | Three-tier security groups (ALB, app, database). Only the ALB allows `0.0.0.0/0`, and only on ports 80 and 443. App and database groups reference the upstream group by ID. Every rule has a description. |
+| ❌ **Over** | Network ACLs layered on top of security groups, with WAF rules at every tier, for an internal application that handles 50 requests per day. Three layers of firewalls when one is sufficient for your threat model. |
+| 🤖 **Agent Trap** | Agent creates three separate security groups (correct structure) but sets all ingress to `cidr_blocks = ["0.0.0.0/0"]` instead of `source_security_group_id` (no actual isolation). The groups look right in the Terraform code. They pass `terraform validate`. But `checkov` catches it with CKV_AWS_260 because the database accepts traffic from the entire internet. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 22: ALB, The Front Door to Your Backend**, you wire up an Application Load Balancer that terminates HTTPS, health-checks your backend, and routes requests to the right target group. The ALB attaches to the `sg-alb` security group you just created, and your first backend deployment pattern starts taking shape.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Security Groups",
+    tasks: [
+      { text: "ALB security group allows port 443 from 0.0.0.0/0", syncKey: "part-21-alb-sg-443" },
+      { text: "ALB security group allows port 80 from 0.0.0.0/0 (for redirect)", syncKey: "part-21-alb-sg-80" },
+      { text: "App security group allows traffic from ALB security group only", syncKey: "part-21-app-sg-from-alb" },
+      { text: "DB security group allows traffic from App security group only", syncKey: "part-21-db-sg-from-app" },
+      { text: "No security group has 0.0.0.0/0 on all ports", syncKey: "part-21-no-open-sg" }
+    ]
+  },
+  {
+    category: "Terraform",
+    tasks: [
+      { text: "Security groups reference each other by ID, not CIDR blocks", syncKey: "part-21-sg-id-refs" },
+      { text: "All security group rules have descriptions", syncKey: "part-21-rule-descriptions" },
+      { text: "Security groups use name_prefix with create_before_destroy", syncKey: "part-21-name-prefix" },
+      { text: "checkov passes with no CKV_AWS_260 findings", syncKey: "part-21-checkov-pass" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Reference security groups by ID, not CIDR blocks, because the chain of trust survives scaling, re-deployment, and IP address changes.
+2. Only the ALB security group should allow `0.0.0.0/0`, and only on ports 80 and 443. Everything behind the ALB is unreachable from the internet.
+3. Agents default to open security groups because `0.0.0.0/0` eliminates connectivity errors during generation. Always verify ingress sources with `checkov` before applying.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

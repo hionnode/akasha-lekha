@@ -1,0 +1,720 @@
+---
+title: "VPC Fundamentals: The Network Your Backend Lives In"
+description: "Build a production VPC with public and private subnets, NAT gateway, and VPC endpoints. The networking foundation for everything from EC2 to ECS to Lambda."
+excerpt: "The network your backend lives in. Production VPC with public and private subnets, because your database should never be one click away from the internet."
+date: "2026-03-24"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "vpc", "networking", "terraform"]
+series: "AWS From Zero to Production"
+seriesPart: 20
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import GuideStep from '../../../components/blog/guide/GuideStep.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your database has a public IP. The only thing between it and every port scanner on the internet is a security group. One misconfigured rule, one `0.0.0.0/0` ingress on port 5432, and your data is exposed to anyone with `psql` installed. You can audit security groups. You can add alerts. You can write policies. Or you can put the database in a private subnet where it has no public IP, no internet gateway route, and no path from the public internet, period. No misconfiguration can expose what is architecturally unreachable.
+
+**Time:** About 50 minutes.
+
+**Outcome:** A production VPC with public and private subnets across 2 AZs, an internet gateway, a NAT gateway, VPC endpoints for S3 and DynamoDB, route tables connecting everything correctly, and CIDR blocks documented in AGENT-INSTRUCTIONS.md.
+
+---
+
+## Why This Matters
+
+In [Part 10](/blog/aws-for-startups/10-docker-compose-local), you ran services locally with Docker Compose networking. Containers talked to each other over a bridge network. Nothing was exposed to the internet unless you mapped a port. That isolation was automatic and free. On AWS, isolation requires intention. The default VPC puts everything in public subnets with internet gateway routes and public IPs assigned automatically. Every EC2 instance, every RDS database, every container gets a public IP unless you explicitly opt out.
+
+The default VPC exists so that "Launch Instance" works without networking knowledge. It is a learning tool, not a production architecture. When your RDS instance has a public IP, the security boundary is a single security group rule. Security groups are stateful firewalls, and they work. But they are one layer. A private subnet adds a second layer: the routing table. Traffic from the internet cannot reach resources in a private subnet because there is no route from the internet gateway to that subnet. Even if you accidentally open a security group to `0.0.0.0/0`, the database is still unreachable. Defense in depth is not about doubting your security groups. It is about ensuring that a single mistake cannot become an incident.
+
+The cost of a custom VPC is $0. VPCs, subnets, route tables, internet gateways, and security groups are all free. The only component with a meaningful cost is the NAT gateway at $32.40/month, and VPC endpoints eliminate most of the traffic that would go through it. The cost of not having a custom VPC is discovered when your database appears on Shodan and someone emails you a screenshot of your users table.
+
+---
+
+## What We're Building
+
+- A VPC with a /16 CIDR block (65,536 IPs)
+- 2 public subnets across 2 AZs (for ALB, NAT gateway)
+- 2 private subnets across 2 AZs (for EC2, ECS, RDS, Lambda)
+- An internet gateway for public subnet internet access
+- A NAT gateway for private subnet outbound access
+- VPC gateway endpoints for S3 and DynamoDB (free, saves NAT costs)
+- Route tables wiring public and private subnets correctly
+- AGENT-INSTRUCTIONS.md networking rules (5 lines, cumulative 48)
+
+---
+
+## VPC Design: CIDR Planning
+
+CIDR blocks define the IP address space for your VPC and subnets. Get this wrong and you cannot fix it without rebuilding the VPC from scratch. CIDR planning is a one-way door.
+
+Use `10.0.0.0/16` for your VPC. This gives you 65,536 IP addresses, which is far more than a startup needs but costs nothing extra. The `/16` block is the standard for production VPCs because it provides enough room to add subnets for years without running out of addresses. Smaller blocks like `/24` (256 IPs) seem sufficient until you need 6 subnets across 3 AZs and realize you have 40 IPs left.
+
+Subdivide the VPC into `/24` subnets (251 usable IPs each). AWS reserves 5 IPs per subnet for network address, VPC router, DNS, future use, and broadcast.
+
+| Subnet | CIDR | AZ | Type | Purpose |
+|--------|------|----|------|---------|
+| public-1 | 10.0.1.0/24 | us-east-1a | Public | ALB, NAT gateway |
+| public-2 | 10.0.2.0/24 | us-east-1b | Public | ALB (multi-AZ) |
+| private-1 | 10.0.10.0/24 | us-east-1a | Private | EC2, ECS, Lambda |
+| private-2 | 10.0.20.0/24 | us-east-1b | Private | EC2, ECS, Lambda |
+
+Notice the numbering gap: public subnets use 10.0.1.0 and 10.0.2.0, private subnets use 10.0.10.0 and 10.0.20.0. This leaves room for future subnets (database-only subnets at 10.0.100.0/24, cache subnets at 10.0.110.0/24) without restructuring. If you pack subnets sequentially (10.0.1.0, 10.0.2.0, 10.0.3.0, 10.0.4.0), you have no room to insert a new subnet type between existing ones.
+
+<Alert type="important" title="VPC Architecture">
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         VPC: 10.0.0.0/16                                │
+│                                                                         │
+│   AZ: us-east-1a                         AZ: us-east-1b                 │
+│   ┌───────────────────────┐              ┌───────────────────────┐      │
+│   │ Public: 10.0.1.0/24   │              │ Public: 10.0.2.0/24   │      │
+│   │                       │              │                       │      │
+│   │  ┌─────┐  ┌────────┐ │              │  ┌─────┐              │      │
+│   │  │ ALB │  │ NAT GW │ │              │  │ ALB │              │      │
+│   │  └─────┘  └───┬────┘ │              │  └─────┘              │      │
+│   └───────────────┼───────┘              └───────────────────────┘      │
+│                   │                                                      │
+│   ┌───────────────┼───────┐              ┌───────────────────────┐      │
+│   │ Private: 10.0.10.0/24 │              │ Private: 10.0.20.0/24 │      │
+│   │               │       │              │                       │      │
+│   │  ┌─────┐  ┌──┴──┐    │              │  ┌─────┐  ┌─────┐    │      │
+│   │  │ ECS │  │ RDS │    │              │  │ ECS │  │ RDS │    │      │
+│   │  └─────┘  └─────┘    │              │  └─────┘  └─────┘    │      │
+│   └───────────────────────┘              └───────────────────────┘      │
+│                                                                         │
+│   ┌───────────┐   ┌─────────────────┐   ┌──────────────────────┐       │
+│   │ Internet  │   │ VPC Endpoint:   │   │ VPC Endpoint:        │       │
+│   │ Gateway   │   │ S3 (free)       │   │ DynamoDB (free)      │       │
+│   └───────────┘   └─────────────────┘   └──────────────────────┘       │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Traffic flow:
+  Internet ──▶ Internet Gateway ──▶ Public Subnets (ALB)
+  Private Subnets ──▶ NAT Gateway ──▶ Internet (outbound only)
+  Private Subnets ──▶ VPC Endpoints ──▶ S3 / DynamoDB (no NAT cost)
+```
+
+</Alert>
+
+Two AZs is the minimum for high availability. If us-east-1a goes down, your ALB routes traffic to us-east-1b. Your RDS failover replica is already in us-east-1b. Your ECS tasks relaunch in us-east-1b. One AZ is a single point of failure. Three AZs costs more (3 NAT gateways instead of 1) and provides marginal improvement for most startups. Start with 2.
+
+---
+
+## Internet Gateway and NAT Gateway
+
+Two gateways. Two purposes. Mix them up and your architecture breaks.
+
+**Internet Gateway (IGW):** Allows resources in public subnets to communicate with the internet in both directions. Inbound and outbound. Free. One per VPC. Without it, public subnets are just subnets with a name. The route table entry `0.0.0.0/0 -> igw-xxxxx` is what makes a subnet "public."
+
+**NAT Gateway:** Allows resources in private subnets to reach the internet for outbound requests (pulling Docker images, calling external APIs, downloading OS updates) while preventing any inbound connections from the internet. One-way door. Traffic goes out through NAT, responses come back, but nothing can initiate a connection in.
+
+<Alert type="important" title="Cost Alert">
+
+NAT Gateways cost $0.045/hour ($32.40/month) plus $0.045/GB of data processed. This is the most significant fixed cost in your VPC. For development environments, consider these alternatives:
+
+- **VPC endpoints** for S3 and DynamoDB traffic (free, covered next)
+- **NAT instance** on a t3.nano ($3.80/month) if your private subnet traffic is minimal
+- **No NAT** if private subnet resources never need outbound internet (rare, but possible with VPC endpoints covering AWS service traffic)
+
+For production, use the managed NAT gateway. The $32/month buys automatic failover, bandwidth scaling to 100 Gbps, and zero operational overhead. A NAT instance that fails at 3 AM requires you to fix it.
+
+</Alert>
+
+We deploy the NAT gateway in one AZ (us-east-1a, public-1 subnet). Both private subnets route through this single NAT. This is a cost optimization: one NAT gateway at $32/month instead of two at $64/month. The tradeoff is that if us-east-1a has an outage, private subnet resources in us-east-1b lose outbound internet access until the AZ recovers. For a startup, $32/month of savings is worth the rare (~4 hours/year) cross-AZ NAT failure. For production workloads with strict availability requirements, deploy one NAT per AZ.
+
+---
+
+## VPC Endpoints: Free Money
+
+VPC endpoints let resources in your private subnets talk to AWS services without going through the NAT gateway. No NAT gateway means no $0.045/GB data processing charge. For S3 and DynamoDB, the endpoints are gateway endpoints, which are completely free. No hourly cost. No data processing cost. You are paying $0 instead of $0.045/GB.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Through NAT", "VPC Endpoint"]} />
+  <ComparisonRow feature="S3 cost per GB" Through_NAT="$0.045/GB" VPC_Endpoint="$0/GB (Best)" />
+  <ComparisonRow feature="DynamoDB cost per GB" Through_NAT="$0.045/GB" VPC_Endpoint="$0/GB (Best)" />
+  <ComparisonRow feature="Hourly cost" Through_NAT="$0.045/hr (NAT)" VPC_Endpoint="$0/hr (Best)" />
+  <ComparisonRow feature="Latency" Through_NAT="Extra hop through NAT" VPC_Endpoint="Direct path (Best)" />
+  <ComparisonRow feature="Setup complexity" Through_NAT="Already routed through NAT" VPC_Endpoint="One Terraform resource" />
+  <ComparisonRow feature="Monthly cost at 100GB S3" Through_NAT="$4.50 data + $32.40 NAT" VPC_Endpoint="$0 (Best)" />
+</ComparisonTable>
+
+A typical startup application doing moderate S3 operations (log shipping, asset storage, backups) and DynamoDB queries moves 50-200 GB/month through these services. Without VPC endpoints, that traffic routes through NAT at $0.045/GB, adding $2.25-$9.00/month in data charges on top of the $32.40/month NAT hourly fee. With VPC endpoints, that same traffic costs $0. Over a year, VPC endpoints save $100-150 in pure data transfer costs, and they take 5 minutes to set up.
+
+<Alert type="caution" title="Agent Trap: Missing VPC Endpoints">
+
+Agents generate VPC modules without VPC endpoints because endpoints are not required for the VPC to function. Everything works without them. Traffic to S3 and DynamoDB routes through the NAT gateway, which works perfectly. The problem is invisible until you look at your bill and see $50-200/month in NAT data processing charges for traffic that should have been free.
+
+**Why agents miss this:** VPC endpoints are an optimization, not a requirement. Agents optimize for "does it work?" not "does it cost the minimum?" The VPC functions identically with or without endpoints. The difference only shows up on the bill.
+
+**What catches it:** The `verify.sh` compliance check from [Part 19](/blog/aws-for-startups/19-preview-environments) should include a rule: "VPC modules must include gateway endpoints for S3 and DynamoDB." Add this check to your pipeline.
+
+</Alert>
+
+Gateway endpoints (S3, DynamoDB) are free and route-table-based. Interface endpoints (for services like Secrets Manager, ECR, CloudWatch) cost $0.01/hour per AZ ($7.20/month per endpoint per AZ) plus $0.01/GB. We skip interface endpoints for now. You will add them when you need them (ECR in Part 40, Secrets Manager in Part 37).
+
+---
+
+## Route Tables
+
+Route tables are the rules that determine where network traffic goes. Every subnet is associated with one route table. The route table contains entries that map destination CIDR blocks to targets.
+
+**Public route table:**
+
+| Destination | Target | Purpose |
+|------------|--------|---------|
+| 10.0.0.0/16 | local | Traffic within the VPC stays within the VPC |
+| 0.0.0.0/0 | igw-xxxxx | Everything else goes to the internet gateway |
+
+**Private route table:**
+
+| Destination | Target | Purpose |
+|------------|--------|---------|
+| 10.0.0.0/16 | local | Traffic within the VPC stays within the VPC |
+| 0.0.0.0/0 | nat-xxxxx | Everything else goes to the NAT gateway (outbound only) |
+| S3 prefix list | vpce-xxxxx | S3 traffic goes to the VPC endpoint (free) |
+| DynamoDB prefix list | vpce-xxxxx | DynamoDB traffic goes to the VPC endpoint (free) |
+
+The `local` route exists automatically in every route table and cannot be removed. It ensures that traffic between subnets within the VPC never leaves the VPC. Your ECS container in 10.0.10.0/24 talks to your RDS instance in 10.0.20.0/24 directly, without hitting any gateway.
+
+The S3 and DynamoDB VPC endpoint routes are added automatically when you create gateway endpoints and associate them with the route table. The prefix list entries match all S3 and DynamoDB IP ranges for your region. Traffic matching these prefixes takes the VPC endpoint path instead of the NAT gateway path.
+
+:::tip
+Run `aws ec2 describe-prefix-lists` to see the actual IP ranges covered by each prefix list in your region. This is useful for debugging when traffic is not taking the expected path.
+:::
+
+---
+
+## Design: Terraform Module Structure
+
+The VPC is complex enough to deserve its own Terraform module. This module will be referenced by every environment (dev, staging, production) with different variables for CIDR blocks and AZ counts.
+
+<FileTree>
+infra/
+  modules/
+    vpc/
+      main.tf
+      variables.tf
+      outputs.tf
+  environments/
+    dev/
+      main.tf
+      terraform.tfvars
+</FileTree>
+
+The module encapsulates all VPC resources: VPC, subnets, gateways, endpoints, and route tables. The environment directory references the module and passes in variables. This separation means you write the networking logic once and instantiate it per environment with different parameters.
+
+---
+
+## Generate: Agent Produces the VPC Module
+
+Give your agent this prompt with your full AGENT-INSTRUCTIONS.md (all 43 lines from [Part 12](/blog/aws-for-startups/12-env-vars-secrets-security)) as context.
+
+```text title="Prompt for VPC module"
+Create a Terraform module at infra/modules/vpc/ that provisions:
+
+1. A VPC with configurable CIDR block, DNS support, and DNS hostnames enabled
+2. 2 public subnets across 2 AZs with auto-assign public IP
+3. 2 private subnets across 2 AZs (no public IP)
+4. An internet gateway attached to the VPC
+5. A NAT gateway in the first public subnet with an Elastic IP
+6. A gateway VPC endpoint for S3 associated with private route tables
+7. A gateway VPC endpoint for DynamoDB associated with private route tables
+8. A public route table with 0.0.0.0/0 -> internet gateway
+9. A private route table with 0.0.0.0/0 -> NAT gateway
+10. All resources tagged with var.common_tags merged with Name tags
+
+Variables: vpc_cidr, public_subnet_cidrs (list), private_subnet_cidrs (list),
+           availability_zones (list), project, environment, common_tags
+
+Outputs: vpc_id, public_subnet_ids, private_subnet_ids, nat_gateway_id,
+         s3_endpoint_id, dynamodb_endpoint_id
+
+Follow AGENT-INSTRUCTIONS.md naming: {project}-{env}-{resource}.
+Use data source for available AZs as fallback.
+```
+
+Here is the agent-generated module after verification through the `verify.sh` pipeline from [Part 19](/blog/aws-for-startups/19-preview-environments):
+
+```hcl title="infra/modules/vpc/variables.tf"
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+
+  validation {
+    condition     = can(cidrhost(var.vpc_cidr, 0))
+    error_message = "vpc_cidr must be a valid CIDR block."
+  }
+}
+
+variable "public_subnet_cidrs" {
+  description = "CIDR blocks for public subnets (one per AZ)"
+  type        = list(string)
+  default     = ["10.0.1.0/24", "10.0.2.0/24"]
+}
+
+variable "private_subnet_cidrs" {
+  description = "CIDR blocks for private subnets (one per AZ)"
+  type        = list(string)
+  default     = ["10.0.10.0/24", "10.0.20.0/24"]
+}
+
+variable "availability_zones" {
+  description = "AZs for subnet placement (must match subnet count)"
+  type        = list(string)
+  default     = ["us-east-1a", "us-east-1b"]
+}
+
+variable "project" {
+  description = "Project name used in resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "common_tags" {
+  description = "Tags applied to all resources"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```hcl title="infra/modules/vpc/main.tf"
+# VPC
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-vpc"
+  })
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-igw"
+  })
+}
+
+# Public Subnets
+resource "aws_subnet" "public" {
+  count = length(var.public_subnet_cidrs)
+
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = var.availability_zones[count.index]
+  map_public_ip_on_launch = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-public-${var.availability_zones[count.index]}"
+    Tier = "public"
+  })
+}
+
+# Private Subnets
+resource "aws_subnet" "private" {
+  count = length(var.private_subnet_cidrs)
+
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.private_subnet_cidrs[count.index]
+  availability_zone       = var.availability_zones[count.index]
+  map_public_ip_on_launch = false
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-private-${var.availability_zones[count.index]}"
+    Tier = "private"
+  })
+}
+
+# Elastic IP for NAT Gateway
+resource "aws_eip" "nat" {
+  domain = "vpc"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-nat-eip"
+  })
+}
+
+# NAT Gateway (single AZ for cost optimization)
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-nat"
+  })
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# Public Route Table
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-public-rt"
+  })
+}
+
+# Public Route Table Associations
+resource "aws_route_table_association" "public" {
+  count = length(var.public_subnet_cidrs)
+
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+# Private Route Table
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-private-rt"
+  })
+}
+
+# Private Route Table Associations
+resource "aws_route_table_association" "private" {
+  count = length(var.private_subnet_cidrs)
+
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+# VPC Gateway Endpoint: S3 (free)
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id       = aws_vpc.main.id
+  service_name = "com.amazonaws.${data.aws_region.current.name}.s3"
+
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-s3-endpoint"
+  })
+}
+
+# VPC Gateway Endpoint: DynamoDB (free)
+resource "aws_vpc_endpoint" "dynamodb" {
+  vpc_id       = aws_vpc.main.id
+  service_name = "com.amazonaws.${data.aws_region.current.name}.dynamodb"
+
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-dynamodb-endpoint"
+  })
+}
+
+# Data source for current region
+data "aws_region" "current" {}
+```
+
+```hcl title="infra/modules/vpc/outputs.tf"
+output "vpc_id" {
+  description = "ID of the VPC"
+  value       = aws_vpc.main.id
+}
+
+output "vpc_cidr" {
+  description = "CIDR block of the VPC"
+  value       = aws_vpc.main.cidr_block
+}
+
+output "public_subnet_ids" {
+  description = "IDs of public subnets"
+  value       = aws_subnet.public[*].id
+}
+
+output "private_subnet_ids" {
+  description = "IDs of private subnets"
+  value       = aws_subnet.private[*].id
+}
+
+output "public_subnet_cidrs" {
+  description = "CIDR blocks of public subnets"
+  value       = aws_subnet.public[*].cidr_block
+}
+
+output "private_subnet_cidrs" {
+  description = "CIDR blocks of private subnets"
+  value       = aws_subnet.private[*].cidr_block
+}
+
+output "nat_gateway_id" {
+  description = "ID of the NAT gateway"
+  value       = aws_nat_gateway.main.id
+}
+
+output "internet_gateway_id" {
+  description = "ID of the internet gateway"
+  value       = aws_internet_gateway.main.id
+}
+
+output "s3_endpoint_id" {
+  description = "ID of the S3 VPC endpoint"
+  value       = aws_vpc_endpoint.s3.id
+}
+
+output "dynamodb_endpoint_id" {
+  description = "ID of the DynamoDB VPC endpoint"
+  value       = aws_vpc_endpoint.dynamodb.id
+}
+
+output "public_route_table_id" {
+  description = "ID of the public route table"
+  value       = aws_route_table.public.id
+}
+
+output "private_route_table_id" {
+  description = "ID of the private route table"
+  value       = aws_route_table.private.id
+}
+```
+
+Now the environment configuration that references the module:
+
+```hcl title="infra/environments/dev/main.tf"
+module "vpc" {
+  source = "../../modules/vpc"
+
+  vpc_cidr             = "10.0.0.0/16"
+  public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+  private_subnet_cidrs = ["10.0.10.0/24", "10.0.20.0/24"]
+  availability_zones   = ["us-east-1a", "us-east-1b"]
+
+  project     = "shipfast"
+  environment = "dev"
+
+  common_tags = {
+    Project     = "shipfast"
+    Environment = "dev"
+    ManagedBy   = "terraform"
+    Owner       = "platform"
+  }
+}
+```
+
+---
+
+## Verify: Pipeline Catches the Gaps
+
+Run the `verify.sh` pipeline from [Part 19](/blog/aws-for-startups/19-preview-environments) against the generated module:
+
+```bash terminal
+./scripts/pipeline/verify.sh infra/modules/vpc
+```
+
+<TerminalOutput title="verify.sh — VPC module">
+
+```
+=== VERIFY PIPELINE ===
+Target: infra/modules/vpc
+Max iterations: 3
+
+=========================================
+  ITERATION 1 of 3
+=========================================
+
+--- terraform validate ---
+PASS
+--- tflint ---
+PASS
+--- checkov ---
+FAIL: 1 failure
+--- infracost ---
+Cost estimate: $32.40/month
+--- instruction compliance ---
+PASS
+
+=== ITERATION 1 SUMMARY ===
+terraform validate: PASS
+tflint: PASS
+checkov: 1 failure (CKV2_AWS_19 - VPC Flow Logs not enabled)
+infracost: $32.40/month
+Total findings: 1
+
+==> Requesting agent fix (iteration 2 of 3)...
+```
+
+</TerminalOutput>
+
+One finding: VPC Flow Logs not enabled. This is a checkov security check, and the agent did not include flow logs because they were not in the prompt. Flow Logs record network traffic metadata (source, destination, port, action) and ship it to CloudWatch Logs. They cost about $0.50/GB of log data, which for a startup VPC with moderate traffic is $2-5/month. Worth it for debugging network issues and security auditing.
+
+After the agent adds a `aws_flow_log` resource, iteration 2 passes clean:
+
+<TerminalOutput title="verify.sh — iteration 2">
+
+```
+=========================================
+  ITERATION 2 of 3
+=========================================
+
+--- terraform validate ---
+PASS
+--- tflint ---
+PASS
+--- checkov ---
+PASS
+--- infracost ---
+Cost estimate: $35.40/month
+--- instruction compliance ---
+PASS
+
+=== ITERATION 2 SUMMARY ===
+All checks passed.
+Total findings: 0
+
+ALL CHECKS PASSED on iteration 2.
+```
+
+</TerminalOutput>
+
+Clean on iteration 2. The cost went from $32.40 to $35.40/month because flow logs add CloudWatch Logs ingestion costs. The Infracost output makes this visible before you apply.
+
+---
+
+## Explain: What to Review
+
+The pipeline handles syntax, compliance, and cost estimation. Here is what it cannot check and what you should review manually:
+
+**CIDR conflicts.** If you have other VPCs (default VPC is 172.31.0.0/16), verify that your CIDR blocks do not overlap. CIDR conflicts prevent VPC peering, Transit Gateway attachments, and VPN connections. Run `aws ec2 describe-vpcs --query 'Vpcs[].CidrBlock'` to see existing VPC CIDRs.
+
+**Subnet sizing.** Each `/24` subnet has 251 usable IPs. If you plan to run 200 ECS tasks, each needing an IP, one subnet is too small. For most startups, `/24` subnets are generous. But if you are building a platform that runs customer workloads in isolated containers, plan ahead.
+
+**NAT gateway placement.** The module puts NAT in the first AZ. If your primary workloads run in the second AZ, that is an unnecessary cross-AZ hop ($0.01/GB cross-AZ traffic). For most cases, this is negligible. For data-intensive workloads, place NAT in the AZ with the most private subnet traffic.
+
+<Alert type="caution" title="Agent Trap: Database in Public Subnet">
+
+Ask an agent to "set up RDS so I can connect to it" and it will create the database in a public subnet with a public IP. The agent's reasoning is correct from an accessibility standpoint: a public IP means you can connect from your laptop using `psql` without any VPN or bastion host. The agent is solving the immediate problem (you cannot connect) with the most direct solution (make it public).
+
+The problem is that "most direct" and "most secure" are opposite directions. A database in a public subnet with a public IP is one security group rule away from being accessible to the entire internet. The AGENT-INSTRUCTIONS.md rule "NEVER put databases in public subnets" exists because the alternative (bastion host, VPN, or SSM Session Manager) adds 5 minutes of setup and eliminates an entire class of security incidents.
+
+**What catches it:** The instruction compliance check in `verify.sh` flags any Terraform resource with `db_subnet_group` referencing public subnet IDs.
+
+</Alert>
+
+---
+
+## AGENT-INSTRUCTIONS.md: Networking Section
+
+Add the following to your AGENT-INSTRUCTIONS.md. Your file grows from 43 lines (after [Part 12](/blog/aws-for-startups/12-env-vars-secrets-security)) to 48 lines.
+
+```markdown title="AGENT-INSTRUCTIONS.md (append)"
+## Networking
+- NEVER put databases in public subnets
+- Security group ingress: NEVER use 0.0.0.0/0 except ALB port 443
+- Always create VPC endpoints for S3 and DynamoDB
+- CIDR blocks must be documented before agents can reference them
+- VPC CIDR: 10.0.0.0/16, Public: 10.0.1.0/24 + 10.0.2.0/24, Private: 10.0.10.0/24 + 10.0.20.0/24
+```
+
+The fifth line is unusual. Most AGENT-INSTRUCTIONS.md rules are constraints ("NEVER do X"). This one is documentation ("CIDR blocks are X"). The reason: agents generate CIDR blocks from training data, and training data contains every CIDR range ever posted in a tutorial. Without an explicit reference, the agent picks `10.0.0.0/24` or `172.16.0.0/16` or `192.168.1.0/24` depending on which tutorial was closest in its training data. Documenting your actual CIDRs prevents conflicts and ensures all modules reference the same address space.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Default VPC, everything in public subnets, no VPC endpoints. Your database has a public IP. Your S3 and DynamoDB traffic routes through NAT at $0.045/GB. You discover the cost when the bill arrives and the security gap when someone scans your ports. |
+| ✅ **Right** | Custom VPC with /16 CIDR, public and private subnets across 2 AZs, one NAT gateway (cost-optimized), S3 and DynamoDB gateway endpoints (free), flow logs enabled, CIDRs documented in AGENT-INSTRUCTIONS.md. Total cost: $35/month. |
+| ❌ **Over** | Transit Gateway connecting multiple VPCs, VPN to your office network, PrivateLink for every AWS service, 3 NAT gateways across 3 AZs, network firewall, and traffic mirroring for a single-region application with 50 requests per minute. $500+/month in networking overhead for a problem you do not have yet. |
+| 🤖 **Agent Trap** | Agent creates the VPC without VPC endpoints (all S3/DynamoDB traffic through NAT at $0.045/GB, adding $100+/month) and puts RDS in a public subnet "for easier access during development." Both are invisible until the bill arrives or the security audit fails. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 21: Security Groups**, we add the firewall rules that control traffic flow between resources inside this VPC. Security groups are the most common misconfiguration in AWS, and agents get them wrong in predictable ways. You will define ingress and egress rules for your ALB, application tier, and database tier, all in Terraform, all verified by the pipeline.
+
+:::note
+**Coming in Part 28:** Your first EC2 instances launch into the private subnets you just created. The VPC module outputs (`vpc_id`, `private_subnet_ids`, `public_subnet_ids`) become inputs to the compute module. Everything from Phase 7 onward lives in this VPC.
+:::
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "VPC",
+    tasks: [
+      { text: "Custom VPC created with 10.0.0.0/16 CIDR", syncKey: "part-20-vpc-created" },
+      { text: "Public subnets in 2 AZs with auto-assign public IP", syncKey: "part-20-public-subnets" },
+      { text: "Private subnets in 2 AZs without public IP", syncKey: "part-20-private-subnets" },
+      { text: "Internet gateway attached to VPC", syncKey: "part-20-igw" },
+      { text: "NAT gateway deployed in first public subnet", syncKey: "part-20-nat" }
+    ]
+  },
+  {
+    category: "Route Tables",
+    tasks: [
+      { text: "Public route table routes 0.0.0.0/0 to internet gateway", syncKey: "part-20-public-rt" },
+      { text: "Private route table routes 0.0.0.0/0 to NAT gateway", syncKey: "part-20-private-rt" },
+      { text: "Public subnets associated with public route table", syncKey: "part-20-public-assoc" },
+      { text: "Private subnets associated with private route table", syncKey: "part-20-private-assoc" }
+    ]
+  },
+  {
+    category: "VPC Endpoints",
+    tasks: [
+      { text: "S3 gateway endpoint created and associated with private route table", syncKey: "part-20-s3-endpoint" },
+      { text: "DynamoDB gateway endpoint created and associated with private route table", syncKey: "part-20-dynamodb-endpoint" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "VPC module generated by agent and verified through pipeline", syncKey: "part-20-agent-verified" },
+      { text: "verify.sh passes with 0 findings after fix iterations", syncKey: "part-20-verify-clean" },
+      { text: "AGENT-INSTRUCTIONS.md Networking section added (5 rules, 48 lines total)", syncKey: "part-20-instructions" },
+      { text: "CIDRs documented in AGENT-INSTRUCTIONS.md", syncKey: "part-20-cidrs-documented" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Private subnets are architectural security: your database cannot be reached from the internet regardless of security group configuration, because there is no route from the internet gateway to the private subnet.
+2. VPC endpoints for S3 and DynamoDB are free and save $100+/month in NAT data processing charges, yet agents never create them unprompted because they are an optimization, not a requirement.
+3. Document your CIDR blocks in AGENT-INSTRUCTIONS.md before agents reference them, because agents pull CIDR ranges from training data and will generate conflicting address spaces across modules.
+4. Everything from Phase 7 onward (EC2, ECS, RDS, Lambda, ALB) lives inside this VPC, making it the single most referenced Terraform module in your entire infrastructure.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
