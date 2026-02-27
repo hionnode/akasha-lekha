@@ -1,0 +1,415 @@
+---
+title: "The Debugging Decision Tree: When to Reach for an Agent"
+description: "Building your instinct for when agents help vs hurt in debugging. Seven debugging phases, the subtle memory leak worked example, and the judgment that can't be automated."
+excerpt: "Building your instinct for when to reach for an agent and when to rely on your own judgment. Seven debugging phases and a worked example."
+date: "2026-09-01"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "incident-response", "ai-agents", "observability"]
+series: "aws-for-startups"
+seriesPart: 59
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your ECS service restarts every 6 hours. The agent looks at the OOMKilled exit code and tells you to increase the memory limit. You double it. The service restarts every 12 hours instead. The agent tells you to double it again. You now have a container with 4GB of memory that restarts once a day, and nobody has asked the question that matters: why is memory growing linearly in the first place?
+
+**Time:** About 40 minutes of reading. No hands-on implementation. This is a thinking post.
+
+**Outcome:** A seven-phase debugging framework that maps each phase to "agent excels" or "human essential." A worked example of a subtle memory leak that the agent correctly detects but incorrectly diagnoses. And a sharper instinct for when your agent is helping you debug versus when it is helping you avoid debugging.
+
+---
+
+## Why This Matters
+
+In [Part 59](/blog/aws-for-startups/59-debugging-production), you built the observability MCP server and a structured debugging workflow. The agent queries traces, pulls deployment history, and correlates errors with deploys. The workflow works. But having the right tools does not mean knowing when to use them.
+
+The debugging decision tree answers a question the tooling post deliberately skipped: when should you hand a problem to the agent, and when should you solve it yourself?
+
+This matters because agent-assisted debugging has a failure mode that is worse than slow debugging. Slow debugging gets you to the right answer eventually. Agent-assisted debugging with poor judgment gets you to a confident wrong answer quickly. You "fix" the problem, the alert clears, and the real issue resurfaces three weeks later in a harder-to-diagnose form.
+
+The memory leak example above is real. The agent's suggestion (increase memory) is not wrong, exactly. It addresses the symptom. But it masks a root cause that compounds over time. The difference between "the alert stopped firing" and "the problem is solved" is the difference between a junior engineer and a senior one. Your agent is the junior engineer.
+
+---
+
+## What We're Building
+
+- A seven-phase debugging framework: Detection, Triage, Investigation, Hypothesis, Decision, Execution, Post-Mortem
+- A mapping of each phase to agent capability (excels, assists, or stay away)
+- A worked example: the subtle memory leak from alert to post-mortem
+- Guidelines for building debugging instinct that agents cannot replace
+
+---
+
+## The Seven Debugging Phases
+
+Every production issue, regardless of complexity, passes through these seven phases. The phases are sequential. Skipping one creates the conditions for the wrong fix.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Phase", "Agent Role", "Human Role"]} />
+  <ComparisonRow feature="1. Detection" Phase="Alert fires, metrics breach threshold" Agent_Role="Excels (monitoring, alerting)" Human_Role="Acknowledge, assess severity" />
+  <ComparisonRow feature="2. Triage" Phase="Severity, scope, urgency assessment" Agent_Role="Assists (data gathering)" Human_Role="Essential (judgment call) (Best)" />
+  <ComparisonRow feature="3. Investigation" Phase="Collect data, query traces, read logs" Agent_Role="Excels (MCP tools, correlation) (Best)" Human_Role="Direct the investigation" />
+  <ComparisonRow feature="4. Hypothesis" Phase="Form theory about root cause" Agent_Role="Assists (pattern matching)" Human_Role="Essential (context, experience) (Best)" />
+  <ComparisonRow feature="5. Decision" Phase="Choose fix: rollback, hotfix, wait" Agent_Role="Stay away" Human_Role="Essential (risk assessment) (Best)" />
+  <ComparisonRow feature="6. Execution" Phase="Implement the fix" Agent_Role="Excels (code changes, deploys) (Best)" Human_Role="Review before apply" />
+  <ComparisonRow feature="7. Post-Mortem" Phase="Document, extract lessons, update rules" Agent_Role="Excels (drafting, formatting) (Best)" Human_Role="Validate conclusions" />
+</ComparisonTable>
+
+The pattern is clear: agents excel at data processing phases (1, 3, 6, 7) and humans are essential at judgment phases (2, 4, 5). Phase 3 is the inflection point where the observability MCP server from [Part 59](/blog/aws-for-startups/59-debugging-production) delivers the most value.
+
+### Phase 1: Detection
+
+Agent role: **Excels.**
+
+Detection is pure pattern matching. A metric crosses a threshold. An error rate exceeds a baseline. A health check fails. This is exactly what monitoring systems do, and agents can process alert context faster than you can read the PagerDuty notification.
+
+What the agent does well: parse the alert payload, identify the affected service, pull the current value vs threshold, and present a one-paragraph summary of what happened.
+
+What the agent cannot do: decide whether this is a real incident or a false positive triggered by a traffic spike during a flash sale you forgot to account for.
+
+### Phase 2: Triage
+
+Agent role: **Assists only. Human essential.**
+
+Triage answers three questions: How many users are affected? Is the impact growing? How urgent is the fix?
+
+The agent can tell you the error count and affected endpoints. It cannot tell you that the affected endpoint is the checkout flow, that you have a demo with an investor tomorrow morning, and that a 30-minute outage right now is catastrophically worse than a 30-minute outage next Tuesday.
+
+Triage is where business context meets technical data. The agent has the technical data. You have the business context.
+
+### Phase 3: Investigation
+
+Agent role: **Excels.**
+
+This is where the observability MCP server pays for itself. Investigation is data gathering at scale: query 500 traces, filter by duration, find the common pattern, check deployment history, correlate timestamps.
+
+The agent does in 30 seconds what takes you 15 minutes of tab-switching. Let it.
+
+But direct the investigation. Do not ask "what's wrong?" Ask "show me all traces for order-service with duration > 2s between 14:00 and 14:40 UTC." Specific queries get useful answers. Open-ended questions get hallucinated hypotheses.
+
+### Phase 4: Hypothesis
+
+Agent role: **Assists with caution. Human essential.**
+
+This is the phase where agents are most dangerous. The agent has seen the data from Phase 3. It will form a hypothesis. That hypothesis will sound confident. It will often be wrong.
+
+Why? Because hypotheses require connecting symptoms to root causes, and root causes live in context the agent does not have: the architectural decision you made six months ago, the known issue with the Redis library you chose, the fact that this same symptom appeared last quarter and was caused by something completely different.
+
+Use the agent's hypothesis as one input. Do not treat it as the answer.
+
+### Phase 5: Decision
+
+Agent role: **Stay away.**
+
+Decision is pure judgment. Rollback or hotfix? Wait for more data or act now? Wake up the on-call engineer or handle it yourself?
+
+Every decision involves risk, trade-offs, and consequences that extend beyond the technical. Rolling back loses a feature your largest customer asked for yesterday. Hotfixing under pressure risks introducing a second bug. Waiting might mean the incident escalates. The agent does not know any of this.
+
+If you ask the agent "should I rollback?", it will give you an answer. That answer is based on pattern matching against its training data, not on your specific situation. This is where the "trust is a number, not a feeling" principle applies most strongly: the agent's judgment is not calibrated for your context.
+
+### Phase 6: Execution
+
+Agent role: **Excels.**
+
+Once you have decided what to do, the agent is excellent at doing it. Write the hotfix code. Update the Terraform config. Draft the rollback command. Generate the test case for the regression.
+
+This is familiar territory: the Design -> Generate -> Verify -> Explain loop from the rest of the series. You designed the fix (Phase 5). The agent generates it (Phase 6). You verify it before applying.
+
+### Phase 7: Post-Mortem
+
+Agent role: **Excels.**
+
+The agent writes a clean, structured post-mortem document from your incident notes. It formats the timeline, extracts action items, and identifies what caught the issue vs what missed it.
+
+Your job: validate that the conclusions are correct and the action items are actionable. The agent will write "improve monitoring" as an action item. You change it to "add CloudWatch alarm for Redis connection pool exhaustion at > 90% capacity."
+
+---
+
+## Worked Example: The Subtle Memory Leak
+
+This is the full debugging walkthrough, using the seven phases. The scenario: your ECS order-service container gets OOMKilled every 6 hours. Let's watch where the agent helps and where it hurts.
+
+### Phase 1: Detection
+
+CloudWatch alarm fires: `order-service-memory > 90%`. ECS task exits with code 137 (OOMKilled). Container restarts automatically.
+
+The agent reads the alert:
+
+> "ECS task order-service exited with OOMKilled (code 137). Memory usage reached 93% of the 512MB limit. Container restarted 4 times in the last 24 hours, approximately every 6 hours."
+
+Good summary. Accurate. Move to Phase 2.
+
+### Phase 2: Triage
+
+The agent suggests severity: "High. Service is restarting, causing brief downtime during restart."
+
+You add context: the service restarts in under 10 seconds, orders in flight get retried by the client, and no data is lost because of the idempotency patterns from [Part 58](/blog/aws-for-startups/58-event-driven-patterns). This is not a customer-facing outage. It is a degradation that will get worse over time.
+
+**Triage decision (human):** Medium severity. Not urgent enough for a 2 AM fix. Needs investigation before the next business day.
+
+### Phase 3: Investigation
+
+You direct the agent to gather data using the observability MCP server:
+
+> "Query memory metrics for order-service over the last 48 hours. Show me the growth pattern. Also pull the last 5 deployments for this service."
+
+The agent returns:
+
+```text
+Memory pattern (48 hours):
+- Hour 0:  142MB (after restart)
+- Hour 1:  158MB
+- Hour 2:  174MB
+- Hour 3:  190MB
+- Hour 4:  206MB
+- Hour 5:  222MB
+- Hour 6:  OOMKilled at 468MB
+
+Growth rate: ~16MB/hour (linear)
+
+Recent deployments:
+1. 3 days ago: PR #228 "feat: add PDF invoice generation"
+   - agent-assisted, reviewed by @dev1
+2. 5 days ago: PR #225 "fix: order status caching"
+   - human
+3. 8 days ago: PR #221 "chore: upgrade dependencies"
+   - human
+```
+
+The linear growth pattern is the key signal. Healthy services have stable memory. Linear growth means something is accumulating.
+
+### Phase 4: Hypothesis
+
+Here is where the agent gets it wrong.
+
+The agent's hypothesis:
+
+> "The order query is loading full order objects into memory without pagination. As orders accumulate, the query returns more data, consuming more memory. **Recommended fix: add pagination to the order listing query and implement cursor-based fetching.**"
+
+This sounds plausible. It is wrong. Here is why:
+
+The memory grows at a constant rate (16MB/hour) regardless of order volume. If the problem were a growing query result set, memory would increase with the number of orders, not linearly with time. A startup processing 10 orders per hour and one processing 1,000 orders per hour would have different growth rates. But the growth rate is constant.
+
+Your hypothesis (human, using context):
+
+PR #228 added PDF invoice generation. PDFs are generated using a library that buffers the entire document in memory. You suspect the library is not releasing buffers after generation. The constant growth rate matches the constant order processing rate.
+
+### Phase 5: Decision
+
+Options:
+
+| Option | Pros | Cons |
+|--------|------|------|
+| Increase memory to 2GB | Buys time (26 hours between restarts) | Doubles cost, masks root cause |
+| Rollback PR #228 | Removes the leak source | Lose invoice feature |
+| Fix the leak in the PDF library usage | Permanent fix | Takes 2-4 hours to write and test |
+| Add explicit cleanup + increase to 1GB | Partial fix now, full fix later | Two changes at once |
+
+**Decision (human):** Increase memory to 1GB as a stopgap (buys 13 hours between restarts instead of 6). Then fix the PDF buffer leak during business hours. The invoice feature is needed for a customer demo on Thursday.
+
+The agent would have chosen "add pagination" because that is the fix for the hypothesis it formed. That fix would have done nothing because the problem is not the query.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents pattern-match symptoms to the most common cause in their training data. "High memory + OOMKilled" maps to "query loading too much data" because that is the most frequent root cause in Stack Overflow answers and GitHub issues. The agent does not reason from the growth pattern (linear vs exponential), the timeline (started after PR #228), or the architecture (PDF generation buffers). It retrieves the most likely answer, not the correct one. When the agent's hypothesis does not explain the observed data pattern, discard it.
+
+</Alert>
+
+### Phase 6: Execution
+
+Now the agent is useful again. You ask it to:
+
+1. Generate a Terraform change to increase the ECS task memory from 512MB to 1024MB
+2. Write a fix for the PDF generation code that explicitly disposes of buffers
+
+```typescript title="src/services/invoice/pdf-generator.ts"
+import PDFDocument from 'pdfkit';
+import { PassThrough } from 'stream';
+
+export async function generateInvoice(order: Order): Promise<Buffer> {
+  const doc = new PDFDocument();
+  const stream = new PassThrough();
+  const chunks: Buffer[] = [];
+
+  return new Promise((resolve, reject) => {
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('end', () => {
+      const result = Buffer.concat(chunks);
+      // Explicitly clear the chunks array to release references
+      chunks.length = 0;
+      resolve(result);
+    });
+    stream.on('error', reject);
+
+    doc.pipe(stream);
+    renderInvoiceContent(doc, order);
+    doc.end();
+  });
+}
+```
+
+The agent generates the code. You verify that it includes the explicit buffer cleanup (`chunks.length = 0`) and that the stream is properly ended. The fix is deployed during business hours.
+
+### Phase 7: Post-Mortem
+
+The agent drafts the post-mortem. You edit the conclusions.
+
+```markdown title="post-mortems/2026-08-24-order-service-oom.md"
+## Incident: order-service OOMKilled (recurring)
+
+### Timeline
+- 2026-08-21 08:00: PR #228 deployed (PDF invoice generation)
+- 2026-08-21 14:00: First OOMKill (not noticed, auto-restart)
+- 2026-08-24 14:32: Alert after 4th restart in 24 hours
+- 2026-08-24 14:45: Triage complete. Medium severity.
+- 2026-08-24 15:30: Root cause identified (PDF buffer not released)
+- 2026-08-24 16:00: Stopgap deployed (memory increased to 1GB)
+- 2026-08-25 10:00: Fix deployed (explicit buffer cleanup)
+- 2026-08-25 16:00: Verified. Memory stable at 155MB after 6 hours.
+
+### Root Cause
+PDFKit buffers in generateInvoice() were not explicitly released.
+Node.js garbage collector did not reclaim them promptly because
+references were held in closure scope. Memory grew at ~16MB/hour
+(proportional to invoice generation rate).
+
+### What Caught It
+- CloudWatch alarm on memory > 90%
+- Agent correctly identified OOMKill pattern
+
+### What Missed It
+- Agent incorrectly attributed to query pagination
+- No memory profiling in pre-deploy testing
+- OOMKill on first occurrence (3 days earlier) was not investigated
+
+### Action Items
+1. Add memory trend monitoring (alert if memory growth > 5MB/hour sustained)
+2. Add to AGENT-INSTRUCTIONS.md: "For OOMKill issues, check memory
+   growth pattern (linear vs exponential) before suggesting query optimization"
+3. Add memory profiling to load test suite (Part 44 k6 tests)
+4. Review all PDF/file generation code for buffer cleanup
+```
+
+Notice action item 2: the post-mortem feeds back into AGENT-INSTRUCTIONS.md. Every production incident makes the instructions file better. The agent that misdiagnosed this leak will not make the same mistake twice, because the instructions now tell it to check the growth pattern first.
+
+---
+
+## Building Your Debugging Instinct
+
+Debugging instinct is the ability to look at a symptom and immediately narrow the hypothesis space. Experienced operators do this unconsciously. They see "latency spike at 14:32" and their first thought is "what deployed at 14:00?" not "the database needs an index."
+
+This instinct cannot be automated because it is built from experience with your specific system. The agent has general experience across millions of systems. You have specific experience with yours. Here is how to build that instinct deliberately.
+
+### Pattern: Symptom Shape Matters
+
+The shape of a metric tells you more than its value.
+
+| Metric Shape | Likely Cause | Agent Mistake |
+|-------------|--------------|----------------|
+| Step function (sudden jump, stable at new level) | Deploy, config change | Suggests gradual fix |
+| Linear growth | Resource leak | Suggests scaling up |
+| Exponential growth | Cascading failure, retry storm | Suggests single-point fix |
+| Periodic spikes | Cron job, batch process | Suggests always-on fix |
+| Random spikes | External dependency, traffic burst | Suggests internal fix |
+
+When the agent suggests a fix, check whether the fix matches the metric shape. A linear growth pattern requires a leak fix, not a scaling fix. A step function requires identifying what changed, not optimizing what was there before.
+
+### Pattern: Deployment Context Is Everything
+
+The single most useful debugging question is: "What changed?" Not "what is the error?" The error tells you the symptom. The change tells you the cause.
+
+Your deployment history is a changelog of hypotheses. The observability MCP server from [Part 59](/blog/aws-for-startups/59-debugging-production) makes this queryable. Use it first. Before reading logs, before looking at traces, before forming any hypothesis. Check what changed.
+
+### Pattern: The Agent's Confidence Is Not Calibrated
+
+The agent presents its first hypothesis with the same confidence whether it is 95% likely or 15% likely. There is no uncertainty signal. The hypothesis "the database needs an index" sounds exactly as confident as "the PDF library has a memory leak," even though one is a generic pattern match and the other requires specific system knowledge.
+
+Your calibration heuristic: if the agent's hypothesis is generic (could apply to any system), treat it with low confidence. If it references something specific to your system (a particular library, a recent deploy, a known configuration), treat it with higher confidence.
+
+### Pattern: Recovery vs Root Cause
+
+Agents conflate recovery (making the alert stop) with resolution (fixing the underlying problem). Increasing memory from 512MB to 2GB is recovery. Fixing the PDF buffer leak is resolution.
+
+Always ask yourself: "If I apply this fix and then revert the change that caused the issue, would the fix still be necessary?" If the answer is no, the fix is recovery, not resolution. Recovery buys time. Resolution solves the problem.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No structured debugging process. You grep logs, try random fixes, and eventually stumble on the answer after wasting 3 hours. Each incident is debugged ad hoc with no repeatable process. |
+| ✅ **Right** | Seven-phase debugging workflow with clear agent/human responsibilities per phase. Agents handle data gathering (Phases 1, 3, 6, 7). Humans handle judgment (Phases 2, 4, 5). Post-mortem action items feed back into AGENT-INSTRUCTIONS.md. |
+| ❌ **Over** | Fully automated incident response that removes human judgment. Auto-rollback triggers on every anomaly, rolling back three good deploys in a night because a traffic spike resembled an error pattern. No human reviews the agent's diagnosis before the "fix" is applied. |
+| 🤖 **Agent Trap** | Agent identifies the symptom correctly (high memory, OOMKilled) but misattributes the root cause because it lacks deployment context and architectural knowledge. It suggests the most common fix from training data (query pagination, increase memory) instead of reasoning from the observed growth pattern. The post-mortem catches this and adds the learning to AGENT-INSTRUCTIONS.md, but only if a human noticed the misattribution. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 60: OpenTelemetry Mastery**, we go deeper into the instrumentation layer. Custom metrics, advanced span attributes, baggage propagation, and the trace-to-metric pipeline that turns individual request traces into aggregate dashboards. The debugging workflow you learned here becomes significantly more powerful when your traces carry richer context.
+
+:::note
+**Coming in Part 63:** The incident response post takes this debugging decision tree and wraps it in operational processes: runbooks, escalation paths, communication templates, and post-mortem cadences. The seven phases become your team's standard operating procedure.
+:::
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Debugging Framework",
+    tasks: [
+      { text: "Seven debugging phases documented and understood (Detection through Post-Mortem)", syncKey: "part-59b-seven-phases" },
+      { text: "Agent role mapped for each phase (excels / assists / stay away)", syncKey: "part-59b-agent-roles" },
+      { text: "Metric shape reference saved (step function, linear, exponential, periodic, random)", syncKey: "part-59b-metric-shapes" }
+    ]
+  },
+  {
+    category: "Debugging Instinct",
+    tasks: [
+      { text: "Understand the difference between recovery and resolution", syncKey: "part-59b-recovery-vs-resolution" },
+      { text: "Know to check deployment history before forming hypotheses", syncKey: "part-59b-deploy-first" },
+      { text: "Recognize when agent confidence is not calibrated (generic vs specific hypotheses)", syncKey: "part-59b-confidence-calibration" }
+    ]
+  },
+  {
+    category: "Worked Example",
+    tasks: [
+      { text: "Can identify why the agent's pagination hypothesis was wrong (linear growth vs data volume)", syncKey: "part-59b-wrong-hypothesis" },
+      { text: "Post-mortem template includes 'What Caught It' and 'What Missed It' sections", syncKey: "part-59b-postmortem-template" },
+      { text: "Post-mortem action items feed back into AGENT-INSTRUCTIONS.md", syncKey: "part-59b-feedback-loop" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "Agent prompts for debugging explicitly separate data gathering from recommendations", syncKey: "part-59b-prompt-separation" },
+      { text: "Agent-generated hypotheses validated against observed metric patterns before acting", syncKey: "part-59b-hypothesis-validation" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Agents excel at data phases (detection, investigation, execution, post-mortem) and humans are essential at judgment phases (triage, hypothesis, decision): structure your debugging workflow around this split.
+2. The subtle memory leak example shows the agent's core failure mode: pattern-matching symptoms to common causes from training data instead of reasoning from the observed data pattern and deployment context.
+3. Metric shape (linear, exponential, step function, periodic) tells you the category of root cause before you read a single log line, and agents rarely use this signal.
+4. Recovery (making the alert stop) is not resolution (fixing the underlying problem): always ask whether the fix would be necessary if you reverted the change that caused the issue.
+5. Every production incident should produce at least one AGENT-INSTRUCTIONS.md update, creating a feedback loop where the agent's mistakes make the instructions file better over time.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

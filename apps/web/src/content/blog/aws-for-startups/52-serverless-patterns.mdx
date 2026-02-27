@@ -1,0 +1,710 @@
+---
+title: "Serverless Patterns: Beyond Request-Response"
+description: "Common serverless patterns: fan-out with SNS, step functions for workflows, DLQ error handling, and the architectural patterns that make serverless production-ready."
+excerpt: "Beyond request-response. Serverless patterns: fan-out, step functions, DLQ handling. The architectural patterns that make Lambda production-ready."
+date: "2026-07-26"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "lambda", "serverless"]
+series: "aws-for-startups"
+seriesPart: 52
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+A user uploads a profile image. Your Lambda function resizes it, stores the thumbnail in S3, updates the database record, sends a notification email, and logs the event for analytics. One function, five side effects, one timeout away from leaving the database updated but the email unsent. The user sees "upload complete" while their profile picture is a broken link and the notification never arrives.
+
+**Time:** About 55 minutes.
+
+**Outcome:** Four serverless patterns that make Lambda production-ready: fan-out for parallel processing, Step Functions for sequential workflows, DLQ patterns for systematic error handling, and idempotent handlers that survive Lambda's built-in retry behavior.
+
+---
+
+## Why This Matters
+
+Lambda functions that respond to HTTP requests work like any other API handler. The patterns from [Part 23](/blog/aws-for-startups/23-api-design-rest) apply directly. But Lambda's real power is event-driven: a file lands in S3, a message arrives in SQS, a schedule triggers, and your function runs automatically.
+
+Event-driven Lambda introduces three problems that request-response does not have.
+
+First, **partial failures.** When one function handles five tasks and fails on the third, the first two completed but the last two did not. Rolling back the first two is often impossible (you already sent the email). Splitting tasks into separate functions that each handle one thing is the solution.
+
+Second, **retries.** Lambda retries failed asynchronous invocations twice. If your function is not idempotent, a retry creates a duplicate: two emails sent, two database rows created, two charges processed. The Lambda documentation mentions idempotency. It does not explain how to implement it.
+
+Third, **invisible failures.** Without a DLQ, failed events disappear after three attempts. Your function threw an exception on a malformed event. Lambda retried twice. Both retries also failed. The event is gone. You have no record of it, no way to reprocess it, and no alert that anything went wrong.
+
+The patterns in this post solve all three problems.
+
+---
+
+## What We're Building
+
+- Fan-out pattern with SNS triggering multiple Lambda functions
+- Step Functions workflow for sequential, dependent operations
+- DLQ patterns for capturing and reprocessing failed events
+- Event filtering to process only relevant events
+- Idempotent Lambda handlers using DynamoDB
+
+---
+
+## Fan-Out Pattern
+
+### The Problem
+
+One event needs to trigger multiple independent actions. A user signs up, and you need to:
+- Create the user record in the database
+- Send a welcome email
+- Notify the analytics service
+- Update the CRM
+
+If one Lambda function does all four, a failure in the email service blocks analytics and CRM updates. If the function times out after the database write but before the email, the user exists but never gets a welcome email.
+
+### The Solution: SNS Fan-Out
+
+Publish one message to an SNS topic. Multiple Lambda functions subscribe to the topic. Each function handles one action independently.
+
+```
+User signs up
+      │
+      ▼
+┌─────────────┐
+│  SNS Topic  │
+│  user.signup│
+└─────┬───────┘
+      │
+      ├──────────────┬──────────────┬──────────────┐
+      ▼              ▼              ▼              ▼
+┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│ Create   │  │ Welcome  │  │ Analytics│  │ CRM      │
+│ User DB  │  │ Email    │  │ Event    │  │ Update   │
+└──────────┘  └──────────┘  └──────────┘  └──────────┘
+```
+
+Each function succeeds or fails independently. The email function failing does not prevent the database write. Each function has its own DLQ. You can reprocess failed emails without touching the database function.
+
+### Terraform Implementation
+
+```hcl title="modules/fan-out/main.tf"
+resource "aws_sns_topic" "this" {
+  name = "${var.project}-${var.environment}-${var.topic_name}"
+
+  tags = var.common_tags
+}
+
+resource "aws_sns_topic_subscription" "lambda" {
+  for_each = var.subscribers
+
+  topic_arn = aws_sns_topic.this.arn
+  protocol  = "lambda"
+  endpoint  = each.value.function_arn
+
+  filter_policy = each.value.filter_policy != null ? jsonencode(each.value.filter_policy) : null
+}
+
+resource "aws_lambda_permission" "sns" {
+  for_each = var.subscribers
+
+  statement_id  = "AllowSNS-${each.key}"
+  action        = "lambda:InvokeFunction"
+  function_name = each.value.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.this.arn
+}
+```
+
+```hcl title="environments/dev/fan-out.tf"
+module "signup_fanout" {
+  source = "../../modules/fan-out"
+
+  project     = "shipfast"
+  environment = "dev"
+  topic_name  = "user-signup"
+
+  subscribers = {
+    create_user = {
+      function_arn  = module.create_user_function.arn
+      function_name = module.create_user_function.function_name
+      filter_policy = null
+    }
+    welcome_email = {
+      function_arn  = module.welcome_email_function.arn
+      function_name = module.welcome_email_function.function_name
+      filter_policy = null
+    }
+    analytics = {
+      function_arn  = module.analytics_function.arn
+      function_name = module.analytics_function.function_name
+      filter_policy = null
+    }
+  }
+
+  common_tags = var.common_tags
+}
+```
+
+### Publishing to SNS
+
+From your API handler (the one that receives the signup request):
+
+```typescript title="lambda/functions/signup-api/index.ts"
+import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
+
+const sns = new SNSClient({});
+const TOPIC_ARN = process.env.SIGNUP_TOPIC_ARN!;
+
+export async function handler(event: APIGatewayProxyEventV2) {
+  const body = JSON.parse(event.body || "{}");
+
+  // Publish to SNS. All subscribers handle the rest.
+  await sns.send(new PublishCommand({
+    TopicArn: TOPIC_ARN,
+    Message: JSON.stringify({
+      user_id: body.user_id,
+      email: body.email,
+      name: body.name,
+      signed_up_at: new Date().toISOString(),
+    }),
+    MessageAttributes: {
+      event_type: {
+        DataType: "String",
+        StringValue: "user.signup",
+      },
+    },
+  }));
+
+  return {
+    statusCode: 202,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "accepted" }),
+  };
+}
+```
+
+The API returns `202 Accepted` immediately. It does not wait for the email to send or the analytics to process. The user gets a fast response. The downstream work happens asynchronously.
+
+---
+
+## Step Functions
+
+### When Fan-Out Is Not Enough
+
+Fan-out works for independent actions. But some workflows have dependencies: step B depends on step A's output, step C runs only if step B succeeds, and step D is the cleanup that runs regardless.
+
+Example: processing an uploaded document.
+
+1. Extract text from PDF (Lambda)
+2. Run sentiment analysis on extracted text (Lambda, depends on step 1)
+3. Store results in database (Lambda, depends on step 2)
+4. Notify user of completion (Lambda, runs on success)
+5. Notify user of failure (Lambda, runs on failure)
+
+Orchestrating this with SNS and SQS is possible but painful. You end up building a state machine with Lambda functions, DynamoDB state tracking, and custom retry logic. Step Functions does all of this for you.
+
+### Step Functions Definition
+
+```json title="step-functions/document-processor.asl.json"
+{
+  "Comment": "Document processing workflow",
+  "StartAt": "ExtractText",
+  "States": {
+    "ExtractText": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ExtractTextFunctionArn}",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.extractResult",
+      "Next": "AnalyzeSentiment",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "AnalyzeSentiment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${AnalyzeSentimentFunctionArn}",
+        "Payload": {
+          "text.$": "$.extractResult.Payload.text",
+          "document_id.$": "$.document_id"
+        }
+      },
+      "ResultPath": "$.analysisResult",
+      "Next": "StoreResults",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "StoreResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${StoreResultsFunctionArn}",
+        "Payload": {
+          "document_id.$": "$.document_id",
+          "sentiment.$": "$.analysisResult.Payload.sentiment",
+          "score.$": "$.analysisResult.Payload.score"
+        }
+      },
+      "Next": "NotifySuccess",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NotifyFunctionArn}",
+        "Payload": {
+          "document_id.$": "$.document_id",
+          "status": "completed",
+          "message": "Document processing complete"
+        }
+      },
+      "End": true
+    },
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NotifyFunctionArn}",
+        "Payload": {
+          "document_id.$": "$.document_id",
+          "status": "failed",
+          "error.$": "$.error"
+        }
+      },
+      "End": true
+    }
+  }
+}
+```
+
+Key features:
+
+- **Retry with backoff.** Transient failures (Lambda throttling, service exceptions) retry automatically. You define the retry policy per step, not in your function code.
+- **Catch blocks.** Each step can catch specific errors and route to a failure handler. No nested try/catch in your function code.
+- **Data flow.** Each step receives the previous step's output. `ResultPath` controls where each step's output is stored in the execution state. `Payload.$` passes specific fields, not the entire state.
+
+### Terraform for Step Functions
+
+```hcl title="modules/step-function/main.tf"
+resource "aws_sfn_state_machine" "this" {
+  name     = "${var.project}-${var.environment}-${var.workflow_name}"
+  role_arn = aws_iam_role.step_function.arn
+
+  definition = templatefile("${var.definition_path}", {
+    ExtractTextFunctionArn      = var.extract_function_arn
+    AnalyzeSentimentFunctionArn = var.analyze_function_arn
+    StoreResultsFunctionArn     = var.store_function_arn
+    NotifyFunctionArn           = var.notify_function_arn
+  })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.sfn.arn}:*"
+    include_execution_data = true
+    level                  = "ALL"
+  }
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_log_group" "sfn" {
+  name              = "/aws/states/${var.project}-${var.environment}-${var.workflow_name}"
+  retention_in_days = var.environment == "prod" ? 90 : 14
+
+  tags = var.common_tags
+}
+```
+
+### Step Functions Pricing
+
+Step Functions has two workflow types:
+
+| Type | Cost | Max Duration | Use Case |
+|------|------|-------------|----------|
+| Standard | $0.025 per 1,000 state transitions | 1 year | Long-running workflows, human approval steps |
+| Express | $0.000001 per request + duration | 5 minutes | High-volume, short-duration event processing |
+
+For document processing (seconds to minutes, moderate volume), Standard is correct. For high-throughput event pipelines (thousands per second, millisecond processing), Express is 10-100x cheaper.
+
+---
+
+## DLQ Patterns
+
+In [Part 48](/blog/aws-for-startups/48-lambda-fundamentals), you configured a DLQ on each Lambda function. Now we build the patterns around it.
+
+### DLQ Monitoring
+
+A DLQ with no alarm is a graveyard. Events accumulate and nobody knows.
+
+```hcl title="modules/lambda-dlq-alarm/main.tf"
+resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
+  alarm_name          = "${var.project}-${var.environment}-${var.function_name}-dlq-messages"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 0
+  alarm_description   = "Messages in DLQ for ${var.function_name}"
+
+  dimensions = {
+    QueueName = "${var.project}-${var.environment}-${var.function_name}-dlq"
+  }
+
+  alarm_actions = [var.sns_alert_topic_arn]
+
+  tags = var.common_tags
+}
+```
+
+Threshold of 0 means any message in the DLQ triggers an alarm. This is intentional. In a healthy system, the DLQ should be empty. One message means something failed three times. You want to know immediately, not after 100 messages accumulate.
+
+### DLQ Reprocessing
+
+Once you fix the bug, replay failed events from the DLQ:
+
+```typescript title="scripts/replay-dlq.ts"
+import {
+  SQSClient,
+  ReceiveMessageCommand,
+  DeleteMessageCommand,
+} from "@aws-sdk/client-sqs";
+import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
+
+const sqs = new SQSClient({});
+const lambda = new LambdaClient({});
+
+async function replayDLQ(queueUrl: string, functionName: string) {
+  let processed = 0;
+  let failed = 0;
+
+  while (true) {
+    const response = await sqs.send(new ReceiveMessageCommand({
+      QueueUrl: queueUrl,
+      MaxNumberOfMessages: 10,
+      WaitTimeSeconds: 5,
+    }));
+
+    if (!response.Messages || response.Messages.length === 0) {
+      break;
+    }
+
+    for (const message of response.Messages) {
+      try {
+        // Invoke the original function with the failed event
+        await lambda.send(new InvokeCommand({
+          FunctionName: functionName,
+          Payload: Buffer.from(message.Body || "{}"),
+        }));
+
+        // Remove from DLQ on success
+        await sqs.send(new DeleteMessageCommand({
+          QueueUrl: queueUrl,
+          ReceiptHandle: message.ReceiptHandle!,
+        }));
+
+        processed++;
+      } catch (error) {
+        console.error(`Failed to replay message ${message.MessageId}:`, error);
+        failed++;
+      }
+    }
+  }
+
+  console.log(`Replay complete: ${processed} processed, ${failed} failed`);
+}
+```
+
+```bash terminal
+bun run scripts/replay-dlq.ts \
+  --queue-url https://sqs.us-east-1.amazonaws.com/123456789012/shipfast-dev-webhook-dlq \
+  --function-name shipfast-dev-webhook
+```
+
+Run this after you deploy the fix. The script reads each message from the DLQ, invokes the function, and deletes the message from the DLQ on success. Messages that fail again stay in the DLQ for the next attempt.
+
+---
+
+## Event Filtering
+
+Not every event needs processing. An S3 bucket might receive uploads from multiple sources, but your image resizer only cares about files in the `uploads/images/` prefix with `.jpg` or `.png` extensions.
+
+### SNS Filter Policies
+
+Filter at the subscription level so unwanted events never invoke your function:
+
+```hcl title="modules/fan-out/main.tf"
+resource "aws_sns_topic_subscription" "lambda" {
+  for_each = var.subscribers
+
+  topic_arn = aws_sns_topic.this.arn
+  protocol  = "lambda"
+  endpoint  = each.value.function_arn
+
+  filter_policy = each.value.filter_policy != null ? jsonencode(each.value.filter_policy) : null
+  filter_policy_scope = "MessageAttributes"
+}
+```
+
+Usage:
+
+```hcl title="environments/dev/fan-out.tf"
+subscribers = {
+  image_processor = {
+    function_arn  = module.image_processor.arn
+    function_name = module.image_processor.function_name
+    filter_policy = {
+      event_type = ["image.uploaded"]
+      file_type  = ["jpg", "png", "webp"]
+    }
+  }
+  analytics = {
+    function_arn  = module.analytics.arn
+    function_name = module.analytics.function_name
+    filter_policy = null  # Receives all events
+  }
+}
+```
+
+The image processor only fires for image upload events. Analytics receives everything. Filtering saves Lambda invocations (and cost) by preventing unnecessary function calls.
+
+### Lambda Event Source Mapping Filters
+
+For SQS and DynamoDB Streams, filter at the event source mapping:
+
+```hcl title="modules/lambda-sqs/main.tf"
+resource "aws_lambda_event_source_mapping" "sqs" {
+  event_source_arn = var.queue_arn
+  function_name    = aws_lambda_function.this.arn
+  batch_size       = var.batch_size
+
+  filter_criteria {
+    filter {
+      pattern = jsonencode({
+        body = {
+          event_type = [{ prefix = "order." }]
+        }
+      })
+    }
+  }
+}
+```
+
+This Lambda only processes SQS messages where `body.event_type` starts with `order.`. Messages that do not match are automatically removed from the queue (not sent to DLQ). Be careful with filters: a misconfigured filter silently drops events.
+
+---
+
+## Idempotency
+
+Lambda retries failed async invocations. If your function creates a database record on the first attempt, fails after the insert (during the response phase), and Lambda retries, you get a duplicate record.
+
+### The Idempotency Pattern
+
+Use a unique idempotency key (usually the event ID or a combination of fields) and check whether the event has already been processed before doing the work.
+
+```typescript title="lambda/shared/idempotency.ts"
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+} from "@aws-sdk/lib-dynamodb";
+
+const client = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const TABLE_NAME = process.env.IDEMPOTENCY_TABLE!;
+
+interface IdempotencyRecord {
+  id: string;
+  result: unknown;
+  expiresAt: number;
+}
+
+export async function withIdempotency<T>(
+  key: string,
+  ttlSeconds: number,
+  fn: () => Promise<T>
+): Promise<T> {
+  // Check if already processed
+  const existing = await client.send(new GetCommand({
+    TableName: TABLE_NAME,
+    Key: { id: key },
+  }));
+
+  if (existing.Item) {
+    const record = existing.Item as IdempotencyRecord;
+    if (record.expiresAt > Math.floor(Date.now() / 1000)) {
+      console.log(`Idempotent hit: ${key}`);
+      return record.result as T;
+    }
+  }
+
+  // Execute the function
+  const result = await fn();
+
+  // Store the result with TTL
+  await client.send(new PutCommand({
+    TableName: TABLE_NAME,
+    Item: {
+      id: key,
+      result,
+      expiresAt: Math.floor(Date.now() / 1000) + ttlSeconds,
+    },
+  }));
+
+  return result;
+}
+```
+
+### Using in a Handler
+
+```typescript title="lambda/functions/process-order/index.ts"
+import { withIdempotency } from "../../shared/idempotency";
+
+export async function handler(event: SQSEvent) {
+  for (const record of event.Records) {
+    const body = JSON.parse(record.body);
+    const idempotencyKey = `order-${body.order_id}-${record.messageId}`;
+
+    await withIdempotency(idempotencyKey, 86400, async () => {
+      // This block runs at most once per unique key
+      await createOrder(body);
+      await chargeCustomer(body.payment_info);
+      await sendConfirmation(body.email);
+      return { status: "processed" };
+    });
+  }
+}
+```
+
+The DynamoDB table for idempotency:
+
+```hcl title="modules/idempotency-table/main.tf"
+resource "aws_dynamodb_table" "idempotency" {
+  name         = "${var.project}-${var.environment}-idempotency"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "id"
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expiresAt"
+    enabled        = true
+  }
+
+  tags = var.common_tags
+}
+```
+
+`PAY_PER_REQUEST` billing is correct here. Idempotency checks are proportional to Lambda invocations. You pay per read/write, scaling automatically. TTL ensures old records are cleaned up without a cron job.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate Lambda handlers that are not idempotent. The handler processes the event, writes to the database, and returns success. When Lambda retries (because the response timed out, not because the processing failed), the handler runs again and creates a duplicate. The agent does not think about retries because it generates code for the happy path. Every Lambda handler that modifies state must be idempotent. If your handler creates a record, charges money, or sends a notification, wrap it in an idempotency check.
+
+**What catches it:** Code review checklist includes "Is this handler idempotent?" for every Lambda function that modifies state. The AGENT-INSTRUCTIONS.md Lambda section requires DLQ configuration, which prompts the question "what happens on retry?"
+
+</Alert>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | One Lambda function does five things sequentially. A timeout at step 3 leaves steps 1-2 committed and steps 4-5 skipped. No DLQ. No retry handling. No idempotency. Duplicate records appear whenever Lambda retries. |
+| ✅ **Right** | Fan-out for independent actions, Step Functions for dependent workflows, DLQ with CloudWatch alarms on every async function, idempotent handlers using DynamoDB with TTL. |
+| ❌ **Over** | Event sourcing with full CQRS, Saga pattern with compensating transactions, custom distributed tracing for every message hop, before your system processes more than 100 events per day. |
+| 🤖 **Agent Trap** | Agent generates a non-idempotent Lambda handler for order processing. Lambda retries the function after a network timeout during the response phase (the order was created, but the response did not reach Lambda). The retry creates a second order and charges the customer twice. The agent's code "works" in testing because test invocations do not trigger retries. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 53: K6 Load Testing: Serverless Under Pressure**, we put everything from Parts 48-52 under load. K6 tests against API Gateway + Lambda with cold start analysis, concurrency testing, cost-per-request calculations, and a comparison against the ECS Fargate baseline from [Part 44](/blog/aws-for-startups/44-k6-containers).
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Fan-Out",
+    tasks: [
+      { text: "SNS topic created for at least one event type", syncKey: "part-52-sns-topic" },
+      { text: "Multiple Lambda functions subscribe to the same topic", syncKey: "part-52-subscribers" },
+      { text: "Filter policies configured for selective processing", syncKey: "part-52-filters" }
+    ]
+  },
+  {
+    category: "Step Functions",
+    tasks: [
+      { text: "Step Functions state machine created with retry and catch blocks", syncKey: "part-52-step-fn" },
+      { text: "Logging enabled on the state machine", syncKey: "part-52-sfn-logs" },
+      { text: "Workflow executes successfully end-to-end", syncKey: "part-52-sfn-test" }
+    ]
+  },
+  {
+    category: "Error Handling",
+    tasks: [
+      { text: "DLQ alarm triggers when messages appear (threshold 0)", syncKey: "part-52-dlq-alarm" },
+      { text: "DLQ replay script tested and working", syncKey: "part-52-dlq-replay" },
+      { text: "Idempotency table created with TTL enabled", syncKey: "part-52-idempotency" },
+      { text: "At least one handler uses withIdempotency wrapper", syncKey: "part-52-idempotent-handler" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Lambda retries failed asynchronous invocations, so every handler that modifies state must be idempotent: use a DynamoDB table with TTL to track processed event IDs.
+2. Fan-out with SNS decouples independent actions so a failure in the email function does not block the database write, and each function gets its own DLQ for independent reprocessing.
+3. Step Functions replace custom orchestration code with declarative workflows that handle retries, error routing, and state management, so your Lambda functions stay small and single-purpose.
+4. A DLQ with no CloudWatch alarm is a graveyard: set the alarm threshold to 0 so you know the moment any event fails three times.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

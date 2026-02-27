@@ -1,0 +1,637 @@
+---
+title: "SQS: Message Queues That Don't Lose Your Data"
+description: "Deploy SQS queues with Dead Letter Queues, idempotent consumers, and proper visibility timeouts. The event-driven patterns agents consistently get wrong."
+excerpt: "Message queues that don't lose your data. SQS with DLQ, idempotency, and visibility timeouts: the patterns agents consistently get wrong."
+date: "2026-08-02"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "sqs", "serverless", "terraform"]
+series: "aws-for-startups"
+seriesPart: 54
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your user signs up, your Lambda fires off a welcome email, a profile setup job, and an analytics event. The email service is slow today: 3-second timeout. The entire signup request fails. The user sees a 500 error. They refresh, your Lambda runs again, and now they have two accounts.
+
+**Time:** About 90 minutes.
+
+**Outcome:** SQS queues with Dead Letter Queues, idempotent consumers, proper visibility timeouts, and trace context propagation across async boundaries. Plus six new rules in your AGENT-INSTRUCTIONS.md for event-driven architecture.
+
+---
+
+## Why This Matters
+
+Synchronous processing is a trap that works perfectly until it does not. When your Lambda calls three downstream services in sequence, the slowest service determines your response time, and the least reliable service determines your error rate. One slow dependency turns your 200ms API into a 5-second timeout. One flaky dependency turns your 99.9% uptime into a 99% uptime.
+
+SQS decouples the "accept the request" step from the "process the request" step. Your API receives the signup, drops a message on a queue, and returns 200 in 50ms. A separate consumer picks up the message and handles the email, the profile setup, and the analytics event. If the email service is slow, the user does not care. They already got their response.
+
+But queues introduce a new class of problems. Messages can be delivered more than once. Messages can arrive out of order. Consumers can crash mid-processing. Without Dead Letter Queues, failed messages retry forever and clog your system. Without idempotency, duplicate deliveries create duplicate data. Without proper visibility timeouts, two consumers process the same message simultaneously.
+
+These are the exact patterns agents get wrong. Every single one.
+
+---
+
+## What We're Building
+
+- An SQS Standard queue with a Dead Letter Queue
+- A Lambda consumer with idempotent message handling
+- Proper visibility timeout configuration (2x max processing time)
+- Trace context propagation through SQS message attributes
+- AGENT-INSTRUCTIONS.md rules for event-driven architecture (6 new lines)
+
+---
+
+## SQS Fundamentals
+
+SQS has two queue types: Standard and FIFO. The choice matters more than agents realize.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Standard", "FIFO"]} />
+  <ComparisonRow feature="Throughput" Standard="Unlimited (Best)" FIFO="300 msg/s (3,000 with batching)" />
+  <ComparisonRow feature="Ordering" Standard="Best-effort" FIFO="Strict ordering per group" />
+  <ComparisonRow feature="Delivery" Standard="At-least-once" FIFO="Exactly-once" />
+  <ComparisonRow feature="Cost" Standard="$0.40/million (Best)" FIFO="$0.50/million" />
+  <ComparisonRow feature="Use case" Standard="Most workloads" FIFO="Financial transactions, ordering matters" />
+</ComparisonTable>
+
+**Use Standard queues unless you have a specific reason for FIFO.** Standard queues handle unlimited throughput, cost less, and work with every AWS integration. FIFO queues add ordering guarantees and exactly-once processing, but at the cost of throughput limits and more complex configuration.
+
+The "at-least-once" delivery of Standard queues sounds scary, but it is the correct default. Your consumers should be idempotent anyway (we will get to that). Building for at-least-once delivery makes your system resilient to retries, network hiccups, and consumer crashes.
+
+### Queue Configuration
+
+Here is the Terraform for a Standard queue with sensible defaults:
+
+```hcl title="infra/modules/sqs/main.tf"
+resource "aws_sqs_queue" "main" {
+  name = "${var.project}-${var.environment}-${var.queue_name}"
+
+  # How long a message stays in the queue before being deleted
+  message_retention_seconds = 1209600  # 14 days (maximum)
+
+  # How long a consumer has to process a message before it becomes visible again
+  visibility_timeout_seconds = var.visibility_timeout  # Must be >= 2x max processing time
+
+  # Maximum message size
+  max_message_size = 262144  # 256 KB
+
+  # Long polling: wait up to 20 seconds for messages (reduces empty receives and cost)
+  receive_wait_time_seconds = 20
+
+  # Server-side encryption
+  sqs_managed_sse_enabled = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-${var.queue_name}"
+  })
+}
+```
+
+Three values matter here:
+
+**`message_retention_seconds`**: How long unprocessed messages survive. Set this to 14 days (the maximum). If your consumer is down for a week, you want those messages waiting when it comes back.
+
+**`visibility_timeout_seconds`**: How long a message is hidden from other consumers after one consumer picks it up. If the consumer does not delete the message within this window, SQS assumes it failed and makes the message visible again. This is the single most misconfigured setting in SQS.
+
+**`receive_wait_time_seconds`**: Set to 20 (the maximum) for long polling. Without long polling, consumers make empty requests every 100ms, and you pay for each one. Long polling waits up to 20 seconds for a message to arrive before returning empty. This alone can reduce your SQS costs by 90%.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents set `visibility_timeout_seconds` to 30 (the default) regardless of how long your consumer takes to process a message. If your Lambda function takes 45 seconds on a slow path, the message becomes visible again at 30 seconds, and a second consumer picks it up. Now you have two consumers processing the same message simultaneously.
+
+**The rule:** Visibility timeout must be at least 2x your maximum processing time. If your Lambda timeout is 60 seconds, set visibility timeout to 120 seconds minimum. The pipeline verification step checks this ratio in your Terraform configs.
+
+</Alert>
+
+---
+
+## Dead Letter Queues
+
+A Dead Letter Queue (DLQ) is a separate queue where messages go after failing a configurable number of times. Without a DLQ, failed messages retry indefinitely, consuming resources and hiding the fact that something is broken.
+
+```hcl title="infra/modules/sqs/main.tf"
+resource "aws_sqs_queue" "dead_letter" {
+  name = "${var.project}-${var.environment}-${var.queue_name}-dlq"
+
+  # DLQ messages should live longer  - you need time to investigate
+  message_retention_seconds = 1209600  # 14 days
+
+  sqs_managed_sse_enabled = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-${var.queue_name}-dlq"
+  })
+}
+
+resource "aws_sqs_queue" "main" {
+  name = "${var.project}-${var.environment}-${var.queue_name}"
+
+  message_retention_seconds  = 1209600
+  visibility_timeout_seconds = var.visibility_timeout
+  receive_wait_time_seconds  = 20
+  sqs_managed_sse_enabled    = true
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.dead_letter.arn
+    maxReceiveCount     = 3  # After 3 failures, move to DLQ
+  })
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-${var.queue_name}"
+  })
+}
+```
+
+**`maxReceiveCount`** controls how many times a message can be received (and fail) before moving to the DLQ. Set it to 3 for most workloads. This gives transient errors (network blip, timeout, downstream service restart) three chances to resolve before the message is considered permanently failed.
+
+### DLQ Monitoring
+
+A DLQ with messages in it means something is broken. You need an alarm:
+
+```hcl title="infra/modules/sqs/alarms.tf"
+resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
+  alarm_name          = "${var.project}-${var.environment}-${var.queue_name}-dlq-depth"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 300  # 5 minutes
+  statistic           = "Sum"
+  threshold           = 0
+  alarm_description   = "Messages in DLQ  - investigate failed processing"
+
+  dimensions = {
+    QueueName = aws_sqs_queue.dead_letter.name
+  }
+
+  alarm_actions = [var.sns_alarm_topic_arn]
+
+  tags = var.common_tags
+}
+```
+
+This alarm fires when any message lands in the DLQ. That is the right threshold: zero tolerance for failed messages in production. Every DLQ message represents a user action that did not complete.
+
+### DLQ Reprocessing
+
+Once you fix the bug, you need to reprocess DLQ messages. SQS provides a built-in redrive:
+
+```bash terminal
+aws sqs start-message-move-task \
+  --source-arn arn:aws:sqs:us-east-1:123456789012:shipfast-prod-orders-dlq \
+  --destination-arn arn:aws:sqs:us-east-1:123456789012:shipfast-prod-orders
+```
+
+This moves all messages from the DLQ back to the main queue for reprocessing. Your idempotent consumers handle the rest.
+
+---
+
+## Consumer Patterns
+
+The most common SQS consumer pattern for serverless architectures is a Lambda function triggered by SQS. AWS handles the polling, batching, and scaling for you.
+
+### Lambda Trigger
+
+```hcl title="infra/modules/sqs/lambda-trigger.tf"
+resource "aws_lambda_event_source_mapping" "sqs_trigger" {
+  event_source_arn = aws_sqs_queue.main.arn
+  function_name    = var.consumer_lambda_arn
+
+  batch_size                         = 10      # Process up to 10 messages per invocation
+  maximum_batching_window_in_seconds = 5       # Wait up to 5s to fill the batch
+  function_response_types            = ["ReportBatchItemFailures"]
+
+  scaling_config {
+    maximum_concurrency = var.max_concurrency  # Limit parallel Lambda invocations
+  }
+}
+```
+
+**`function_response_types = ["ReportBatchItemFailures"]`** is critical. Without it, if one message in a batch of 10 fails, SQS retries all 10. With it, your Lambda returns which specific messages failed, and only those get retried.
+
+**`maximum_concurrency`** limits how many Lambda instances process messages simultaneously. Without it, a sudden burst of 10,000 messages spawns 1,000 Lambda instances, which then overwhelm your downstream database with 1,000 concurrent connections. Start with 5-10 and increase based on what your downstream services can handle.
+
+### Lambda Handler with Batch Failure Reporting
+
+```typescript title="src/handlers/process-order.ts"
+import { SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
+
+export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
+  const batchItemFailures: { itemIdentifier: string }[] = [];
+
+  for (const record of event.Records) {
+    try {
+      await processMessage(record);
+    } catch (error) {
+      console.error('Failed to process message', {
+        messageId: record.messageId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      batchItemFailures.push({ itemIdentifier: record.messageId });
+    }
+  }
+
+  return { batchItemFailures };
+};
+
+async function processMessage(record: SQSRecord): Promise<void> {
+  const body = JSON.parse(record.body);
+
+  // Your processing logic here
+  console.log('Processing order', { orderId: body.orderId });
+}
+```
+
+The key pattern: iterate over records, catch errors per-record, and return the list of failed message IDs. SQS retries only the failures.
+
+---
+
+## Idempotency
+
+SQS Standard queues deliver at-least-once. That means your consumer can receive the same message twice. If your consumer creates a database record on each invocation, duplicate delivery creates duplicate records.
+
+**Every SQS consumer must be idempotent.** Processing the same message twice must produce the same result as processing it once.
+
+### Idempotency with DynamoDB
+
+The most reliable pattern uses a DynamoDB table as an idempotency store:
+
+```typescript title="src/lib/idempotency.ts"
+import { DynamoDBClient, PutItemCommand, ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+
+const dynamodb = new DynamoDBClient({});
+const IDEMPOTENCY_TABLE = process.env.IDEMPOTENCY_TABLE!;
+const TTL_HOURS = 24;
+
+export async function ensureIdempotent(messageId: string): Promise<boolean> {
+  const ttl = Math.floor(Date.now() / 1000) + TTL_HOURS * 3600;
+
+  try {
+    await dynamodb.send(new PutItemCommand({
+      TableName: IDEMPOTENCY_TABLE,
+      Item: {
+        messageId: { S: messageId },
+        processedAt: { S: new Date().toISOString() },
+        ttl: { N: ttl.toString() },
+      },
+      ConditionExpression: 'attribute_not_exists(messageId)',
+    }));
+    return true;  // First time processing this message
+  } catch (error) {
+    if (error instanceof ConditionalCheckFailedException) {
+      return false;  // Already processed  - skip
+    }
+    throw error;  // Unexpected error  - let it fail and retry
+  }
+}
+```
+
+```typescript title="src/handlers/process-order.ts"
+import { ensureIdempotent } from '../lib/idempotency';
+
+async function processMessage(record: SQSRecord): Promise<void> {
+  const isNew = await ensureIdempotent(record.messageId);
+  if (!isNew) {
+    console.log('Duplicate message, skipping', { messageId: record.messageId });
+    return;
+  }
+
+  const body = JSON.parse(record.body);
+  // Safe to process  - this is the first time
+  await createOrder(body);
+}
+```
+
+The `ConditionExpression: 'attribute_not_exists(messageId)'` makes the DynamoDB write atomic. If two Lambda instances try to process the same message simultaneously, one succeeds and the other gets `ConditionalCheckFailedException`. No race condition. No duplicates.
+
+The TTL (24 hours) automatically cleans up old entries. SQS message retention is 14 days, but duplicate deliveries almost always happen within minutes, not days.
+
+### The DynamoDB Idempotency Table
+
+```hcl title="infra/modules/sqs/idempotency.tf"
+resource "aws_dynamodb_table" "idempotency" {
+  name         = "${var.project}-${var.environment}-idempotency"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "messageId"
+
+  attribute {
+    name = "messageId"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-idempotency"
+  })
+}
+```
+
+PAY_PER_REQUEST billing means you pay nothing when the queue is quiet and scale automatically when it is busy. For an idempotency table that handles small reads and writes, this costs pennies per month.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate SQS consumers without any idempotency logic. The agent's reasoning: "SQS handles message delivery, so my function just needs to process the message." This is correct for FIFO queues with exactly-once processing, but dangerously wrong for Standard queues.
+
+**What catches it:** A custom check in the verification pipeline scans Lambda handler code for SQS event sources and flags any handler that does not reference an idempotency mechanism. Add a rule to AGENT-INSTRUCTIONS.md: "All SQS Standard queue consumers MUST implement idempotency checks."
+
+</Alert>
+
+---
+
+## Visibility Timeout Deep Dive
+
+Visibility timeout is the most misunderstood SQS setting. Here is what happens when you get it wrong:
+
+1. Consumer A picks up Message X. Visibility timeout starts (30 seconds default).
+2. Consumer A is processing Message X. It calls a slow downstream API. 35 seconds pass.
+3. Visibility timeout expires. Message X becomes visible in the queue again.
+4. Consumer B picks up Message X. Starts processing.
+5. Consumer A finishes. Deletes Message X from the queue.
+6. Consumer B finishes. Tries to delete Message X. Gets an error (already deleted).
+7. Consumer B's work is wasted. If it wrote to a database, you now have duplicate data.
+
+The fix is simple: **set visibility timeout to at least 2x your maximum processing time.** If your Lambda timeout is 60 seconds, set visibility timeout to 120 seconds.
+
+```hcl title="infra/modules/sqs/variables.tf"
+variable "visibility_timeout" {
+  description = "Visibility timeout in seconds. Must be >= 2x max processing time."
+  type        = number
+
+  validation {
+    condition     = var.visibility_timeout >= 30
+    error_message = "Visibility timeout must be at least 30 seconds."
+  }
+}
+
+variable "lambda_timeout" {
+  description = "Lambda function timeout in seconds."
+  type        = number
+  default     = 60
+}
+```
+
+```hcl title="infra/modules/sqs/main.tf"
+# Enforce the 2x rule
+locals {
+  min_visibility_timeout = var.lambda_timeout * 2
+  effective_timeout      = max(var.visibility_timeout, local.min_visibility_timeout)
+}
+
+resource "aws_sqs_queue" "main" {
+  # ...
+  visibility_timeout_seconds = local.effective_timeout
+  # ...
+}
+```
+
+By computing the minimum visibility timeout from the Lambda timeout, you make it impossible to misconfigure. Even if someone passes `visibility_timeout = 30` with a `lambda_timeout = 60`, the effective timeout is 120 seconds.
+
+---
+
+## Trace Context Propagation
+
+In [Part 29](/blog/aws-for-startups/29-backend-bun-signoz), you set up distributed tracing with SigNoz. Traces work across synchronous HTTP calls because the trace context propagates in headers. SQS breaks that chain unless you explicitly forward the context.
+
+### Sending with Trace Context
+
+```typescript title="src/lib/sqs-publisher.ts"
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { context, trace, propagation } from '@opentelemetry/api';
+
+const sqs = new SQSClient({});
+
+export async function publishToQueue(
+  queueUrl: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  // Extract current trace context
+  const carrier: Record<string, string> = {};
+  propagation.inject(context.active(), carrier);
+
+  await sqs.send(new SendMessageCommand({
+    QueueUrl: queueUrl,
+    MessageBody: JSON.stringify(payload),
+    MessageAttributes: {
+      traceparent: {
+        DataType: 'String',
+        StringValue: carrier['traceparent'] || '',
+      },
+      tracestate: {
+        DataType: 'String',
+        StringValue: carrier['tracestate'] || '',
+      },
+    },
+  }));
+}
+```
+
+### Consuming with Trace Context
+
+```typescript title="src/lib/sqs-consumer.ts"
+import { context, trace, propagation, SpanKind } from '@opentelemetry/api';
+import { SQSRecord } from 'aws-lambda';
+
+export function extractTraceContext(record: SQSRecord): void {
+  const carrier: Record<string, string> = {};
+
+  if (record.messageAttributes?.traceparent?.stringValue) {
+    carrier['traceparent'] = record.messageAttributes.traceparent.stringValue;
+  }
+  if (record.messageAttributes?.tracestate?.stringValue) {
+    carrier['tracestate'] = record.messageAttributes.tracestate.stringValue;
+  }
+
+  const extractedContext = propagation.extract(context.active(), carrier);
+  const tracer = trace.getTracer('sqs-consumer');
+
+  const span = tracer.startSpan(
+    'sqs.process',
+    { kind: SpanKind.CONSUMER },
+    extractedContext
+  );
+
+  // The span is now linked to the original trace
+  span.setAttribute('messaging.system', 'aws_sqs');
+  span.setAttribute('messaging.message_id', record.messageId);
+}
+```
+
+With this pattern, a request that starts at your API Gateway, publishes to SQS, and gets processed by a Lambda consumer shows up as a single connected trace in SigNoz. Without it, you see two disconnected traces and cannot correlate the API request with the background processing.
+
+---
+
+## Terraform Module Structure
+
+Here is the complete module layout:
+
+<FileTree>
+infra/
+  modules/
+    sqs/
+      main.tf
+      variables.tf
+      outputs.tf
+      alarms.tf
+      lambda-trigger.tf
+      idempotency.tf
+</FileTree>
+
+```hcl title="infra/modules/sqs/outputs.tf"
+output "queue_url" {
+  description = "URL of the SQS queue"
+  value       = aws_sqs_queue.main.url
+}
+
+output "queue_arn" {
+  description = "ARN of the SQS queue"
+  value       = aws_sqs_queue.main.arn
+}
+
+output "dlq_url" {
+  description = "URL of the Dead Letter Queue"
+  value       = aws_sqs_queue.dead_letter.url
+}
+
+output "dlq_arn" {
+  description = "ARN of the Dead Letter Queue"
+  value       = aws_sqs_queue.dead_letter.arn
+}
+
+output "idempotency_table_name" {
+  description = "Name of the DynamoDB idempotency table"
+  value       = aws_dynamodb_table.idempotency.name
+}
+```
+
+### IAM Permissions
+
+Your Lambda consumer needs permission to receive and delete messages from SQS, and to read/write the idempotency table:
+
+```hcl title="infra/modules/sqs/iam.tf"
+data "aws_iam_policy_document" "consumer" {
+  statement {
+    sid    = "SQSConsume"
+    effect = "Allow"
+    actions = [
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:GetQueueAttributes",
+    ]
+    resources = [aws_sqs_queue.main.arn]
+  }
+
+  statement {
+    sid    = "IdempotencyTable"
+    effect = "Allow"
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:GetItem",
+    ]
+    resources = [aws_dynamodb_table.idempotency.arn]
+  }
+}
+```
+
+Notice the specific actions: `ReceiveMessage`, `DeleteMessage`, `GetQueueAttributes` for SQS, and `PutItem`, `GetItem` for DynamoDB. Not `sqs:*`. Not `dynamodb:*`. Agents will try to use wildcards. Do not let them.
+
+---
+
+## AGENT-INSTRUCTIONS.md Addition
+
+Add these six lines to your AGENT-INSTRUCTIONS.md. These are the rules agents violate most often with event-driven architecture:
+
+```markdown title="AGENT-INSTRUCTIONS.md"
+## Event-Driven Architecture
+- All SQS consumers MUST have Dead Letter Queues
+- All message handlers MUST be idempotent
+- Visibility timeout must exceed max processing time by 2x
+- Trace context must propagate across all async boundaries
+- Event schemas must be versioned
+- Retry policies must be explicit
+```
+
+Your cumulative AGENT-INSTRUCTIONS.md is now 83 lines. These six rules prevent the most expensive event-driven bugs: lost messages, duplicate processing, invisible failures, and broken traces.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No queue. Every downstream call is synchronous. Your API response time is the sum of all downstream latencies. One slow service takes down your entire signup flow. Failed operations are lost forever. |
+| ✅ **Right** | SQS Standard queue with DLQ (maxReceiveCount: 3), idempotent consumers using DynamoDB, visibility timeout at 2x Lambda timeout, trace context propagated via message attributes, CloudWatch alarm on DLQ depth. |
+| ❌ **Over** | FIFO queues everywhere for "guaranteed ordering," exactly-once processing attempts with complex deduplication IDs, message deduplication windows tuned per-queue. You are building a trading platform's message broker for a signup flow. |
+| 🤖 **Agent Trap** | Agent creates SQS queue without a DLQ, sets visibility timeout to the 30-second default regardless of consumer processing time, and generates Lambda handlers with no idempotency logic. Its reasoning: "SQS handles retries, so the consumer just processes." The verification pipeline catches missing DLQ via Terraform plan inspection and flags Lambda handlers without idempotency references. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 55: SNS + EventBridge**, we add pub/sub and event routing on top of the queues you just built. SNS fans out a single event to multiple SQS queues simultaneously. EventBridge routes events based on content, so your order-processing queue only receives order events, not every event in the system.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Infrastructure",
+    tasks: [
+      { text: "SQS Standard queue created with 14-day retention", syncKey: "part-54-sqs-queue" },
+      { text: "Dead Letter Queue configured with maxReceiveCount of 3", syncKey: "part-54-dlq" },
+      { text: "Visibility timeout set to at least 2x Lambda timeout", syncKey: "part-54-visibility" },
+      { text: "Long polling enabled (receive_wait_time_seconds = 20)", syncKey: "part-54-long-polling" },
+      { text: "Server-side encryption enabled on both queues", syncKey: "part-54-encryption" }
+    ]
+  },
+  {
+    category: "Application",
+    tasks: [
+      { text: "Lambda consumer uses ReportBatchItemFailures", syncKey: "part-54-batch-failures" },
+      { text: "Idempotency table created in DynamoDB with TTL", syncKey: "part-54-idempotency-table" },
+      { text: "Consumer checks idempotency before processing", syncKey: "part-54-idempotency-check" },
+      { text: "Trace context propagated via SQS message attributes", syncKey: "part-54-trace-context" }
+    ]
+  },
+  {
+    category: "Monitoring",
+    tasks: [
+      { text: "CloudWatch alarm on DLQ message count > 0", syncKey: "part-54-dlq-alarm" },
+      { text: "DLQ reprocessing tested with start-message-move-task", syncKey: "part-54-dlq-redrive" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "AGENT-INSTRUCTIONS.md updated with Event-Driven Architecture section (6 lines)", syncKey: "part-54-agent-instructions" },
+      { text: "Agent-generated SQS code reviewed for DLQ, idempotency, and visibility timeout", syncKey: "part-54-agent-reviewed" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Every SQS queue MUST have a Dead Letter Queue: failed messages need somewhere to go, and silent retries hide production bugs.
+2. Every message handler MUST be idempotent: SQS Standard delivers at-least-once, not exactly-once, and duplicate processing creates duplicate data.
+3. Visibility timeout must be at least 2x your maximum processing time: agents set it to the 30-second default and create a race condition between consumers.
+4. Trace context propagation across SQS bridges your distributed traces in SigNoz, turning two disconnected spans into one connected story.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

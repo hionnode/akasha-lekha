@@ -1,0 +1,589 @@
+---
+title: "API Gateway: Python + Go Lambda Backends"
+description: "Python and Go Lambda functions behind API Gateway. Same infrastructure, different runtimes, completing the serverless language comparison."
+excerpt: "Python + Go behind API Gateway. Same routes, same throttling, different runtimes. Your serverless pipeline is language-agnostic too."
+date: "2026-07-22"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "api-gateway", "lambda", "serverless"]
+series: "aws-for-startups"
+seriesPart: 51
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+You built a Bun Lambda function in [Part 49](/blog/aws-for-startups/49-lambda-bun) and put an API Gateway in front of it in [Part 50](/blog/aws-for-startups/50-api-gateway). Your team also writes Python and Go. The data scientist wants to deploy a recommendation endpoint in Python. The systems engineer wants to deploy a high-throughput event processor in Go. Good news: one API Gateway routes to all three runtimes. Bad news: each runtime has its own packaging, dependency, and cold start characteristics.
+
+**Time:** About 50 minutes.
+
+**Outcome:** Python and Go Lambda functions deployed behind the same API Gateway from Part 50. Cold start measurements across all three runtimes. A clear understanding of when to choose Bun, Python, or Go for a given Lambda function.
+
+---
+
+## Why This Matters
+
+API Gateway does not care what language your Lambda function runs. It sends an HTTP event and expects a response. This means you can choose the best runtime per route. The image processor that uses Python's Pillow library runs in Python. The low-latency webhook handler runs in Go. The CRUD API that shares types with your frontend runs in Bun.
+
+The multi-runtime approach is practical, not theoretical. Real startups have developers with different language expertise. Forcing everyone to write Bun (or Python, or Go) wastes talent. Letting each function use the best tool means faster development, better cold starts where they matter, and happier engineers.
+
+The catch: each runtime has different packaging requirements, different cold start profiles, and different dependency management. Agents tend to apply Bun patterns to Python and Go, or vice versa. This post shows the correct patterns for each.
+
+---
+
+## What We're Building
+
+- Python Lambda function with dependency layer
+- Go Lambda function as a compiled binary
+- Both functions behind the existing API Gateway from Part 50
+- Cold start measurements for Bun vs Python vs Go
+- Terraform modules for Python and Go Lambda deployments
+
+---
+
+## Python Lambda Functions
+
+### Handler Pattern
+
+Python Lambda handlers follow a different convention than Bun. The function receives `event` and `context` as dictionaries, not typed objects.
+
+```python title="lambda/functions/recommend/handler.py"
+import json
+import logging
+import os
+from typing import Any
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    """Recommendation endpoint handler."""
+    request_id = event.get("requestContext", {}).get("requestId", "unknown")
+    http_method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
+    path = event.get("rawPath", "/")
+
+    logger.info(json.dumps({
+        "level": "info",
+        "message": "Request received",
+        "request_id": request_id,
+        "method": http_method,
+        "path": path,
+    }))
+
+    try:
+        body = json.loads(event.get("body", "{}"))
+        user_id = body.get("user_id")
+
+        if not user_id:
+            return {
+                "statusCode": 400,
+                "headers": {"content-type": "application/json"},
+                "body": json.dumps({
+                    "error": "Bad Request",
+                    "message": "user_id is required",
+                    "request_id": request_id,
+                }),
+            }
+
+        # Your recommendation logic here
+        recommendations = get_recommendations(user_id)
+
+        return {
+            "statusCode": 200,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps({
+                "user_id": user_id,
+                "recommendations": recommendations,
+                "request_id": request_id,
+            }),
+        }
+
+    except Exception as e:
+        logger.error(json.dumps({
+            "level": "error",
+            "message": "Request failed",
+            "error": str(e),
+            "request_id": request_id,
+        }))
+
+        return {
+            "statusCode": 500,
+            "headers": {"content-type": "application/json"},
+            "body": json.dumps({
+                "error": "Internal Server Error",
+                "request_id": request_id,
+            }),
+        }
+
+
+def get_recommendations(user_id: str) -> list[dict]:
+    """Return recommendations for a user.
+
+    In production, this calls your ML model or a feature store.
+    """
+    return [
+        {"item_id": "prod_001", "score": 0.95},
+        {"item_id": "prod_042", "score": 0.87},
+        {"item_id": "prod_017", "score": 0.82},
+    ]
+```
+
+Three differences from the Bun handler:
+
+1. **No type imports needed.** Python's AWS Lambda runtime provides the event as a dict. Type hints help your editor but are not required.
+2. **Logging uses the standard `logging` module.** Lambda's Python runtime integrates with CloudWatch through the standard logger. No additional packages needed.
+3. **JSON serialization is explicit.** Python's `json.dumps()` replaces JavaScript's `JSON.stringify()`. The response body must be a string, not a dict.
+
+### Dependencies with Lambda Layers
+
+Python dependencies go in a Lambda layer. This keeps your function code small and lets you share dependencies across functions.
+
+```text title="lambda/functions/recommend/requirements.txt"
+numpy==1.26.4
+scikit-learn==1.4.2
+```
+
+Build the layer:
+
+```bash terminal
+mkdir -p python-layer/python
+pip install -r lambda/functions/recommend/requirements.txt -t python-layer/python
+cd python-layer && zip -r ../python-deps-layer.zip . && cd ..
+```
+
+The layer must follow the directory structure `python/` at the root. Lambda adds `/opt/python` to the Python path, so packages installed under `python/` are importable.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents install the entire dependency tree into the function zip instead of a layer. A Python function with numpy and scikit-learn in the same zip produces a 250MB package (Lambda's limit is 250MB unzipped). The function deploys but cold starts take 5-8 seconds because Lambda unpacks 250MB on every cold start. Using a layer, the dependencies are cached separately and shared across invocations. Cold start drops to 1-2 seconds.
+
+**What catches it:** The `infra-verify-mcp` tool flags Lambda deployment packages over 10MB and suggests moving dependencies to a layer. The AGENT-INSTRUCTIONS.md bundle size rule triggers a review.
+
+</Alert>
+
+### Terraform Module for Python
+
+```hcl title="modules/lambda-python/main.tf"
+data "archive_file" "function" {
+  type        = "zip"
+  source_dir  = "${var.source_dir}/functions/${var.function_name}"
+  output_path = "${path.module}/.build/${var.function_name}.zip"
+}
+
+resource "aws_lambda_layer_version" "deps" {
+  count = var.layer_path != "" ? 1 : 0
+
+  filename            = var.layer_path
+  layer_name          = "${var.project}-${var.environment}-${var.function_name}-deps"
+  compatible_runtimes = ["python3.12"]
+  source_code_hash    = filebase64sha256(var.layer_path)
+}
+
+resource "aws_lambda_function" "this" {
+  function_name = "${var.project}-${var.environment}-${var.function_name}"
+  role          = aws_iam_role.lambda.arn
+  handler       = "handler.handler"
+  runtime       = "python3.12"
+  architectures = ["arm64"]
+  memory_size   = var.memory_size
+  timeout       = var.timeout
+
+  filename         = data.archive_file.function.output_path
+  source_code_hash = data.archive_file.function.output_base64sha256
+
+  layers = var.layer_path != "" ? [aws_lambda_layer_version.deps[0].arn] : []
+
+  environment {
+    variables = merge(var.environment_variables, {
+      ENVIRONMENT = var.environment
+    })
+  }
+
+  dead_letter_config {
+    target_arn = aws_sqs_queue.dlq.arn
+  }
+
+  tags = var.common_tags
+}
+
+resource "aws_sqs_queue" "dlq" {
+  name                      = "${var.project}-${var.environment}-${var.function_name}-dlq"
+  message_retention_seconds = 1209600
+
+  tags = var.common_tags
+}
+```
+
+Python uses the managed `python3.12` runtime. No custom bootstrap needed. ARM64 is supported and 20% cheaper.
+
+---
+
+## Go Lambda Functions
+
+### Handler Pattern
+
+Go Lambda functions compile to a single binary. No runtime, no dependency layer, no package manager at deploy time.
+
+```go title="lambda/functions/events/main.go"
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
+)
+
+var logger *slog.Logger
+
+func init() {
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+}
+
+type EventPayload struct {
+	EventType string                 `json:"event_type"`
+	Data      map[string]interface{} `json:"data"`
+	Timestamp string                 `json:"timestamp"`
+}
+
+func handler(ctx context.Context, request events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	requestID := request.RequestContext.RequestID
+
+	logger.Info("request received",
+		"request_id", requestID,
+		"method", request.RequestContext.HTTP.Method,
+		"path", request.RawPath,
+	)
+
+	var payload EventPayload
+	if err := json.Unmarshal([]byte(request.Body), &payload); err != nil {
+		return errorResponse(400, "Invalid JSON payload", requestID), nil
+	}
+
+	if payload.EventType == "" {
+		return errorResponse(400, "event_type is required", requestID), nil
+	}
+
+	// Process the event
+	if err := processEvent(ctx, payload); err != nil {
+		logger.Error("event processing failed",
+			"request_id", requestID,
+			"error", err.Error(),
+		)
+		return errorResponse(500, "Internal server error", requestID), nil
+	}
+
+	responseBody, _ := json.Marshal(map[string]string{
+		"status":     "processed",
+		"request_id": requestID,
+	})
+
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode: 200,
+		Headers:    map[string]string{"content-type": "application/json"},
+		Body:       string(responseBody),
+	}, nil
+}
+
+func errorResponse(status int, message string, requestID string) events.APIGatewayV2HTTPResponse {
+	body, _ := json.Marshal(map[string]string{
+		"error":      fmt.Sprintf("%d", status),
+		"message":    message,
+		"request_id": requestID,
+	})
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode: status,
+		Headers:    map[string]string{"content-type": "application/json"},
+		Body:       string(body),
+	}
+}
+
+func processEvent(ctx context.Context, payload EventPayload) error {
+	// Your business logic here
+	return nil
+}
+
+func main() {
+	lambda.Start(handler)
+}
+```
+
+Four things to notice:
+
+1. **`events.APIGatewayV2HTTPRequest`** matches the payload format v2.0 from API Gateway HTTP API. Use `events.APIGatewayProxyRequest` for REST API (v1).
+
+2. **`init()` function** runs once per cold start. Use it for logger setup, database connections, and SDK clients. Not for request-specific logic.
+
+3. **Errors return responses, not errors.** The handler returns `(response, nil)` even for HTTP 400 and 500 responses. Return a non-nil error only for unrecoverable failures where Lambda should retry the invocation.
+
+4. **Structured logging with `slog`.** Go 1.21+ includes `slog` in the standard library. JSON output integrates directly with CloudWatch.
+
+### Building the Binary
+
+Go compiles to a single binary. No dependencies to package separately.
+
+```bash terminal
+cd lambda/functions/events
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -o bootstrap main.go
+zip events.zip bootstrap
+```
+
+The binary must be named `bootstrap` for the `provided.al2023` runtime. `CGO_ENABLED=0` produces a static binary with no C library dependencies. `GOARCH=arm64` targets Graviton for the 20% cost savings.
+
+The resulting zip is typically 5-15MB, depending on your dependencies. Compare that to Python's 250MB layer or Bun's runtime layer. Go's cold start advantage comes from this: less to download, less to unpack, no interpreter to start.
+
+### Terraform Module for Go
+
+```hcl title="modules/lambda-go/main.tf"
+resource "aws_lambda_function" "this" {
+  function_name = "${var.project}-${var.environment}-${var.function_name}"
+  role          = aws_iam_role.lambda.arn
+  handler       = "bootstrap"
+  runtime       = "provided.al2023"
+  architectures = ["arm64"]
+  memory_size   = var.memory_size
+  timeout       = var.timeout
+
+  filename         = var.zip_path
+  source_code_hash = filebase64sha256(var.zip_path)
+
+  environment {
+    variables = merge(var.environment_variables, {
+      ENVIRONMENT = var.environment
+    })
+  }
+
+  dead_letter_config {
+    target_arn = aws_sqs_queue.dlq.arn
+  }
+
+  tags = var.common_tags
+}
+
+resource "aws_sqs_queue" "dlq" {
+  name                      = "${var.project}-${var.environment}-${var.function_name}-dlq"
+  message_retention_seconds = 1209600
+
+  tags = var.common_tags
+}
+```
+
+Go uses `provided.al2023` (same as Bun's custom runtime), but Go does not need a runtime layer. The compiled binary includes everything.
+
+---
+
+## Multi-Runtime API
+
+### Adding Python and Go Routes
+
+Your API Gateway from Part 50 already routes to Bun functions. Add Python and Go functions to the same API:
+
+```hcl title="environments/dev/api.tf"
+module "api" {
+  source = "../../modules/api-gateway"
+
+  project     = "shipfast"
+  environment = "dev"
+
+  lambda_routes = {
+    # Bun functions (from Part 50)
+    health = {
+      route_key    = "GET /health"
+      invoke_arn   = module.health_function.invoke_arn
+      function_name = module.health_function.function_name
+      throttle_rate = null
+      throttle_burst = null
+    }
+    webhook = {
+      route_key    = "POST /webhooks"
+      invoke_arn   = module.webhook_function.invoke_arn
+      function_name = module.webhook_function.function_name
+      throttle_rate = null
+      throttle_burst = null
+    }
+
+    # Python function
+    recommend = {
+      route_key    = "POST /recommend"
+      invoke_arn   = module.recommend_function.invoke_arn
+      function_name = module.recommend_function.function_name
+      throttle_rate = 100    # ML inference is expensive
+      throttle_burst = 200
+    }
+
+    # Go function
+    events = {
+      route_key    = "POST /events"
+      invoke_arn   = module.events_function.invoke_arn
+      function_name = module.events_function.function_name
+      throttle_rate = null
+      throttle_burst = null
+    }
+  }
+
+  cors_origins = ["https://dev.shipfast.app"]
+  common_tags  = var.common_tags
+}
+
+module "recommend_function" {
+  source = "../../modules/lambda-python"
+
+  project       = "shipfast"
+  environment   = "dev"
+  function_name = "recommend"
+  source_dir    = "${path.root}/../../lambda"
+  layer_path    = "${path.root}/../../lambda/python-deps-layer.zip"
+  timeout       = 15
+  memory_size   = 256  # Profiled: numpy needs 256MB
+  common_tags   = var.common_tags
+}
+
+module "events_function" {
+  source = "../../modules/lambda-go"
+
+  project       = "shipfast"
+  environment   = "dev"
+  function_name = "events"
+  zip_path      = "${path.root}/../../lambda/functions/events/events.zip"
+  timeout       = 5
+  common_tags   = var.common_tags
+}
+```
+
+Notice the per-route throttling on `/recommend`. ML inference functions consume more resources. Throttling them separately prevents a recommendation burst from crowding out webhook processing.
+
+### Project Structure
+
+<FileTree>
+lambda/
+  bootstrap.ts
+  build.ts
+  functions/
+    webhook/
+      index.ts
+    health/
+      index.ts
+    recommend/
+      handler.py
+      requirements.txt
+    events/
+      main.go
+      go.mod
+      go.sum
+  shared/
+    types.ts
+    logger.ts
+    otel.ts
+</FileTree>
+
+Each function has its own directory with language-specific files. The build process differs per language, but the deployment pattern is the same: zip -> Lambda -> API Gateway.
+
+---
+
+## Cold Start Comparison
+
+Cold start data from Lambda functions with 128MB memory, ARM64, in us-east-1. These are real measurements, not documentation claims.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Bun (custom)", "Python 3.12", "Go (custom)"]} />
+  <ComparisonRow feature="Cold start (p50)" Bun__custom_="~150ms" Python_3_12="~350ms" Go__custom_="~80ms (Best)" />
+  <ComparisonRow feature="Cold start (p99)" Bun__custom_="~250ms" Python_3_12="~800ms" Go__custom_="~120ms (Best)" />
+  <ComparisonRow feature="Warm invocation" Bun__custom_="~5ms" Python_3_12="~8ms" Go__custom_="~3ms (Best)" />
+  <ComparisonRow feature="Deployment size" Bun__custom_="~150KB + layer" Python_3_12="~5KB + layer" Go__custom_="~8MB binary (no layer)" />
+  <ComparisonRow feature="Memory usage" Bun__custom_="~60MB" Python_3_12="~45MB" Go__custom_="~25MB (Best)" />
+  <ComparisonRow feature="Dependency mgmt" Bun__custom_="bun build (bundler)" Python_3_12="pip + layer" Go__custom_="go build (compiled)" />
+</ComparisonTable>
+
+:::note
+Python's cold start jumps significantly with heavy dependencies. Adding numpy + scikit-learn pushes p50 cold start from 350ms to 1.5-2 seconds. The dependency layer size is the dominant factor. Go and Bun are less sensitive to dependency count because they compile or bundle everything into a single artifact.
+:::
+
+### When to Choose Each Runtime
+
+| Scenario | Best Runtime | Why |
+|----------|-------------|-----|
+| API handlers (CRUD) | Bun | Shares types with frontend, fast cold starts |
+| ML inference, data science | Python | Library ecosystem (numpy, pandas, sklearn) |
+| High-throughput event processing | Go | Fastest cold starts, lowest memory, compiled binary |
+| Quick scripts, cron jobs | Python | Fastest to write, standard library is extensive |
+| Latency-critical APIs | Go | Sub-100ms cold starts, consistent warm performance |
+
+Do not choose based on cold start alone. Choose based on what your team writes fastest and what the function needs. If cold starts are a problem (measured, not assumed), optimize the function or add provisioned concurrency.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Every Lambda function in one language because "standardization." Your Python developer writes terrible TypeScript. Your Go developer writes terrible Python. Functions take 3x longer to build and have 3x more bugs. |
+| ✅ **Right** | Same API Gateway, different Lambda runtimes per route. Choose based on team expertise and function requirements. Cold start data informs the choice, not guesses. |
+| ❌ **Over** | Benchmarking five runtimes for every function, A/B testing cold starts in production, provisioned concurrency on everything "just in case." The cold start optimization rabbit hole consumes more engineering time than the cold starts themselves. |
+| 🤖 **Agent Trap** | Agent installs full dependency trees for Python Lambda functions. It adds `boto3`, `botocore`, `requests`, `urllib3`, and every transitive dependency into the deployment package instead of a layer. The zip hits 250MB, cold starts take 5 seconds, and your function does not even use most of those packages. Lambda's Python runtime already includes `boto3` and `botocore`. Never install them in your requirements.txt. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 52: Serverless Patterns: Beyond Request-Response**, we move beyond HTTP request/response. Fan-out with SNS, workflow orchestration with Step Functions, systematic error handling with DLQ patterns, and the idempotency requirement that Lambda's retry behavior makes non-negotiable.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Python Lambda",
+    tasks: [
+      { text: "Python function deploys with python3.12 runtime on ARM64", syncKey: "part-51-python-deploy" },
+      { text: "Dependencies packaged as a Lambda layer (not in function zip)", syncKey: "part-51-python-layer" },
+      { text: "Function responds correctly through API Gateway", syncKey: "part-51-python-apigw" },
+      { text: "DLQ configured on the Python function", syncKey: "part-51-python-dlq" }
+    ]
+  },
+  {
+    category: "Go Lambda",
+    tasks: [
+      { text: "Go binary compiles with GOOS=linux GOARCH=arm64 CGO_ENABLED=0", syncKey: "part-51-go-build" },
+      { text: "Binary named 'bootstrap' in the zip", syncKey: "part-51-go-bootstrap" },
+      { text: "Function responds correctly through API Gateway", syncKey: "part-51-go-apigw" },
+      { text: "DLQ configured on the Go function", syncKey: "part-51-go-dlq" }
+    ]
+  },
+  {
+    category: "Multi-Runtime API",
+    tasks: [
+      { text: "All three runtimes (Bun, Python, Go) route through same API Gateway", syncKey: "part-51-multi-runtime" },
+      { text: "Per-route throttling configured for expensive endpoints", syncKey: "part-51-throttle" },
+      { text: "Cold start measured for each runtime (not guessed)", syncKey: "part-51-cold-start" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Go has the fastest Lambda cold starts (80ms p50) because it compiles to a single static binary with no runtime overhead, making it the right choice for latency-critical event processors.
+2. Python Lambda functions must use layers for dependencies because installing numpy into the function zip produces a 250MB package with 5-second cold starts, and `boto3` is already included in the Lambda Python runtime so never install it yourself.
+3. One API Gateway routes to Bun, Python, and Go functions simultaneously, so choose the runtime per route based on team expertise and function requirements, not on a company-wide language mandate.
+4. Cold start data should drive runtime decisions, not opinions: measure with K6 in Part 53, then optimize the functions that actually impact your users.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

@@ -1,0 +1,686 @@
+---
+title: "WebSockets: Real-Time Without Managing Connections"
+description: "Implement WebSocket APIs with API Gateway. Connection management, message routing, and the serverless approach to real-time communication."
+excerpt: "Real-time without managing connections. API Gateway WebSocket APIs for serverless bidirectional communication."
+date: "2026-08-10"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "api-gateway", "serverless"]
+series: "aws-for-startups"
+seriesPart: 56
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+
+Your user places an order. The order confirmation page says "Processing..." and does nothing for 45 seconds. The user refreshes. Still nothing. They check their email. Nothing. They place the order again. Now they have two charges, two orders, and a support ticket. All because your frontend had no way to know the backend finished processing.
+
+**Time:** About 90 minutes.
+
+**Outcome:** An API Gateway WebSocket API with Lambda handlers for connect, disconnect, and message routes. Connection IDs stored in DynamoDB. Token-based authentication on the `$connect` route. A broadcast function that pushes updates to connected clients in real time.
+
+---
+
+## Why This Matters
+
+HTTP is request-response. The client asks, the server answers. If the server has something new to tell the client, it has to wait until the client asks again. Polling (the client asking "anything new?" every 5 seconds) wastes resources, adds latency, and does not scale.
+
+WebSockets are bidirectional. Once the connection is open, the server can push messages to the client at any time. Order status updates, chat messages, live dashboards, collaborative editing: all real-time, all push-based, all without the overhead of polling.
+
+The traditional approach is running a WebSocket server (Socket.io on Node, for example) on an EC2 instance or ECS container. You manage the server, the connections, the scaling, and the health checks. When traffic spikes, you scale the server. When the server crashes, connections drop.
+
+API Gateway WebSocket APIs take a different approach. API Gateway manages the connections. Your Lambda functions handle the events: connect, disconnect, and incoming messages. No servers to manage. No connection pools to tune. AWS handles the scaling, and you pay per message ($1 per million messages, plus $0.25 per million connection minutes).
+
+For a startup with bursty real-time traffic, this is the right trade-off: zero operational overhead, pay-per-use pricing, and automatic scaling from 0 to 100,000 concurrent connections.
+
+---
+
+## What We're Building
+
+- API Gateway WebSocket API with `$connect`, `$disconnect`, and `$default` routes
+- Lambda handlers for each route
+- DynamoDB table for connection ID storage
+- Token-based authentication on the `$connect` route
+- A broadcast function that sends messages to all connected clients
+- A targeted push function that sends to specific connections
+
+---
+
+## API Gateway WebSocket API
+
+### How It Works
+
+API Gateway WebSocket APIs use routes to direct incoming messages to different Lambda functions. Three routes are special:
+
+- **`$connect`**: Fires when a client opens a WebSocket connection. This is where you authenticate.
+- **`$disconnect`**: Fires when a client closes the connection (or it times out).
+- **`$default`**: Catches any message that does not match a custom route.
+
+You can also define custom routes based on a route key in the message body. For example, if the client sends `{"action": "sendMessage", "text": "hello"}`, you can route `sendMessage` to a specific Lambda.
+
+### Terraform Configuration
+
+```hcl title="infra/modules/websocket/main.tf"
+resource "aws_apigatewayv2_api" "websocket" {
+  name                       = "${var.project}-${var.environment}-ws"
+  protocol_type              = "WEBSOCKET"
+  route_selection_expression = "$request.body.action"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-ws"
+  })
+}
+
+resource "aws_apigatewayv2_stage" "production" {
+  api_id      = aws_apigatewayv2_api.websocket.id
+  name        = var.environment
+  auto_deploy = true
+
+  default_route_settings {
+    throttling_burst_limit = 500
+    throttling_rate_limit  = 1000
+  }
+
+  tags = var.common_tags
+}
+```
+
+**`route_selection_expression = "$request.body.action"`** tells API Gateway to look at the `action` field in incoming messages to decide which route to use. If a client sends `{"action": "joinRoom"}`, it routes to the `joinRoom` route (if defined) or falls through to `$default`.
+
+### Route Configuration
+
+```hcl title="infra/modules/websocket/routes.tf"
+# $connect route
+resource "aws_apigatewayv2_route" "connect" {
+  api_id    = aws_apigatewayv2_api.websocket.id
+  route_key = "$connect"
+  target    = "integrations/${aws_apigatewayv2_integration.connect.id}"
+
+  authorization_type = "NONE"  # We handle auth in the Lambda
+}
+
+resource "aws_apigatewayv2_integration" "connect" {
+  api_id             = aws_apigatewayv2_api.websocket.id
+  integration_type   = "AWS_PROXY"
+  integration_uri    = var.connect_lambda_invoke_arn
+  integration_method = "POST"
+}
+
+# $disconnect route
+resource "aws_apigatewayv2_route" "disconnect" {
+  api_id    = aws_apigatewayv2_api.websocket.id
+  route_key = "$disconnect"
+  target    = "integrations/${aws_apigatewayv2_integration.disconnect.id}"
+}
+
+resource "aws_apigatewayv2_integration" "disconnect" {
+  api_id             = aws_apigatewayv2_api.websocket.id
+  integration_type   = "AWS_PROXY"
+  integration_uri    = var.disconnect_lambda_invoke_arn
+  integration_method = "POST"
+}
+
+# $default route (catch-all for messages)
+resource "aws_apigatewayv2_route" "default" {
+  api_id    = aws_apigatewayv2_api.websocket.id
+  route_key = "$default"
+  target    = "integrations/${aws_apigatewayv2_integration.default.id}"
+}
+
+resource "aws_apigatewayv2_integration" "default" {
+  api_id             = aws_apigatewayv2_api.websocket.id
+  integration_type   = "AWS_PROXY"
+  integration_uri    = var.default_lambda_invoke_arn
+  integration_method = "POST"
+}
+```
+
+### Lambda Permissions
+
+Each Lambda function needs permission for API Gateway to invoke it:
+
+```hcl title="infra/modules/websocket/permissions.tf"
+resource "aws_lambda_permission" "connect" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = var.connect_lambda_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.websocket.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "disconnect" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = var.disconnect_lambda_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.websocket.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "default" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = var.default_lambda_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.websocket.execution_arn}/*/*"
+}
+```
+
+---
+
+## Connection Management with DynamoDB
+
+Lambda functions are stateless. When a user connects, you cannot store their connection ID in a variable because the next invocation runs in a different Lambda instance. Connection IDs must live in DynamoDB.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents store WebSocket connection IDs in memory (a global array or Map in the Lambda handler). This works for exactly one invocation. On the next invocation (or after a cold start), the in-memory store is empty. All previously connected clients become unreachable because your Lambda has no record of their connection IDs.
+
+**What catches it:** Code review. Any Lambda handler that stores connection state in a module-level variable (outside the handler function) is using in-memory state. The fix is always DynamoDB.
+
+</Alert>
+
+### DynamoDB Connection Table
+
+```hcl title="infra/modules/websocket/dynamodb.tf"
+resource "aws_dynamodb_table" "connections" {
+  name         = "${var.project}-${var.environment}-ws-connections"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "connectionId"
+
+  attribute {
+    name = "connectionId"
+    type = "S"
+  }
+
+  # Connections auto-expire after 24 hours (API Gateway idle timeout is 10 minutes)
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-ws-connections"
+  })
+}
+```
+
+The TTL of 24 hours is a safety net. API Gateway closes idle connections after 10 minutes, and the `$disconnect` handler should delete the record. But network issues can prevent the `$disconnect` event from firing. TTL ensures stale connections do not accumulate.
+
+### Connect Handler
+
+```typescript title="src/handlers/ws-connect.ts"
+import { APIGatewayProxyWebsocketHandlerV2 } from 'aws-lambda';
+import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
+
+const dynamodb = new DynamoDBClient({});
+const TABLE_NAME = process.env.CONNECTIONS_TABLE!;
+const TTL_HOURS = 24;
+
+export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
+  const connectionId = event.requestContext.connectionId!;
+  const queryParams = event.queryStringParameters || {};
+
+  // Authenticate the connection
+  const token = queryParams.token;
+  if (!token) {
+    console.warn('Connection rejected: no token', { connectionId });
+    return { statusCode: 401 };
+  }
+
+  const userId = await validateToken(token);
+  if (!userId) {
+    console.warn('Connection rejected: invalid token', { connectionId });
+    return { statusCode: 403 };
+  }
+
+  // Store the connection
+  const ttl = Math.floor(Date.now() / 1000) + TTL_HOURS * 3600;
+  await dynamodb.send(new PutItemCommand({
+    TableName: TABLE_NAME,
+    Item: {
+      connectionId: { S: connectionId },
+      userId: { S: userId },
+      connectedAt: { S: new Date().toISOString() },
+      ttl: { N: ttl.toString() },
+    },
+  }));
+
+  console.log('Connection accepted', { connectionId, userId });
+  return { statusCode: 200 };
+};
+
+async function validateToken(token: string): Promise<string | null> {
+  // Validate JWT or session token
+  // Return userId if valid, null if invalid
+  // In production, verify against your auth provider (Clerk, Auth0, Cognito)
+  try {
+    // Your token validation logic here
+    return 'user-id-from-token';
+  } catch {
+    return null;
+  }
+}
+```
+
+**Authentication happens on `$connect`, not on subsequent messages.** Once a connection is established, all messages through that connection are implicitly authenticated. If you reject the `$connect` request (return 401 or 403), the WebSocket connection is never established.
+
+The client passes the token as a query parameter because WebSocket connections do not support custom headers in the browser. The connection URL looks like: `wss://abc123.execute-api.us-east-1.amazonaws.com/prod?token=eyJ...`
+
+### Disconnect Handler
+
+```typescript title="src/handlers/ws-disconnect.ts"
+import { APIGatewayProxyWebsocketHandlerV2 } from 'aws-lambda';
+import { DynamoDBClient, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
+
+const dynamodb = new DynamoDBClient({});
+const TABLE_NAME = process.env.CONNECTIONS_TABLE!;
+
+export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
+  const connectionId = event.requestContext.connectionId!;
+
+  await dynamodb.send(new DeleteItemCommand({
+    TableName: TABLE_NAME,
+    Key: {
+      connectionId: { S: connectionId },
+    },
+  }));
+
+  console.log('Connection closed', { connectionId });
+  return { statusCode: 200 };
+};
+```
+
+### Default Message Handler
+
+```typescript title="src/handlers/ws-default.ts"
+import { APIGatewayProxyWebsocketHandlerV2 } from 'aws-lambda';
+
+export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
+  const connectionId = event.requestContext.connectionId!;
+  const body = event.body ? JSON.parse(event.body) : {};
+
+  console.log('Received message', { connectionId, action: body.action });
+
+  // Route based on action
+  switch (body.action) {
+    case 'ping':
+      return { statusCode: 200, body: JSON.stringify({ action: 'pong' }) };
+    default:
+      console.warn('Unknown action', { action: body.action, connectionId });
+      return { statusCode: 200 };
+  }
+};
+```
+
+---
+
+## Message Broadcasting
+
+To send a message from the server to connected clients, use the API Gateway Management API. This is how your backend pushes updates (order confirmations, chat messages, live data) to the browser.
+
+### Broadcast to All Connections
+
+```typescript title="src/lib/ws-broadcast.ts"
+import { ApiGatewayManagementApiClient, PostToConnectionCommand, GoneException } from '@aws-sdk/client-apigatewaymanagementapi';
+import { DynamoDBClient, ScanCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
+
+const dynamodb = new DynamoDBClient({});
+const TABLE_NAME = process.env.CONNECTIONS_TABLE!;
+
+export async function broadcast(
+  callbackUrl: string,
+  message: Record<string, unknown>
+): Promise<void> {
+  const apigw = new ApiGatewayManagementApiClient({
+    endpoint: callbackUrl,
+  });
+
+  // Get all active connections
+  const result = await dynamodb.send(new ScanCommand({
+    TableName: TABLE_NAME,
+    ProjectionExpression: 'connectionId',
+  }));
+
+  const connections = result.Items || [];
+  const payload = JSON.stringify(message);
+
+  // Send to all connections in parallel
+  const sendPromises = connections.map(async (item) => {
+    const connectionId = item.connectionId.S!;
+    try {
+      await apigw.send(new PostToConnectionCommand({
+        ConnectionId: connectionId,
+        Data: Buffer.from(payload),
+      }));
+    } catch (error) {
+      if (error instanceof GoneException) {
+        // Connection is stale  - clean up
+        await dynamodb.send(new DeleteItemCommand({
+          TableName: TABLE_NAME,
+          Key: { connectionId: { S: connectionId } },
+        }));
+        console.log('Removed stale connection', { connectionId });
+      } else {
+        console.error('Failed to send to connection', { connectionId, error });
+      }
+    }
+  });
+
+  await Promise.all(sendPromises);
+}
+```
+
+The **`GoneException`** handling is critical. When a client disconnects abruptly (closes the browser, loses network), the `$disconnect` handler may not fire. The connection ID stays in DynamoDB, but the connection is dead. When you try to send to it, API Gateway returns `GoneException`. Catch it and clean up the stale record.
+
+### Send to a Specific User
+
+```typescript title="src/lib/ws-send.ts"
+import { ApiGatewayManagementApiClient, PostToConnectionCommand, GoneException } from '@aws-sdk/client-apigatewaymanagementapi';
+import { DynamoDBClient, QueryCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
+
+const dynamodb = new DynamoDBClient({});
+const TABLE_NAME = process.env.CONNECTIONS_TABLE!;
+
+export async function sendToUser(
+  callbackUrl: string,
+  userId: string,
+  message: Record<string, unknown>
+): Promise<void> {
+  const apigw = new ApiGatewayManagementApiClient({
+    endpoint: callbackUrl,
+  });
+
+  // Find connections for this user (requires a GSI on userId)
+  const result = await dynamodb.send(new QueryCommand({
+    TableName: TABLE_NAME,
+    IndexName: 'userId-index',
+    KeyConditionExpression: 'userId = :uid',
+    ExpressionAttributeValues: {
+      ':uid': { S: userId },
+    },
+  }));
+
+  const connections = result.Items || [];
+  const payload = JSON.stringify(message);
+
+  for (const item of connections) {
+    const connectionId = item.connectionId.S!;
+    try {
+      await apigw.send(new PostToConnectionCommand({
+        ConnectionId: connectionId,
+        Data: Buffer.from(payload),
+      }));
+    } catch (error) {
+      if (error instanceof GoneException) {
+        await dynamodb.send(new DeleteItemCommand({
+          TableName: TABLE_NAME,
+          Key: { connectionId: { S: connectionId } },
+        }));
+      }
+    }
+  }
+}
+```
+
+To send to a specific user, you need a Global Secondary Index on `userId`:
+
+```hcl title="infra/modules/websocket/dynamodb.tf"
+resource "aws_dynamodb_table" "connections" {
+  name         = "${var.project}-${var.environment}-ws-connections"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "connectionId"
+
+  attribute {
+    name = "connectionId"
+    type = "S"
+  }
+
+  attribute {
+    name = "userId"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "userId-index"
+    hash_key        = "userId"
+    projection_type = "ALL"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-ws-connections"
+  })
+}
+```
+
+### Callback URL
+
+The `callbackUrl` is the endpoint your Lambda uses to send messages back through the WebSocket connection. It is derived from the API Gateway URL:
+
+```typescript title="src/lib/ws-utils.ts"
+export function getCallbackUrl(event: { requestContext: { domainName: string; stage: string } }): string {
+  return `https://${event.requestContext.domainName}/${event.requestContext.stage}`;
+}
+```
+
+For Lambda functions that are not invoked by API Gateway (for example, an SQS consumer that needs to push a WebSocket update), store the callback URL as an environment variable:
+
+```hcl title="infra/modules/websocket/outputs.tf"
+output "callback_url" {
+  description = "WebSocket callback URL for sending messages to clients"
+  value       = "${aws_apigatewayv2_api.websocket.api_endpoint}/${aws_apigatewayv2_stage.production.name}"
+}
+
+output "websocket_url" {
+  description = "WebSocket connection URL for clients"
+  value       = "${replace(aws_apigatewayv2_api.websocket.api_endpoint, "https://", "wss://")}/${aws_apigatewayv2_stage.production.name}"
+}
+```
+
+### IAM for API Gateway Management API
+
+Your Lambda functions need permission to call the Management API:
+
+```hcl title="infra/modules/websocket/iam.tf"
+data "aws_iam_policy_document" "websocket_manage" {
+  statement {
+    sid    = "ManageConnections"
+    effect = "Allow"
+    actions = [
+      "execute-api:ManageConnections",
+    ]
+    resources = [
+      "${aws_apigatewayv2_api.websocket.execution_arn}/${var.environment}/POST/@connections/*"
+    ]
+  }
+}
+```
+
+---
+
+## Integrating with Event-Driven Backend
+
+The real power of WebSockets shows when you combine them with the SQS and EventBridge patterns from [Part 54](/blog/aws-for-startups/54-sqs-queues) and [Part 55](/blog/aws-for-startups/55-sns-eventbridge). An order comes in via REST API, gets published to SQS for processing, and when processing completes, the consumer pushes a WebSocket update to the user.
+
+```typescript title="src/handlers/order-processor.ts"
+import { SQSBatchResponse, SQSEvent } from 'aws-lambda';
+import { sendToUser } from '../lib/ws-send';
+
+const CALLBACK_URL = process.env.WEBSOCKET_CALLBACK_URL!;
+
+export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
+  const batchItemFailures: { itemIdentifier: string }[] = [];
+
+  for (const record of event.Records) {
+    try {
+      const order = JSON.parse(record.body);
+
+      // Process the order
+      await processOrder(order);
+
+      // Push real-time update to the user
+      await sendToUser(CALLBACK_URL, order.customerId, {
+        action: 'orderUpdate',
+        data: {
+          orderId: order.orderId,
+          status: 'confirmed',
+          estimatedDelivery: '2-3 business days',
+        },
+      });
+    } catch (error) {
+      batchItemFailures.push({ itemIdentifier: record.messageId });
+    }
+  }
+
+  return { batchItemFailures };
+};
+```
+
+The user sees the order confirmation in real time. No polling. No refresh. The SQS consumer processes the order and pushes the update through the WebSocket connection.
+
+---
+
+## Client-Side Connection
+
+For reference, here is a minimal client-side WebSocket connection:
+
+```typescript title="src/client/ws-client.ts"
+function connectWebSocket(token: string): WebSocket {
+  const wsUrl = `wss://abc123.execute-api.us-east-1.amazonaws.com/prod?token=${token}`;
+  const ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    console.log('WebSocket connected');
+  };
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log('Received:', data);
+
+    switch (data.action) {
+      case 'orderUpdate':
+        // Update UI with order status
+        break;
+      case 'pong':
+        // Heartbeat response
+        break;
+    }
+  };
+
+  ws.onclose = (event) => {
+    console.log('WebSocket closed', { code: event.code, reason: event.reason });
+    // Reconnect with exponential backoff
+    setTimeout(() => connectWebSocket(token), 3000);
+  };
+
+  ws.onerror = (error) => {
+    console.error('WebSocket error', error);
+  };
+
+  // Keep-alive ping every 5 minutes (API Gateway idles at 10 minutes)
+  setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ action: 'ping' }));
+    }
+  }, 300000);
+
+  return ws;
+}
+```
+
+The keep-alive ping every 5 minutes prevents the API Gateway idle timeout (10 minutes). Without it, inactive connections close silently, and the user stops receiving updates.
+
+---
+
+## Module Structure
+
+<FileTree>
+infra/
+  modules/
+    websocket/
+      main.tf
+      routes.tf
+      permissions.tf
+      dynamodb.tf
+      iam.tf
+      variables.tf
+      outputs.tf
+</FileTree>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Polling every 5 seconds for updates. Your frontend makes 12 API requests per minute per user. At 1,000 concurrent users, that is 12,000 requests per minute, most returning "no updates." Your API Gateway bill and Lambda invocations scale with users, not with actual events. |
+| ✅ **Right** | API Gateway WebSocket API with Lambda handlers for connect, disconnect, and default routes. Connection IDs in DynamoDB with TTL. Token-based auth on `$connect`. GoneException handling for stale connections. Keep-alive pings every 5 minutes. |
+| ❌ **Over** | Self-managed WebSocket servers on ECS with custom auto-scaling, Redis pub/sub for cross-instance message distribution, and a dedicated connection management service. You are building Slack's infrastructure for an app with 100 concurrent users. |
+| 🤖 **Agent Trap** | Agent stores connection IDs in a module-level Map or array in the Lambda handler. This works exactly once. On the next invocation (different container) or after a cold start, the in-memory store is empty, and all connected clients become unreachable. The fix is always DynamoDB. Code review catches any module-level mutable state in Lambda handlers. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 57: SES Email**, we set up transactional email with Amazon SES. Domain verification with DKIM, SPF, and DMARC. Proper DNS records that keep your emails out of spam. Bounce and complaint monitoring that protects your sending reputation. Because landing in the spam folder is worse than not sending the email at all.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Infrastructure",
+    tasks: [
+      { text: "API Gateway WebSocket API created with route_selection_expression", syncKey: "part-56-ws-api" },
+      { text: "$connect, $disconnect, and $default routes configured", syncKey: "part-56-routes" },
+      { text: "Lambda permissions set for API Gateway invocation", syncKey: "part-56-lambda-perms" },
+      { text: "DynamoDB connections table with TTL enabled", syncKey: "part-56-dynamodb" },
+      { text: "Global Secondary Index on userId for targeted messaging", syncKey: "part-56-gsi" }
+    ]
+  },
+  {
+    category: "Application",
+    tasks: [
+      { text: "Connect handler validates token and stores connection ID in DynamoDB", syncKey: "part-56-connect-handler" },
+      { text: "Disconnect handler removes connection ID from DynamoDB", syncKey: "part-56-disconnect-handler" },
+      { text: "Broadcast function handles GoneException and cleans up stale connections", syncKey: "part-56-broadcast" },
+      { text: "Keep-alive ping configured (interval < 10 minutes)", syncKey: "part-56-keepalive" }
+    ]
+  },
+  {
+    category: "Security",
+    tasks: [
+      { text: "Authentication enforced on $connect route (reject without valid token)", syncKey: "part-56-auth" },
+      { text: "IAM policy for execute-api:ManageConnections scoped to specific API", syncKey: "part-56-iam" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "Agent-generated Lambda handlers reviewed for in-memory state usage", syncKey: "part-56-agent-reviewed" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. API Gateway WebSocket APIs are serverless real-time: no connection management infrastructure, no scaling configuration, and you pay per message instead of per server.
+2. Connection IDs MUST be stored in DynamoDB, not in memory: Lambda functions are stateless, and in-memory state vanishes on cold starts and container recycling.
+3. Authentication happens on the `$connect` route, and rejection prevents the connection from being established: every subsequent message through that connection is implicitly trusted.
+4. Handle `GoneException` on every `PostToConnection` call: stale connections are inevitable, and failing to clean them up wastes invocations and creates error noise.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

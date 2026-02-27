@@ -1,0 +1,705 @@
+---
+title: "SES: Transactional Email That Actually Gets Delivered"
+description: "Configure Amazon SES for transactional email. Domain verification, DKIM/SPF/DMARC, sending limits, and deliverability best practices."
+excerpt: "Transactional email that actually gets delivered. SES with proper DNS records, because landing in spam is worse than not sending at all."
+date: "2026-08-14"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "ses", "terraform"]
+series: "aws-for-startups"
+seriesPart: 57
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+You launch your app. Users sign up. They never see the verification email. They try again. Nothing. They check spam. There it is, sandwiched between a Nigerian prince and a Canadian pharmacy. Your transactional emails are landing in spam because you skipped three DNS records that take 10 minutes to configure.
+
+**Time:** About 60 minutes.
+
+**Outcome:** Amazon SES configured for transactional email with domain verification, DKIM signing, SPF records, and DMARC policy. Terraform-managed DNS records. Bounce and complaint monitoring with CloudWatch alarms. Production access request submitted.
+
+---
+
+## Why This Matters
+
+Email is the most critical communication channel for a web application. Password resets, signup verifications, order confirmations, security alerts: they all go through email. If these emails land in spam, users cannot use your product.
+
+Three DNS records determine whether your emails reach the inbox or the spam folder: DKIM, SPF, and DMARC. Email providers (Gmail, Outlook, Yahoo) use these records to verify that emails claiming to come from your domain actually come from your domain. Without them, your emails are indistinguishable from phishing attempts.
+
+SES (Simple Email Service) is AWS's email sending service. It costs $0.10 per 1,000 emails, which is roughly 10x cheaper than SendGrid or Mailgun at equivalent volumes. For a startup sending password resets and order confirmations, SES costs are negligible: a few cents per month.
+
+The catch: SES starts in **sandbox mode**. In sandbox, you can only send to verified email addresses. You cannot send to real users. Getting out of sandbox requires a production access request that takes 24-48 hours. Start this process early, not the day before launch.
+
+---
+
+## What We're Building
+
+- SES domain identity with DKIM verification
+- Route 53 DNS records for DKIM, SPF, and DMARC
+- A configuration set for tracking deliveries, bounces, and complaints
+- CloudWatch alarms on bounce rate and complaint rate
+- Lambda function for sending templated transactional emails
+- Production access request preparation
+
+---
+
+## SES Domain Verification
+
+### Domain Identity
+
+Verifying your domain proves to SES (and to receiving email servers) that you own the domain you are sending from:
+
+```hcl title="infra/modules/ses/main.tf"
+resource "aws_ses_domain_identity" "main" {
+  domain = var.domain
+}
+```
+
+This creates a domain identity in SES but does not verify it. Verification requires DNS records.
+
+### DKIM Configuration
+
+**DKIM (DomainKeys Identified Mail)** adds a cryptographic signature to every email. Receiving servers use your DNS records to verify the signature matches. If someone spoofs your domain, the signature will not match, and the email gets rejected or flagged.
+
+```hcl title="infra/modules/ses/dkim.tf"
+resource "aws_ses_domain_dkim" "main" {
+  domain = aws_ses_domain_identity.main.domain
+}
+
+# SES generates three DKIM CNAME records  - add them to Route 53
+resource "aws_route53_record" "dkim" {
+  count   = 3
+  zone_id = var.route53_zone_id
+  name    = "${aws_ses_domain_dkim.main.dkim_tokens[count.index]}._domainkey.${var.domain}"
+  type    = "CNAME"
+  ttl     = 600
+  records = ["${aws_ses_domain_dkim.main.dkim_tokens[count.index]}.dkim.amazonses.com"]
+}
+```
+
+SES generates three DKIM tokens, and each one becomes a CNAME record in your DNS. These records let receiving email servers look up your DKIM public key.
+
+### SPF Record
+
+**SPF (Sender Policy Framework)** tells receiving email servers which mail servers are authorized to send email on behalf of your domain. Without SPF, anyone can send email claiming to be from your domain.
+
+```hcl title="infra/modules/ses/spf.tf"
+resource "aws_route53_record" "spf" {
+  zone_id = var.route53_zone_id
+  name    = var.domain
+  type    = "TXT"
+  ttl     = 600
+
+  records = [
+    "v=spf1 include:amazonses.com ~all"
+  ]
+}
+```
+
+**`include:amazonses.com`** authorizes SES's servers to send on your behalf. **`~all`** is a soft fail: emails from unauthorized servers are flagged but not outright rejected. This is the right default while you are getting set up. Once you have confirmed everything works, you can change to `-all` (hard fail) for stricter enforcement.
+
+:::tip
+If you already have an SPF record (for example, from Google Workspace), merge them into a single record: `"v=spf1 include:_spf.google.com include:amazonses.com ~all"`. DNS allows only one SPF (TXT) record per domain. Multiple SPF records cause both to be ignored.
+:::
+
+### DMARC Record
+
+**DMARC (Domain-based Message Authentication, Reporting, and Conformance)** ties DKIM and SPF together with a policy that tells receiving servers what to do when authentication fails. It also provides reporting so you can see who is sending email from your domain.
+
+```hcl title="infra/modules/ses/dmarc.tf"
+resource "aws_route53_record" "dmarc" {
+  zone_id = var.route53_zone_id
+  name    = "_dmarc.${var.domain}"
+  type    = "TXT"
+  ttl     = 600
+
+  records = [
+    "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${var.domain}; pct=100"
+  ]
+}
+```
+
+**`p=quarantine`** tells receiving servers to quarantine (spam folder) emails that fail DKIM and SPF checks. Start with `quarantine` instead of `reject` so you can identify legitimate emails that fail authentication (misconfigured forwarding, third-party services) before they get hard-rejected.
+
+**`rua=mailto:dmarc-reports@${var.domain}`** is where aggregate reports go. Email providers send daily XML reports showing who sent email from your domain and whether it passed authentication. You do not need to read these manually. Services like Postmark's DMARC monitoring or free tools like DMARCian parse them for you.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents skip DKIM, SPF, and DMARC configuration entirely. The agent's reasoning: "SES sends emails, so the configuration is just the domain identity and the send API call." The emails technically send, but they land in spam for Gmail, Outlook, and Yahoo users, which is the vast majority of your user base.
+
+**What catches it:** After deploying SES, run `dig TXT your-domain.com` and verify you see the SPF record. Run `dig CNAME selector._domainkey.your-domain.com` for DKIM. If any record is missing, emails are landing in spam. The verification pipeline checks for all three DNS record types in the Terraform state.
+
+</Alert>
+
+### Domain Verification Record
+
+SES also needs a TXT record to verify domain ownership:
+
+```hcl title="infra/modules/ses/verification.tf"
+resource "aws_route53_record" "ses_verification" {
+  zone_id = var.route53_zone_id
+  name    = "_amazonses.${var.domain}"
+  type    = "TXT"
+  ttl     = 600
+  records = [aws_ses_domain_identity.main.verification_token]
+}
+
+resource "aws_ses_domain_identity_verification" "main" {
+  domain = aws_ses_domain_identity.main.domain
+
+  depends_on = [aws_route53_record.ses_verification]
+}
+```
+
+The `aws_ses_domain_identity_verification` resource waits for the DNS record to propagate and confirms the domain is verified. This can take a few minutes.
+
+---
+
+## SES Configuration Set
+
+A configuration set tracks email delivery events: sends, deliveries, bounces, complaints, and opens. You need this for monitoring.
+
+```hcl title="infra/modules/ses/configuration-set.tf"
+resource "aws_ses_configuration_set" "main" {
+  name = "${var.project}-${var.environment}"
+
+  delivery_options {
+    tls_policy = "Require"  # Always use TLS
+  }
+
+  reputation_options {
+    reputation_metrics_enabled = true
+  }
+
+  sending_options {
+    sending_enabled = true
+  }
+}
+```
+
+### Event Destination for CloudWatch
+
+Route delivery events to CloudWatch for monitoring:
+
+```hcl title="infra/modules/ses/events.tf"
+resource "aws_ses_event_destination" "cloudwatch" {
+  name                   = "cloudwatch"
+  configuration_set_name = aws_ses_configuration_set.main.name
+  enabled                = true
+
+  matching_types = [
+    "send",
+    "delivery",
+    "bounce",
+    "complaint",
+    "reject",
+  ]
+
+  cloudwatch_destination {
+    default_value  = "default"
+    dimension_name = "ses:configuration-set"
+    value_source   = "messageTag"
+  }
+}
+```
+
+---
+
+## Bounce and Complaint Monitoring
+
+AWS suspends your SES account if your bounce rate exceeds 5% or your complaint rate exceeds 0.1%. These thresholds are absolute: once you cross them, SES stops sending all your emails. You need alarms well below these limits.
+
+```hcl title="infra/modules/ses/alarms.tf"
+resource "aws_cloudwatch_metric_alarm" "bounce_rate" {
+  alarm_name          = "${var.project}-${var.environment}-ses-bounce-rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "Reputation.BounceRate"
+  namespace           = "AWS/SES"
+  period              = 3600  # 1 hour
+  statistic           = "Average"
+  threshold           = 0.03  # 3%  - alarm before the 5% suspension threshold
+  alarm_description   = "SES bounce rate exceeding 3%  - investigate before hitting 5% suspension"
+
+  alarm_actions = [var.sns_alarm_topic_arn]
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "complaint_rate" {
+  alarm_name          = "${var.project}-${var.environment}-ses-complaint-rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "Reputation.ComplaintRate"
+  namespace           = "AWS/SES"
+  period              = 3600  # 1 hour
+  statistic           = "Average"
+  threshold           = 0.0008  # 0.08%  - alarm before the 0.1% suspension threshold
+  alarm_description   = "SES complaint rate exceeding 0.08%  - investigate before hitting 0.1% suspension"
+
+  alarm_actions = [var.sns_alarm_topic_arn]
+
+  tags = var.common_tags
+}
+```
+
+**Bounce rate threshold: 3%** (alarm before the 5% suspension). Hard bounces happen when you send to invalid addresses. Clean your email lists. Do not send to addresses that have previously bounced.
+
+**Complaint rate threshold: 0.08%** (alarm before the 0.1% suspension). Complaints happen when users click "Mark as Spam" in their email client. For transactional emails (password resets, order confirmations), this should be near zero. If users are marking your transactional emails as spam, you have a UX problem: they did not expect the email, or the content looks spammy.
+
+### SNS Topic for Bounces and Complaints
+
+Configure SES to notify you when bounces and complaints occur:
+
+```hcl title="infra/modules/ses/notifications.tf"
+resource "aws_ses_identity_notification_topic" "bounce" {
+  topic_arn                = var.ses_notifications_topic_arn
+  notification_type        = "Bounce"
+  identity                 = aws_ses_domain_identity.main.domain
+  include_original_headers = true
+}
+
+resource "aws_ses_identity_notification_topic" "complaint" {
+  topic_arn                = var.ses_notifications_topic_arn
+  notification_type        = "Complaint"
+  identity                 = aws_ses_domain_identity.main.domain
+  include_original_headers = true
+}
+```
+
+Use a Lambda subscriber on this SNS topic to automatically suppress future sends to addresses that hard-bounce. This protects your bounce rate and prevents wasted sends.
+
+---
+
+## Sending Transactional Email
+
+### The Email Sending Function
+
+```typescript title="src/lib/email.ts"
+import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+
+const ses = new SESv2Client({});
+
+interface EmailParams {
+  to: string;
+  subject: string;
+  htmlBody: string;
+  textBody: string;
+  replyTo?: string;
+}
+
+export async function sendEmail(params: EmailParams): Promise<void> {
+  const fromAddress = process.env.FROM_EMAIL!;           // noreply@your-domain.com
+  const configurationSet = process.env.SES_CONFIG_SET!;  // Tracking
+
+  await ses.send(new SendEmailCommand({
+    FromEmailAddress: fromAddress,
+    Destination: {
+      ToAddresses: [params.to],
+    },
+    Content: {
+      Simple: {
+        Subject: {
+          Data: params.subject,
+          Charset: 'UTF-8',
+        },
+        Body: {
+          Html: {
+            Data: params.htmlBody,
+            Charset: 'UTF-8',
+          },
+          Text: {
+            Data: params.textBody,
+            Charset: 'UTF-8',
+          },
+        },
+      },
+    },
+    ConfigurationSetName: configurationSet,
+    ReplyToAddresses: params.replyTo ? [params.replyTo] : undefined,
+  }));
+}
+```
+
+**Always include both HTML and plain text versions.** Some email clients (corporate Outlook, accessibility readers) render plain text only. If you send HTML-only email, these users see nothing or garbled markup.
+
+**Always use a configuration set.** Without it, you get no delivery metrics and cannot monitor bounce/complaint rates until it is too late.
+
+### Email Templates
+
+For common transactional emails, use SES templates so your Lambda does not need to contain HTML:
+
+```hcl title="infra/modules/ses/templates.tf"
+resource "aws_ses_template" "welcome" {
+  name    = "${var.project}-${var.environment}-welcome"
+  subject = "Welcome to {{appName}}"
+  html    = file("${path.module}/templates/welcome.html")
+  text    = file("${path.module}/templates/welcome.txt")
+}
+
+resource "aws_ses_template" "password_reset" {
+  name    = "${var.project}-${var.environment}-password-reset"
+  subject = "Reset your {{appName}} password"
+  html    = file("${path.module}/templates/password-reset.html")
+  text    = file("${path.module}/templates/password-reset.txt")
+}
+
+resource "aws_ses_template" "order_confirmation" {
+  name    = "${var.project}-${var.environment}-order-confirmation"
+  subject = "Order {{orderId}} confirmed"
+  html    = file("${path.module}/templates/order-confirmation.html")
+  text    = file("${path.module}/templates/order-confirmation.txt")
+}
+```
+
+```typescript title="src/lib/email-templates.ts"
+import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+
+const ses = new SESv2Client({});
+
+export async function sendTemplatedEmail(
+  to: string,
+  templateName: string,
+  templateData: Record<string, string>
+): Promise<void> {
+  await ses.send(new SendEmailCommand({
+    FromEmailAddress: process.env.FROM_EMAIL!,
+    Destination: {
+      ToAddresses: [to],
+    },
+    Content: {
+      Template: {
+        TemplateName: templateName,
+        TemplateData: JSON.stringify(templateData),
+      },
+    },
+    ConfigurationSetName: process.env.SES_CONFIG_SET!,
+  }));
+}
+
+// Usage
+await sendTemplatedEmail('user@example.com', 'shipfast-prod-welcome', {
+  appName: 'Shipfast',
+  userName: 'Alex',
+  loginUrl: 'https://app.shipfast.io/login',
+});
+```
+
+---
+
+## Sandbox vs Production
+
+SES starts in sandbox mode. In sandbox:
+
+- You can only send to verified email addresses (addresses you have manually confirmed)
+- Sending rate is limited to 1 email per second
+- Daily sending quota is 200 emails
+
+For development and testing, sandbox is fine. For production, you need to request production access.
+
+### Requesting Production Access
+
+```bash terminal
+aws sesv2 put-account-details \
+  --production-access-enabled \
+  --mail-type TRANSACTIONAL \
+  --website-url "https://your-domain.com" \
+  --use-case-description "Transactional emails only: signup verification, password resets, order confirmations. Users explicitly create accounts and expect these emails. No marketing emails." \
+  --additional-contact-email-addresses "admin@your-domain.com" \
+  --contact-language EN
+```
+
+AWS reviews the request within 24-48 hours. The review process checks:
+
+1. **Use case clarity.** "Transactional emails" is better than "sending emails to users."
+2. **Opt-in process.** Describe how users enter your system (account creation, purchase).
+3. **Bounce/complaint handling.** Mention your monitoring setup (CloudWatch alarms, suppression list).
+4. **Website.** AWS checks that your domain has a real website. Have something live before requesting.
+
+:::tip
+Submit the production access request early, ideally the same day you set up SES. The 24-48 hour review window can stretch longer if AWS needs more information. You do not want to be blocked on email sending the day before launch.
+:::
+
+---
+
+## Transactional vs Marketing Email
+
+SES handles both, but you should treat them differently:
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Transactional", "Marketing"]} />
+  <ComparisonRow feature="Examples" Transactional="Password reset, order confirmation, signup verification" Marketing="Newsletter, product updates, promotions" />
+  <ComparisonRow feature="User expectation" Transactional="Expected immediately (Best)" Marketing="Expected occasionally" />
+  <ComparisonRow feature="Unsubscribe" Transactional="Not required" Marketing="Required by law (CAN-SPAM, GDPR)" />
+  <ComparisonRow feature="Spam complaints" Transactional="Near zero (Best)" Marketing="Higher, must manage" />
+  <ComparisonRow feature="SES config set" Transactional="Dedicated (Best)" Marketing="Separate dedicated set" />
+  <ComparisonRow feature="From address" Transactional="noreply@ or support@" Marketing="newsletter@ or team@" />
+</ComparisonTable>
+
+**Use separate configuration sets** for transactional and marketing email. If your marketing emails trigger complaints, the high complaint rate should not affect your transactional email deliverability. Separate configuration sets give you separate metrics and separate reputation tracking.
+
+For this series, we focus on transactional email only. Marketing email has additional requirements (unsubscribe headers, CAN-SPAM compliance, list management) that are outside the scope of infrastructure setup.
+
+---
+
+## Module Structure
+
+<FileTree>
+infra/
+  modules/
+    ses/
+      main.tf
+      dkim.tf
+      spf.tf
+      dmarc.tf
+      verification.tf
+      configuration-set.tf
+      events.tf
+      alarms.tf
+      notifications.tf
+      templates.tf
+      variables.tf
+      outputs.tf
+      templates/
+        welcome.html
+        welcome.txt
+        password-reset.html
+        password-reset.txt
+        order-confirmation.html
+        order-confirmation.txt
+</FileTree>
+
+```hcl title="infra/modules/ses/variables.tf"
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Deployment environment"
+  type        = string
+}
+
+variable "domain" {
+  description = "Domain name for SES sending"
+  type        = string
+}
+
+variable "route53_zone_id" {
+  description = "Route 53 hosted zone ID for DNS records"
+  type        = string
+}
+
+variable "sns_alarm_topic_arn" {
+  description = "SNS topic ARN for CloudWatch alarms"
+  type        = string
+}
+
+variable "ses_notifications_topic_arn" {
+  description = "SNS topic ARN for bounce and complaint notifications"
+  type        = string
+}
+
+variable "common_tags" {
+  description = "Common tags for all resources"
+  type        = map(string)
+}
+```
+
+```hcl title="infra/modules/ses/outputs.tf"
+output "domain_identity_arn" {
+  description = "ARN of the SES domain identity"
+  value       = aws_ses_domain_identity.main.arn
+}
+
+output "configuration_set_name" {
+  description = "Name of the SES configuration set"
+  value       = aws_ses_configuration_set.main.name
+}
+```
+
+### IAM for SES Sending
+
+Your Lambda function needs permission to send email through SES:
+
+```hcl title="infra/modules/ses/iam.tf"
+data "aws_iam_policy_document" "ses_send" {
+  statement {
+    sid    = "SESSend"
+    effect = "Allow"
+    actions = [
+      "ses:SendEmail",
+      "ses:SendTemplatedEmail",
+      "ses:SendRawEmail",
+    ]
+    resources = [aws_ses_domain_identity.main.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ses:FromAddress"
+      values   = ["noreply@${var.domain}"]
+    }
+  }
+}
+```
+
+The condition on `ses:FromAddress` ensures the Lambda can only send from your designated address. Without it, any code with SES permissions could send email from any address on your domain, including addresses that look like `admin@your-domain.com` or `ceo@your-domain.com`.
+
+---
+
+## Integration with Event-Driven Architecture
+
+Connect SES to the event-driven patterns from [Part 54](/blog/aws-for-startups/54-sqs-queues) and [Part 55](/blog/aws-for-startups/55-sns-eventbridge). Instead of sending emails synchronously from your API handler, publish an event and let a dedicated email consumer handle delivery:
+
+```typescript title="src/handlers/email-consumer.ts"
+import { SQSBatchResponse, SQSEvent } from 'aws-lambda';
+import { sendTemplatedEmail } from '../lib/email-templates';
+import { ensureIdempotent } from '../lib/idempotency';
+
+export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
+  const batchItemFailures: { itemIdentifier: string }[] = [];
+
+  for (const record of event.Records) {
+    try {
+      const isNew = await ensureIdempotent(record.messageId);
+      if (!isNew) continue;  // Prevent duplicate emails
+
+      const body = JSON.parse(record.body);
+
+      await sendTemplatedEmail(
+        body.to,
+        body.templateName,
+        body.templateData
+      );
+    } catch (error) {
+      console.error('Failed to send email', {
+        messageId: record.messageId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      batchItemFailures.push({ itemIdentifier: record.messageId });
+    }
+  }
+
+  return { batchItemFailures };
+};
+```
+
+The idempotency check from [Part 54](/blog/aws-for-startups/54-sqs-queues) prevents duplicate emails when SQS delivers the same message twice. Without it, your user gets two password reset emails, which looks unprofessional and erodes trust.
+
+---
+
+## DNS Verification Checklist
+
+After applying the Terraform, verify all DNS records are in place:
+
+```bash terminal
+# Check DKIM
+dig CNAME selector1._domainkey.your-domain.com +short
+# Should return: selector1.dkim.amazonses.com (or similar)
+
+# Check SPF
+dig TXT your-domain.com +short
+# Should include: "v=spf1 include:amazonses.com ~all"
+
+# Check DMARC
+dig TXT _dmarc.your-domain.com +short
+# Should return: "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@your-domain.com; pct=100"
+
+# Check SES verification
+dig TXT _amazonses.your-domain.com +short
+# Should return the verification token
+```
+
+All four records must resolve correctly. If any are missing, emails will have reduced deliverability, and some providers (Gmail in particular) will flag them as suspicious.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | SMTP credentials hardcoded in a `.env` file. No DKIM, no SPF, no DMARC. Emails land in spam for Gmail users. No bounce monitoring. SES account gets suspended at 5% bounce rate, and you find out when users report they are not receiving password resets. |
+| ✅ **Right** | SES with Terraform-managed DKIM (3 CNAME records), SPF (TXT record), and DMARC (TXT record with quarantine policy). Configuration set with CloudWatch event destination. Bounce alarm at 3%, complaint alarm at 0.08%. Separate transactional and marketing config sets. SES sending permissions scoped to specific From address. |
+| ❌ **Over** | Custom email rendering pipeline with Mjml templates, A/B testing subject lines, dedicated IP addresses for "warm-up," and deliverability consultants for transactional emails. You are sending 50 password resets per day, not 50 million marketing campaigns. |
+| 🤖 **Agent Trap** | Agent configures the SES domain identity and the send API call but skips DKIM, SPF, and DMARC DNS records entirely. The agent's reasoning: "SES is configured, emails will send." They will send. They will also land in spam for 70-80% of recipients because Gmail, Outlook, and Yahoo all check these records. The verification pipeline checks for all three DNS record types in the Terraform state. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 58: Event-Driven Patterns**, we combine everything from this phase: SQS queues, SNS fan-out, EventBridge routing, WebSocket push, and SES email into production-ready event-driven patterns. Saga patterns for multi-step workflows, compensation logic for partial failures, and observability across the entire async pipeline.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "DNS",
+    tasks: [
+      { text: "DKIM: three CNAME records created and resolving", syncKey: "part-57-dkim" },
+      { text: "SPF: TXT record includes amazonses.com", syncKey: "part-57-spf" },
+      { text: "DMARC: TXT record at _dmarc with quarantine policy", syncKey: "part-57-dmarc" },
+      { text: "SES verification: TXT record at _amazonses resolving", syncKey: "part-57-verification" }
+    ]
+  },
+  {
+    category: "Infrastructure",
+    tasks: [
+      { text: "SES domain identity created and verified", syncKey: "part-57-domain-identity" },
+      { text: "Configuration set with CloudWatch event destination", syncKey: "part-57-config-set" },
+      { text: "SES email templates deployed (welcome, password-reset, order-confirmation)", syncKey: "part-57-templates" }
+    ]
+  },
+  {
+    category: "Monitoring",
+    tasks: [
+      { text: "CloudWatch alarm on bounce rate > 3%", syncKey: "part-57-bounce-alarm" },
+      { text: "CloudWatch alarm on complaint rate > 0.08%", syncKey: "part-57-complaint-alarm" },
+      { text: "SNS notifications configured for bounces and complaints", syncKey: "part-57-notifications" }
+    ]
+  },
+  {
+    category: "Application",
+    tasks: [
+      { text: "Email sending function uses SESv2 client with configuration set", syncKey: "part-57-send-function" },
+      { text: "Both HTML and plain text versions included in all emails", syncKey: "part-57-multipart" },
+      { text: "Email consumer uses idempotency check from Part 54", syncKey: "part-57-idempotency" }
+    ]
+  },
+  {
+    category: "Security",
+    tasks: [
+      { text: "IAM policy scoped to specific From address", syncKey: "part-57-iam-scoped" },
+      { text: "SES TLS required in configuration set", syncKey: "part-57-tls" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "Agent-generated SES config reviewed for DKIM, SPF, and DMARC records", syncKey: "part-57-agent-reviewed" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. DKIM, SPF, and DMARC are non-negotiable: without all three DNS records, your transactional emails land in spam for the majority of your users.
+2. SES sandbox mode limits sending to verified addresses only, and production access takes 24-48 hours to approve: submit the request the same day you configure SES, not the day before launch.
+3. Monitor bounce rate (alarm at 3%) and complaint rate (alarm at 0.08%) because exceeding AWS thresholds (5% and 0.1%) suspends your entire SES account with no warning.
+4. Send transactional emails through SQS with idempotent consumers to prevent duplicate sends and decouple email delivery from your API response time.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

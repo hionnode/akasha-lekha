@@ -1,0 +1,671 @@
+---
+title: "K6 Load Testing: Serverless Under Pressure"
+description: "Load test Lambda + API Gateway with K6. Cold start analysis, concurrency limits, cost-per-request at scale, and comparison with container baselines."
+excerpt: "Serverless under pressure. K6 against Lambda + API Gateway: cold starts, concurrency, and cost-per-request at scale."
+date: "2026-07-30"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "lambda", "serverless", "testing"]
+series: "aws-for-startups"
+seriesPart: 53
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+In [Part 44](/blog/aws-for-startups/44-k6-containers), you load-tested your ECS Fargate services and established performance baselines. You know your containers handle 500 requests/second with p95 latency under 50ms. Now you have Lambda functions behind API Gateway. How do they compare? More importantly, at what traffic level does Lambda become more expensive than Fargate? The answer decides where each workload belongs.
+
+**Time:** About 50 minutes.
+
+**Outcome:** K6 load test scripts for Lambda + API Gateway, cold start analysis with percentile breakdowns, concurrency limit testing, cost-per-request calculations at multiple traffic levels, and a concrete comparison between Lambda and Fargate so you can make data-driven compute decisions.
+
+---
+
+## Why This Matters
+
+Serverless advocates say Lambda is cheaper. Container advocates say Fargate is cheaper. They are both right, at different traffic levels.
+
+Lambda costs nothing at zero traffic and scales linearly with invocations. Fargate has a base cost (the container running 24/7) but processes concurrent requests efficiently. The crossover point, where Lambda becomes more expensive than Fargate, depends on your request volume, duration, and memory allocation.
+
+Without load testing, you guess. Teams run everything on Lambda because "it scales to zero" and discover at 10,000 requests/minute that their monthly bill is 3x what Fargate would cost. Or they run everything on Fargate because "containers are cheaper at scale" and pay $300/month for a service that gets 50 requests per day.
+
+K6 gives you the numbers. This post generates those numbers for your specific functions, with your specific cold start profiles, at your specific traffic levels.
+
+---
+
+## What We're Building
+
+- K6 test scripts targeting API Gateway + Lambda endpoints
+- Cold start analysis: separating first-request latency from steady-state
+- Concurrency testing: finding your Lambda scaling limits
+- Cost-per-request calculations at 100, 1,000, 10,000, and 100,000 requests/minute
+- Lambda vs Fargate comparison with real data from your infrastructure
+
+---
+
+## K6 Against API Gateway + Lambda
+
+### Test Configuration for Serverless
+
+Serverless load testing differs from container load testing in one critical way: cold starts. The first requests after a quiet period are slower. Your K6 test must account for this.
+
+```javascript title="k6/tests/serverless-baseline.js"
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Rate, Trend } from 'k6/metrics';
+
+// Custom metrics for cold start tracking
+const coldStartRate = new Rate('cold_start_rate');
+const coldStartDuration = new Trend('cold_start_duration', true);
+const warmDuration = new Trend('warm_duration', true);
+
+const BASE_URL = __ENV.API_URL || 'https://api.shipfast.app';
+
+export const options = {
+  scenarios: {
+    // Phase 1: Cold start measurement
+    cold_start: {
+      executor: 'per-vu-iterations',
+      vus: 1,
+      iterations: 1,
+      startTime: '0s',
+      exec: 'coldStartTest',
+    },
+    // Phase 2: Warm-up (fill execution environments)
+    warmup: {
+      executor: 'constant-arrival-rate',
+      rate: 10,
+      timeUnit: '1s',
+      duration: '30s',
+      preAllocatedVUs: 20,
+      startTime: '5s',
+      exec: 'warmupTest',
+    },
+    // Phase 3: Steady-state measurement
+    steady_state: {
+      executor: 'constant-arrival-rate',
+      rate: 50,
+      timeUnit: '1s',
+      duration: '2m',
+      preAllocatedVUs: 100,
+      startTime: '40s',
+      exec: 'steadyStateTest',
+    },
+    // Phase 4: Burst test
+    burst: {
+      executor: 'ramping-arrival-rate',
+      startRate: 50,
+      timeUnit: '1s',
+      stages: [
+        { duration: '30s', target: 200 },
+        { duration: '30s', target: 500 },
+        { duration: '30s', target: 200 },
+        { duration: '30s', target: 50 },
+      ],
+      preAllocatedVUs: 600,
+      startTime: '3m',
+      exec: 'burstTest',
+    },
+  },
+  thresholds: {
+    // Warm requests: p95 < 100ms
+    'warm_duration': ['p(95)<100'],
+    // Cold starts: p95 < 500ms (Bun), < 1000ms (Python), < 200ms (Go)
+    'cold_start_duration': ['p(95)<1000'],
+    // Error rate < 1%
+    'http_req_failed': ['rate<0.01'],
+  },
+};
+```
+
+Four phases, each testing a different aspect:
+
+1. **Cold start:** One request after the function has been idle. Measures worst-case latency.
+2. **Warm-up:** 10 rps for 30 seconds. Fills Lambda execution environments so Phase 3 measures warm performance.
+3. **Steady state:** 50 rps for 2 minutes. Your expected traffic pattern. This is the baseline.
+4. **Burst:** Ramp from 50 to 500 rps and back down. Tests Lambda's auto-scaling and API Gateway throttling.
+
+### Cold Start Test
+
+```javascript title="k6/tests/serverless-baseline.js"
+export function coldStartTest() {
+  // Wait to ensure no warm environments exist
+  // (In practice, run this test first after deploying)
+
+  const endpoints = [
+    { name: 'health-bun', path: '/health' },
+    { name: 'webhook-bun', path: '/webhooks' },
+    { name: 'recommend-python', path: '/recommend' },
+    { name: 'events-go', path: '/events' },
+  ];
+
+  for (const endpoint of endpoints) {
+    const start = Date.now();
+    const res = http.post(`${BASE_URL}${endpoint.path}`, JSON.stringify({
+      event_type: 'test',
+      data: { source: 'k6-cold-start' },
+      user_id: 'k6-test-user',
+    }), {
+      headers: { 'content-type': 'application/json' },
+      tags: { endpoint: endpoint.name },
+    });
+
+    const duration = Date.now() - start;
+
+    // Any first request is a cold start
+    coldStartRate.add(1);
+    coldStartDuration.add(duration);
+
+    check(res, {
+      [`${endpoint.name} status 2xx`]: (r) => r.status >= 200 && r.status < 300,
+    });
+
+    // Small pause between endpoints
+    sleep(0.5);
+  }
+}
+```
+
+### Warm Steady-State Test
+
+```javascript title="k6/tests/serverless-baseline.js"
+export function warmupTest() {
+  const res = http.get(`${BASE_URL}/health`, {
+    tags: { endpoint: 'health-warmup' },
+  });
+  check(res, { 'warmup 200': (r) => r.status === 200 });
+}
+
+export function steadyStateTest() {
+  const endpoints = [
+    { weight: 0.4, method: 'GET', path: '/health', body: null },
+    { weight: 0.3, method: 'POST', path: '/webhooks', body: JSON.stringify({
+      event: 'order.created',
+      data: { order_id: `ord_${Date.now()}` },
+      timestamp: new Date().toISOString(),
+    })},
+    { weight: 0.2, method: 'POST', path: '/recommend', body: JSON.stringify({
+      user_id: `usr_${Math.floor(Math.random() * 1000)}`,
+    })},
+    { weight: 0.1, method: 'POST', path: '/events', body: JSON.stringify({
+      event_type: 'page.viewed',
+      data: { page: '/products' },
+      timestamp: new Date().toISOString(),
+    })},
+  ];
+
+  // Weighted random selection
+  const rand = Math.random();
+  let cumulative = 0;
+  let selected = endpoints[0];
+  for (const ep of endpoints) {
+    cumulative += ep.weight;
+    if (rand <= cumulative) {
+      selected = ep;
+      break;
+    }
+  }
+
+  const params = {
+    headers: { 'content-type': 'application/json' },
+    tags: { endpoint: selected.path },
+  };
+
+  let res;
+  if (selected.method === 'GET') {
+    res = http.get(`${BASE_URL}${selected.path}`, params);
+  } else {
+    res = http.post(`${BASE_URL}${selected.path}`, selected.body, params);
+  }
+
+  // Track warm vs cold based on response time
+  const duration = res.timings.duration;
+  if (duration > 300) {
+    coldStartRate.add(1);
+    coldStartDuration.add(duration);
+  } else {
+    coldStartRate.add(0);
+    warmDuration.add(duration);
+  }
+
+  check(res, {
+    'status 2xx': (r) => r.status >= 200 && r.status < 300,
+  });
+}
+```
+
+### Burst Test
+
+```javascript title="k6/tests/serverless-baseline.js"
+export function burstTest() {
+  const res = http.post(`${BASE_URL}/webhooks`, JSON.stringify({
+    event: 'burst.test',
+    data: { iteration: __ITER },
+    timestamp: new Date().toISOString(),
+  }), {
+    headers: { 'content-type': 'application/json' },
+    tags: { endpoint: 'webhook-burst' },
+  });
+
+  const duration = res.timings.duration;
+  if (duration > 300) {
+    coldStartRate.add(1);
+    coldStartDuration.add(duration);
+  } else {
+    coldStartRate.add(0);
+    warmDuration.add(duration);
+  }
+
+  check(res, {
+    'burst status ok': (r) => r.status >= 200 && r.status < 400,
+    'not throttled': (r) => r.status !== 429,
+  });
+}
+```
+
+### Running the Test
+
+```bash terminal
+k6 run --env API_URL=https://api.shipfast.app k6/tests/serverless-baseline.js
+```
+
+<TerminalOutput title="k6 run results">
+
+```
+     ✓ health-bun status 2xx
+     ✓ webhook-bun status 2xx
+     ✓ recommend-python status 2xx
+     ✓ events-go status 2xx
+     ✓ status 2xx
+     ✓ burst status ok
+     ✗ not throttled
+      ↳  98% — ✓ 14721 / ✗ 279
+
+     cold_start_duration.......: avg=287.3ms  min=82ms   med=173ms  max=1847ms p(90)=512ms  p(95)=843ms
+     cold_start_rate...........: 3.21%   ✓ 482     ✗ 14518
+     warm_duration.............: avg=18.4ms   min=4ms    med=12ms   max=198ms  p(90)=35ms   p(95)=52ms
+     http_req_duration.........: avg=27.1ms   min=4ms    med=13ms   max=1847ms p(90)=42ms   p(95)=89ms
+     http_req_failed...........: 0.02%   ✓ 3       ✗ 14997
+     http_reqs.................: 15000   125.0/s
+
+     ✓ warm_duration............: p(95)<100
+     ✓ cold_start_duration......: p(95)<1000
+     ✓ http_req_failed..........: rate<0.01
+```
+
+</TerminalOutput>
+
+Reading these results:
+
+- **Cold start rate:** 3.21% of requests experienced cold starts. During steady state, this drops to < 1%. The 3.21% includes the initial cold start phase and burst scaling.
+- **Cold start p95:** 843ms. This includes Python functions (which are slowest). Bun cold starts are under 300ms at p95. Go cold starts are under 150ms.
+- **Warm p95:** 52ms. Your warm serverless functions respond as fast as your Fargate containers.
+- **Throttling:** 279 requests throttled (429 status) during the burst phase. Your API Gateway rate limit of 1,000 rps was exceeded when burst hit 500 rps with concurrent VUs.
+
+---
+
+## Cold Start Analysis
+
+### Isolating Cold Starts by Runtime
+
+Run separate cold start tests per runtime to get accurate per-language numbers:
+
+```javascript title="k6/tests/cold-start-by-runtime.js"
+import http from 'k6/http';
+import { Trend } from 'k6/metrics';
+import { sleep } from 'k6';
+
+const bunColdStart = new Trend('bun_cold_start', true);
+const pythonColdStart = new Trend('python_cold_start', true);
+const goColdStart = new Trend('go_cold_start', true);
+
+export const options = {
+  scenarios: {
+    // Run 20 cold starts per runtime
+    // Each iteration waits for the environment to cool down
+    cold_starts: {
+      executor: 'per-vu-iterations',
+      vus: 1,
+      iterations: 60,  // 20 per runtime
+    },
+  },
+};
+
+const runtimes = [
+  { name: 'bun', path: '/health', metric: bunColdStart },
+  { name: 'python', path: '/recommend', metric: pythonColdStart },
+  { name: 'go', path: '/events', metric: goColdStart },
+];
+
+export default function () {
+  const runtime = runtimes[__ITER % runtimes.length];
+
+  // Wait 20 minutes between iterations for cold start
+  // In practice, use a fresh deployment or invoke with a unique qualifier
+  const res = http.post(`${__ENV.API_URL}${runtime.path}`, JSON.stringify({
+    event_type: 'cold-start-test',
+    data: { iteration: __ITER },
+    user_id: 'k6-cold-test',
+  }), {
+    headers: { 'content-type': 'application/json' },
+  });
+
+  runtime.metric.add(res.timings.duration);
+
+  // Sleep to allow environment to cool (for sequential cold start testing)
+  sleep(2);
+}
+```
+
+### Cold Start Results
+
+Expected results for 128MB ARM64 functions:
+
+| Runtime | p50 | p90 | p95 | p99 |
+|---------|-----|-----|-----|-----|
+| Bun (custom) | 148ms | 210ms | 248ms | 312ms |
+| Python 3.12 (no deps) | 290ms | 420ms | 480ms | 620ms |
+| Python 3.12 (numpy layer) | 1,200ms | 1,800ms | 2,100ms | 2,800ms |
+| Go (compiled) | 78ms | 105ms | 118ms | 145ms |
+
+The Python with numpy numbers are eye-opening. A dependency layer that adds numpy and scikit-learn pushes cold starts past 2 seconds at p95. This is why dependency management matters. Go's compiled binary cold starts in under 150ms at p99 because there is no interpreter startup, no package loading, no dependency resolution.
+
+:::tip
+Run cold start tests after every deployment to catch bundle size regressions. A new dependency that adds 500KB to your Bun bundle might add 50ms to your cold start. Track this over time.
+:::
+
+---
+
+## Concurrency Testing
+
+### Finding Your Scaling Limit
+
+Lambda scales by creating more execution environments. But your account has a regional concurrency limit (default: 1,000). Your reserved concurrency settings (from [Part 48](/blog/aws-for-startups/48-lambda-fundamentals)) cap individual functions. Test both.
+
+```javascript title="k6/tests/concurrency-limit.js"
+import http from 'k6/http';
+import { check } from 'k6';
+import { Rate } from 'k6/metrics';
+
+const throttledRate = new Rate('throttled_rate');
+
+export const options = {
+  scenarios: {
+    ramp_concurrency: {
+      executor: 'ramping-arrival-rate',
+      startRate: 10,
+      timeUnit: '1s',
+      stages: [
+        { duration: '1m', target: 100 },
+        { duration: '1m', target: 500 },
+        { duration: '1m', target: 1000 },
+        { duration: '1m', target: 1500 },
+        { duration: '1m', target: 1000 },
+        { duration: '1m', target: 100 },
+      ],
+      preAllocatedVUs: 2000,
+    },
+  },
+};
+
+export default function () {
+  const res = http.post(`${__ENV.API_URL}/webhooks`, JSON.stringify({
+    event: 'concurrency.test',
+    data: { vu: __VU, iter: __ITER },
+    timestamp: new Date().toISOString(),
+  }), {
+    headers: { 'content-type': 'application/json' },
+  });
+
+  const isThrottled = res.status === 429 || res.status === 502;
+  throttledRate.add(isThrottled);
+
+  check(res, {
+    'not throttled': (r) => r.status !== 429,
+    'not 502': (r) => r.status !== 502,
+  });
+}
+```
+
+When you hit the concurrency limit, you see two responses:
+
+- **429 (Too Many Requests):** API Gateway throttling kicked in. Your rate limit setting is working.
+- **502 (Bad Gateway):** Lambda throttled the invocation. Your function reached its reserved concurrency limit, or the regional limit is exhausted.
+
+The gap between your first 429s and your first 502s tells you whether API Gateway throttling is protecting your Lambda functions. If 429s appear first, the throttling is working. If 502s appear first, your API Gateway rate limit is set too high.
+
+---
+
+## Cost Analysis
+
+### Cost-Per-Request Calculation
+
+Lambda cost per request depends on memory allocation and execution duration.
+
+Formula: `cost = (requests * $0.20/million) + (requests * duration_ms * memory_GB * $0.0000166667/GB-second)`
+
+For a function at 128MB (0.125GB), 50ms average duration:
+
+```
+Per request = $0.0000002 + (0.05 * 0.125 * $0.0000166667)
+            = $0.0000002 + $0.000000104
+            = $0.000000304
+            = ~$0.30 per million requests
+```
+
+### Cost at Different Traffic Levels
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Lambda (128MB)", "Fargate (0.25 vCPU)", "EC2 (t3.small)"]} />
+  <ComparisonRow feature="100 req/day" Lambda__128MB_="$0.001/mo (Best)" Fargate__0_25_vCPU_="$9.40/mo" EC2__t3_small_="$15.18/mo" />
+  <ComparisonRow feature="1K req/day" Lambda__128MB_="$0.01/mo (Best)" Fargate__0_25_vCPU_="$9.40/mo" EC2__t3_small_="$15.18/mo" />
+  <ComparisonRow feature="10K req/day" Lambda__128MB_="$0.09/mo (Best)" Fargate__0_25_vCPU_="$9.40/mo" EC2__t3_small_="$15.18/mo" />
+  <ComparisonRow feature="100K req/day" Lambda__128MB_="$0.91/mo (Best)" Fargate__0_25_vCPU_="$9.40/mo" EC2__t3_small_="$15.18/mo" />
+  <ComparisonRow feature="1M req/day" Lambda__128MB_="$9.12/mo" Fargate__0_25_vCPU_="$9.40/mo (Best)" EC2__t3_small_="$15.18/mo" />
+  <ComparisonRow feature="10M req/day" Lambda__128MB_="$91.25/mo" Fargate__0_25_vCPU_="$18.80/mo" EC2__t3_small_="$15.18/mo (Best)" />
+  <ComparisonRow feature="100M req/day" Lambda__128MB_="$912.50/mo" Fargate__0_25_vCPU_="$37.60/mo (Best)" EC2__t3_small_="$15.18/mo (Best)" />
+</ComparisonTable>
+
+The crossover point is around **1 million requests per day** (roughly 12 requests per second sustained). Below that, Lambda is cheaper. Above that, Fargate wins. Far above that, EC2 wins on cost but loses on operational simplicity.
+
+:::warning
+These numbers assume 128MB, 50ms duration. If your function uses 512MB and takes 200ms, multiply the Lambda column by 16x. The crossover drops to around 60,000 requests/day. Memory and duration settings have a dramatic impact on where Lambda stops being the cheapest option.
+:::
+
+### Generating Your Cost Numbers
+
+Add a cost calculator to your K6 output:
+
+```javascript title="k6/tests/serverless-baseline.js"
+export function handleSummary(data) {
+  const totalRequests = data.metrics.http_reqs.values.count;
+  const avgDuration = data.metrics.http_req_duration.values.avg;
+  const memoryMB = 128;
+  const memoryGB = memoryMB / 1024;
+
+  const requestCost = totalRequests * 0.0000002;
+  const durationCost = totalRequests * (avgDuration / 1000) * memoryGB * 0.0000166667;
+  const totalCost = requestCost + durationCost;
+
+  const monthlyProjection = (totalCost / totalRequests) * 30 * 24 * 3600 * (totalRequests / data.state.testRunDurationMs * 1000);
+
+  return {
+    stdout: JSON.stringify({
+      total_requests: totalRequests,
+      avg_duration_ms: avgDuration.toFixed(2),
+      test_cost: `$${totalCost.toFixed(6)}`,
+      cost_per_request: `$${(totalCost / totalRequests).toFixed(9)}`,
+      monthly_projection: `$${monthlyProjection.toFixed(2)}`,
+    }, null, 2),
+  };
+}
+```
+
+<TerminalOutput title="Cost analysis output">
+
+```json
+{
+  "total_requests": 15000,
+  "avg_duration_ms": "27.10",
+  "test_cost": "$0.003054",
+  "cost_per_request": "$0.000000204",
+  "monthly_projection": "$5.42"
+}
+```
+
+</TerminalOutput>
+
+At the test's sustained rate of 125 requests/second, projected monthly Lambda cost is $5.42. The equivalent Fargate service costs $9.40/month minimum. Lambda wins at this traffic level.
+
+---
+
+## Serverless vs Containers Comparison
+
+Using data from this test and the container baseline from [Part 44](/blog/aws-for-startups/44-k6-containers):
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Lambda + API GW", "Fargate + ALB"]} />
+  <ComparisonRow feature="Cold start" Lambda___API_GW="80-250ms" Fargate___ALB="None (always warm)" />
+  <ComparisonRow feature="Warm p50" Lambda___API_GW="12ms" Fargate___ALB="10ms" />
+  <ComparisonRow feature="Warm p95" Lambda___API_GW="52ms" Fargate___ALB="45ms" />
+  <ComparisonRow feature="Warm p99" Lambda___API_GW="89ms" Fargate___ALB="72ms" />
+  <ComparisonRow feature="Max throughput" Lambda___API_GW="Account limit (1000 concurrent)" Fargate___ALB="Scale with tasks" />
+  <ComparisonRow feature="Scale-to-zero" Lambda___API_GW="Yes (Best)" Fargate___ALB="No (min 1 task)" />
+  <ComparisonRow feature="Cost at 1K req/day" Lambda___API_GW="$0.01/mo (Best)" Fargate___ALB="$9.40/mo" />
+  <ComparisonRow feature="Cost at 1M req/day" Lambda___API_GW="$9.12/mo" Fargate___ALB="$9.40/mo (comparable)" />
+  <ComparisonRow feature="Cost at 10M req/day" Lambda___API_GW="$91.25/mo" Fargate___ALB="$18.80/mo (Best)" />
+</ComparisonTable>
+
+### Decision Framework
+
+Based on your K6 data:
+
+| Workload | Recommended Compute | Why |
+|----------|-------------------|-----|
+| < 100K requests/day | Lambda | Scale-to-zero saves 95%+ vs Fargate |
+| 100K-1M requests/day | Either (test both) | Cost is similar; choose based on latency requirements |
+| > 1M requests/day | Fargate | Lambda cost scales linearly; Fargate cost is relatively flat |
+| Latency-sensitive (p99 < 50ms) | Fargate | No cold starts |
+| Bursty with long idle periods | Lambda | Pay nothing during idle |
+| Long-running (> 15 min) | Fargate | Lambda hard limit is 15 minutes |
+| WebSocket connections | Fargate | Lambda is request-response only |
+
+<Alert type="caution" title="Agent Trap">
+
+Agents do not account for cold starts in load test assertions. The agent writes a K6 test with `http_req_duration: ['p(95)<100']` and the test fails because cold starts push p95 above 100ms. The agent then suggests increasing Lambda memory to "fix" the latency, which costs more without reducing cold starts (cold start time is dominated by environment provisioning and code loading, not execution speed). The correct approach: separate cold start metrics from warm metrics in your test, set different thresholds for each, and accept that cold starts are a characteristic of serverless, not a bug to fix with more memory.
+
+**What catches it:** The K6 test template in this post separates `cold_start_duration` from `warm_duration` with different thresholds. Your AGENT-INSTRUCTIONS.md performance rules from [Part 34](/blog/aws-for-startups/34-k6-human-judgment) require human-set thresholds, not agent-suggested ones.
+
+</Alert>
+
+---
+
+## Running Cost Tests Regularly
+
+Add a serverless cost test to your CI pipeline:
+
+```yaml title=".github/workflows/serverless-cost-test.yml"
+name: Serverless Cost Test
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'  # First of every month at 6 AM UTC
+  workflow_dispatch:
+
+jobs:
+  cost-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install K6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D68
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update && sudo apt-get install k6
+
+      - name: Run serverless load test
+        run: k6 run --env API_URL=${{ secrets.API_URL }} k6/tests/serverless-baseline.js
+        env:
+          K6_OUT: json=results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverless-k6-results
+          path: results.json
+```
+
+Monthly testing catches two things: Lambda pricing changes (rare but impactful) and function performance regressions from code changes. Compare each month's cost-per-request against your baseline. A 2x increase means either your function got slower or your dependencies got larger.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No serverless load testing. You chose Lambda because "it scales automatically" and never measured cold starts, concurrency limits, or cost-per-request. Your monthly bill is 5x what Fargate would cost for the same workload. |
+| ✅ **Right** | K6 tests that separate cold start metrics from warm metrics, concurrency tests that find your scaling ceiling, cost-per-request calculations at multiple traffic levels, and a data-driven comparison between Lambda and Fargate for each workload. |
+| ❌ **Over** | Continuous serverless load testing in production, provisioned concurrency tuning based on real-time traffic predictions, automated runtime switching between Lambda and Fargate based on request volume. You have 50 users. The optimization infrastructure costs more than the compute it optimizes. |
+| 🤖 **Agent Trap** | Agent writes K6 thresholds of `p(95)<50` for Lambda endpoints without accounting for cold starts. The test fails. The agent suggests increasing memory from 128MB to 1024MB "to improve latency." Cold start time barely changes (it is dominated by environment provisioning, not execution speed), but your cost per request increases 8x. The correct fix: use separate warm/cold metrics and set realistic thresholds for each. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 54: SQS Queues**, we move from request-response serverless to event-driven architecture. SQS queues decouple producers from consumers, handle backpressure naturally, and give your Lambda functions a buffer when traffic spikes exceed what real-time processing can handle. The fan-out patterns from [Part 52](/blog/aws-for-startups/52-serverless-patterns) get a reliable message bus.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Load Testing",
+    tasks: [
+      { text: "K6 serverless baseline test runs against API Gateway endpoints", syncKey: "part-53-k6-runs" },
+      { text: "Cold start metrics separated from warm metrics", syncKey: "part-53-cold-warm-split" },
+      { text: "Four phases tested: cold start, warmup, steady state, burst", syncKey: "part-53-phases" },
+      { text: "Burst test identifies API Gateway throttling threshold", syncKey: "part-53-burst" }
+    ]
+  },
+  {
+    category: "Cost Analysis",
+    tasks: [
+      { text: "Cost-per-request calculated from K6 results", syncKey: "part-53-cost-per-req" },
+      { text: "Lambda vs Fargate crossover point identified for your workloads", syncKey: "part-53-crossover" },
+      { text: "Monthly cost projection generated from test data", syncKey: "part-53-monthly-cost" }
+    ]
+  },
+  {
+    category: "Cold Start Data",
+    tasks: [
+      { text: "Cold start measured per runtime (Bun, Python, Go)", syncKey: "part-53-per-runtime" },
+      { text: "Cold start impact on p95/p99 latency documented", syncKey: "part-53-p95-impact" },
+      { text: "Decision documented: which workloads stay on Lambda, which move to Fargate", syncKey: "part-53-decision" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. The Lambda vs Fargate crossover is around 1 million requests/day at 128MB/50ms, but at 512MB/200ms it drops to 60,000 requests/day, so your memory and duration settings determine where serverless stops being cheaper.
+2. Separate cold start metrics from warm metrics in your K6 tests because lumping them together makes your p95 look terrible and leads agents to suggest expensive "fixes" like increasing memory.
+3. Cost-per-request is the serverless metric that matters: calculate it from real K6 data, not from Lambda's pricing page, because your actual duration and memory usage determine the real number.
+4. Run serverless cost tests monthly to catch performance regressions and bundle size increases before they show up on your bill.
+5. The three compute models (EC2, Fargate, Lambda) each win at different scales: let your K6 data decide, not vendor marketing or agent opinions.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

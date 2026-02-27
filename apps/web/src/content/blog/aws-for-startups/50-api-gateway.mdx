@@ -1,0 +1,473 @@
+---
+title: "API Gateway: The Serverless Front Door"
+description: "Configure API Gateway (HTTP API) with Lambda integration. Routes, stages, throttling, and custom domains, the serverless equivalent of your ALB."
+excerpt: "The serverless front door. API Gateway with Lambda: routes, throttling, and custom domains for your serverless APIs."
+date: "2026-07-18"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "api-gateway", "lambda", "serverless", "terraform"]
+series: "aws-for-startups"
+seriesPart: 50
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your Bun Lambda function from [Part 49](/blog/aws-for-startups/49-lambda-bun) works perfectly when you invoke it through the AWS console. Now you need to call it from the internet. You could use a Lambda function URL (a public HTTPS endpoint that Lambda gives you for free), but function URLs have no throttling, no routing, no stage management, and no request validation. One traffic spike, and your Lambda concurrency limit is gone. One leaked URL, and the entire internet can invoke your function.
+
+**Time:** About 60 minutes.
+
+**Outcome:** An HTTP API Gateway with Lambda integration, route configuration, stage management for dev/staging/prod, throttling to prevent runaway costs, and a custom domain pointing at your API.
+
+---
+
+## Why This Matters
+
+Lambda function URLs feel like a shortcut. Enable the feature, get a URL, call the function. Done. For a quick demo, that works. For production, three things go wrong.
+
+First, no throttling. Every HTTP request becomes a Lambda invocation. A bot, a DDoS attempt, or a misconfigured client sending 10,000 requests per second will exhaust your Lambda concurrency limit and rack up charges. API Gateway applies rate limiting before your function is invoked.
+
+Second, no routing. One function URL maps to one function. If you have 10 Lambda functions, you have 10 URLs. Your frontend needs to know all 10. With API Gateway, you define routes (`/users`, `/webhooks`, `/health`) and each route maps to a different Lambda function behind a single domain.
+
+Third, no stages. Function URLs do not have the concept of dev, staging, and production. API Gateway stages let you deploy to dev, test, promote to staging, test again, promote to production, all with the same API definition and different stage variables.
+
+API Gateway is to Lambda what ALB is to ECS ([Part 22](/blog/aws-for-startups/22-alb-load-balancer)). The compute backend is different. The pattern is the same: routing, health, and traffic management in front of your application.
+
+---
+
+## What We're Building
+
+- HTTP API Gateway (not REST API, for reasons explained below)
+- Lambda proxy integration with the Bun functions from Part 49
+- Routes for `/health`, `/webhooks`, and `/users`
+- Stages: `dev`, `staging`, `prod`
+- Throttling at 1,000 requests/second (burst 2,000)
+- Custom domain with Route 53 and ACM certificate
+- Terraform modules for all of it
+
+---
+
+## REST API vs HTTP API
+
+AWS offers two API Gateway types. This distinction confuses everyone, including agents.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["HTTP API", "REST API"]} />
+  <ComparisonRow feature="Cost per million requests" HTTP_API="$1.00 (Best)" REST_API="$3.50" />
+  <ComparisonRow feature="Lambda integration" HTTP_API="Proxy only" REST_API="Proxy + custom mapping" />
+  <ComparisonRow feature="Request/response transforms" HTTP_API="No" REST_API="Yes (VTL templates)" />
+  <ComparisonRow feature="API keys and usage plans" HTTP_API="No" REST_API="Yes" />
+  <ComparisonRow feature="WebSocket support" HTTP_API="No" REST_API="No (separate WebSocket API)" />
+  <ComparisonRow feature="Caching" HTTP_API="No" REST_API="Yes (built-in)" />
+  <ComparisonRow feature="Request validation" HTTP_API="Parameter validation" REST_API="Full model validation" />
+  <ComparisonRow feature="JWT authorizer" HTTP_API="Built-in (Best)" REST_API="Custom authorizer Lambda" />
+  <ComparisonRow feature="Latency" HTTP_API="Lower (Best)" REST_API="Higher (more features = more processing)" />
+</ComparisonTable>
+
+**The recommendation:** Use HTTP API unless you specifically need REST API features (request/response transforms, API keys, caching). HTTP API costs 71% less, has lower latency, and has a built-in JWT authorizer that REST API requires a custom Lambda for.
+
+For a startup building APIs: HTTP API. The only common reason to use REST API is if you need API key-based usage plans for a B2B SaaS where customers get API keys with rate limits. Even then, you can implement API key validation in your Lambda function and skip the REST API overhead.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents create REST API Gateway 60-70% of the time because REST API has more training data (it was the only option for years). REST API costs 3.5x more per request and adds latency you do not need. When your agent generates `aws_api_gateway_rest_api`, stop and ask: "Do I need request transforms, API keys, or caching?" If the answer is no (and for most startups it is), switch to `aws_apigatewayv2_api` with `protocol_type = "HTTP"`.
+
+**What catches it:** The AGENT-INSTRUCTIONS.md API Design rules from [Part 23](/blog/aws-for-startups/23-api-design-rest) require HTTP API as the default. The `infra-verify-mcp` tool flags `aws_api_gateway_rest_api` resources and requires a comment justifying the choice.
+
+</Alert>
+
+---
+
+## Routes and Integrations
+
+### HTTP API Gateway with Lambda
+
+```hcl title="modules/api-gateway/main.tf"
+resource "aws_apigatewayv2_api" "this" {
+  name          = "${var.project}-${var.environment}-api"
+  protocol_type = "HTTP"
+
+  cors_configuration {
+    allow_origins = var.cors_origins
+    allow_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers = ["content-type", "authorization", "x-request-id"]
+    max_age       = 3600
+  }
+
+  tags = var.common_tags
+}
+```
+
+Notice `protocol_type = "HTTP"`. This is the HTTP API, not the REST API. The Terraform resource name `aws_apigatewayv2_api` is shared between HTTP and WebSocket APIs. The `protocol_type` field distinguishes them.
+
+### Lambda Integration
+
+Each Lambda function connects to the API Gateway through an integration:
+
+```hcl title="modules/api-gateway/integrations.tf"
+resource "aws_apigatewayv2_integration" "lambda" {
+  for_each = var.lambda_routes
+
+  api_id             = aws_apigatewayv2_api.this.id
+  integration_type   = "AWS_PROXY"
+  integration_uri    = each.value.invoke_arn
+  integration_method = "POST"
+  payload_format_version = "2.0"
+}
+```
+
+`AWS_PROXY` integration means API Gateway passes the entire HTTP request to Lambda and returns the Lambda response directly to the client. No transformation. Your Lambda function receives the raw request (method, path, headers, body, query parameters) and returns the full response (status code, headers, body).
+
+`payload_format_version = "2.0"` uses the v2 event format, which is cleaner than v1. The event type `APIGatewayProxyEventV2` in your TypeScript handler (from Part 49) matches this format.
+
+### Route Configuration
+
+```hcl title="modules/api-gateway/routes.tf"
+resource "aws_apigatewayv2_route" "routes" {
+  for_each = var.lambda_routes
+
+  api_id    = aws_apigatewayv2_api.this.id
+  route_key = each.value.route_key
+  target    = "integrations/${aws_apigatewayv2_integration.lambda[each.key].id}"
+}
+```
+
+Routes map HTTP method + path to integrations. Examples:
+
+```hcl title="environments/dev/api.tf"
+module "api" {
+  source = "../../modules/api-gateway"
+
+  project     = "shipfast"
+  environment = "dev"
+
+  lambda_routes = {
+    health = {
+      route_key  = "GET /health"
+      invoke_arn = module.health_function.invoke_arn
+    }
+    webhook = {
+      route_key  = "POST /webhooks"
+      invoke_arn = module.webhook_function.invoke_arn
+    }
+    list_users = {
+      route_key  = "GET /users"
+      invoke_arn = module.users_function.invoke_arn
+    }
+    create_user = {
+      route_key  = "POST /users"
+      invoke_arn = module.users_function.invoke_arn
+    }
+  }
+
+  cors_origins = ["https://dev.shipfast.app"]
+  common_tags  = var.common_tags
+}
+```
+
+Each route key follows the format `METHOD /path`. Multiple routes can point to the same Lambda function (both `GET /users` and `POST /users` route to the users function). The function determines the action from the HTTP method in the event.
+
+### Lambda Permission
+
+Lambda functions need explicit permission for API Gateway to invoke them:
+
+```hcl title="modules/api-gateway/permissions.tf"
+resource "aws_lambda_permission" "apigw" {
+  for_each = var.lambda_routes
+
+  statement_id  = "AllowAPIGateway-${each.key}"
+  action        = "lambda:InvokeFunction"
+  function_name = each.value.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.this.execution_arn}/*/*"
+}
+```
+
+Without this, API Gateway gets a 500 error when it tries to invoke your Lambda function. The `source_arn` restricts which API Gateway can invoke the function. The `/*/*` at the end means any stage and any route. You can scope it tighter for production (`/prod/POST/webhooks`), but the broad permission is fine for dev.
+
+---
+
+## Stages
+
+Stages let you deploy the same API definition to multiple environments. Each stage has its own URL and can have its own variables.
+
+```hcl title="modules/api-gateway/stages.tf"
+resource "aws_apigatewayv2_stage" "this" {
+  api_id = aws_apigatewayv2_api.this.id
+  name   = var.environment
+
+  auto_deploy = true
+
+  default_route_settings {
+    throttling_burst_limit = var.throttle_burst
+    throttling_rate_limit  = var.throttle_rate
+  }
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api.arn
+    format = jsonencode({
+      requestId    = "$context.requestId"
+      ip           = "$context.identity.sourceIp"
+      requestTime  = "$context.requestTime"
+      httpMethod   = "$context.httpMethod"
+      routeKey     = "$context.routeKey"
+      status       = "$context.status"
+      protocol     = "$context.protocol"
+      responseTime = "$context.responseLatency"
+      integrationLatency = "$context.integrationLatency"
+    })
+  }
+
+  stage_variables = var.stage_variables
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_log_group" "api" {
+  name              = "/aws/apigateway/${var.project}-${var.environment}-api"
+  retention_in_days = var.environment == "prod" ? 90 : 14
+
+  tags = var.common_tags
+}
+```
+
+Key settings:
+
+- **`auto_deploy = true`** means route changes deploy to this stage automatically. For production, consider setting this to `false` and deploying explicitly after testing in staging.
+
+- **Access log format** is JSON. This feeds into CloudWatch Logs Insights for query and analysis. The `responseLatency` and `integrationLatency` fields let you separate API Gateway overhead from Lambda execution time.
+
+- **Stage variables** pass environment-specific configuration to your Lambda functions through the API Gateway context. The Lambda function reads them from the event's `stageVariables` field.
+
+### Stage URLs
+
+Each stage gets a URL:
+
+```
+https://{api-id}.execute-api.{region}.amazonaws.com/{stage}
+```
+
+For example:
+
+```
+https://abc123.execute-api.us-east-1.amazonaws.com/dev
+https://abc123.execute-api.us-east-1.amazonaws.com/staging
+https://abc123.execute-api.us-east-1.amazonaws.com/prod
+```
+
+These auto-generated URLs work but are not suitable for production. You want `api.shipfast.app`, not `abc123.execute-api.us-east-1.amazonaws.com/prod`. Custom domains fix this.
+
+---
+
+## Throttling and Quotas
+
+Throttling prevents your Lambda bill from spiking due to traffic bursts (legitimate or malicious).
+
+### How API Gateway Throttling Works
+
+API Gateway uses a **token bucket** algorithm:
+
+- **Rate limit:** Steady-state requests per second. Default: 10,000 requests/second per account per region.
+- **Burst limit:** Maximum concurrent requests. Default: 5,000.
+
+You override these at the stage level, route level, or both:
+
+```hcl title="modules/api-gateway/variables.tf"
+variable "throttle_rate" {
+  description = "Requests per second (steady state)"
+  type        = number
+  default     = 1000
+}
+
+variable "throttle_burst" {
+  description = "Maximum concurrent requests (burst)"
+  type        = number
+  default     = 2000
+}
+```
+
+For a startup with < 1,000 users, 1,000 requests/second sustained and 2,000 burst is generous. If every user makes one request per second simultaneously, you need 1,000 concurrent. That covers most traffic patterns with headroom for bursts.
+
+### Per-Route Throttling
+
+Some routes need tighter limits. A login endpoint should not accept 1,000 requests/second from a single IP. A health check endpoint does not need the same burst capacity as your main API.
+
+```hcl title="modules/api-gateway/routes.tf"
+resource "aws_apigatewayv2_route" "routes" {
+  for_each = var.lambda_routes
+
+  api_id    = aws_apigatewayv2_api.this.id
+  route_key = each.value.route_key
+  target    = "integrations/${aws_apigatewayv2_integration.lambda[each.key].id}"
+}
+
+# Override throttling for specific routes
+resource "aws_apigatewayv2_route_settings" "overrides" {
+  for_each = { for k, v in var.lambda_routes : k => v if v.throttle_rate != null }
+
+  api_id    = aws_apigatewayv2_api.this.id
+  stage_id  = aws_apigatewayv2_stage.this.id
+  route_key = each.value.route_key
+
+  throttling_burst_limit = each.value.throttle_burst
+  throttling_rate_limit  = each.value.throttle_rate
+}
+```
+
+:::warning
+Without throttling, a single user with a `while true` loop can exhaust your Lambda concurrency and generate a bill you did not plan for. Always set throttle limits, even if they are generous.
+:::
+
+---
+
+## Custom Domains
+
+A custom domain maps `api.shipfast.app` to your API Gateway. You already have Route 53 and ACM set up from [Part 14](/blog/aws-for-startups/14-route53-acm-dns).
+
+### Certificate
+
+HTTP APIs require a certificate in the same region as the API Gateway (unlike CloudFront, which requires us-east-1):
+
+```hcl title="modules/api-gateway/domain.tf"
+resource "aws_acm_certificate" "api" {
+  domain_name       = "api.${var.domain}"
+  validation_method = "DNS"
+
+  tags = var.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.api.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  zone_id = var.route53_zone_id
+  name    = each.value.name
+  type    = each.value.type
+  records = [each.value.record]
+  ttl     = 60
+
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "api" {
+  certificate_arn         = aws_acm_certificate.api.arn
+  validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+}
+```
+
+### Domain Name and Mapping
+
+```hcl title="modules/api-gateway/domain.tf"
+resource "aws_apigatewayv2_domain_name" "this" {
+  domain_name = "api.${var.domain}"
+
+  domain_name_configuration {
+    certificate_arn = aws_acm_certificate_validation.api.certificate_arn
+    endpoint_type   = "REGIONAL"
+    security_policy = "TLS_1_2"
+  }
+
+  tags = var.common_tags
+}
+
+resource "aws_apigatewayv2_api_mapping" "this" {
+  api_id      = aws_apigatewayv2_api.this.id
+  domain_name = aws_apigatewayv2_domain_name.this.id
+  stage       = aws_apigatewayv2_stage.this.id
+}
+
+resource "aws_route53_record" "api" {
+  zone_id = var.route53_zone_id
+  name    = "api.${var.domain}"
+  type    = "A"
+
+  alias {
+    name                   = aws_apigatewayv2_domain_name.this.domain_name_configuration[0].target_domain_name
+    zone_id                = aws_apigatewayv2_domain_name.this.domain_name_configuration[0].hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+```
+
+After applying, `api.shipfast.app` routes to your API Gateway, which routes to your Lambda functions. The path from the user's browser to your function: DNS (Route 53) -> TLS (ACM) -> API Gateway (throttling, routing) -> Lambda (your code).
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Lambda function URLs with no throttling, no routing, and no custom domain. Each function has its own URL. A traffic spike exhausts your concurrency limit and costs $500 before you notice. |
+| ✅ **Right** | HTTP API Gateway with routes, 1,000 rps throttling, custom domain, JSON access logs, CORS configured. Each environment has its own stage. |
+| ❌ **Over** | REST API with VTL request/response transformations, API keys with usage plans, built-in caching, WAF integration, and request model validation for a pre-launch API that handles 50 requests per day. That is $3.50/million requests instead of $1.00/million, plus the cognitive cost of VTL templates. |
+| 🤖 **Agent Trap** | Agent creates `aws_api_gateway_rest_api` (REST API) instead of `aws_apigatewayv2_api` with `protocol_type = "HTTP"` (HTTP API). REST API has more examples in training data but costs 3.5x more per request and adds features you do not need. The Terraform resource names are confusing: v1 resources (`aws_api_gateway_*`) are REST API, v2 resources (`aws_apigatewayv2_*`) are HTTP API and WebSocket. Always use v2 unless you need REST-specific features. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 51: API Gateway: Python + Go Lambda Backends**, you deploy Python and Go Lambda functions behind the same API Gateway. Same routes, same throttling, different runtimes. You will see how the same API Gateway routes to Bun, Python, and Go functions, and measure cold start differences across all three.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "API Gateway",
+    tasks: [
+      { text: "HTTP API Gateway created (not REST API)", syncKey: "part-50-http-api" },
+      { text: "Lambda proxy integrations configured with payload v2.0", syncKey: "part-50-integration" },
+      { text: "Routes configured for /health, /webhooks, /users", syncKey: "part-50-routes" },
+      { text: "CORS configured for your frontend domain", syncKey: "part-50-cors" }
+    ]
+  },
+  {
+    category: "Traffic Management",
+    tasks: [
+      { text: "Stage deployed with throttling (rate + burst limits)", syncKey: "part-50-throttle" },
+      { text: "Access logs enabled in JSON format to CloudWatch", syncKey: "part-50-logs" },
+      { text: "Stage auto-deploy configured (true for dev, consider false for prod)", syncKey: "part-50-stages" }
+    ]
+  },
+  {
+    category: "Custom Domain",
+    tasks: [
+      { text: "ACM certificate issued and validated for api.yourdomain.com", syncKey: "part-50-cert" },
+      { text: "Custom domain configured with TLS 1.2", syncKey: "part-50-domain" },
+      { text: "Route 53 alias record pointing to API Gateway", syncKey: "part-50-dns" },
+      { text: "API accessible at custom domain URL", syncKey: "part-50-verify" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. HTTP API costs $1.00/million requests versus REST API's $3.50/million, and HTTP API covers every feature a startup needs until you need API keys with usage plans.
+2. API Gateway throttling is your first line of defense against both DDoS and accidental cost explosions: without it, one misconfigured client can exhaust your Lambda concurrency in seconds.
+3. Lambda function URLs are demos, not production infrastructure: no throttling, no routing, no stages, no access logs.
+4. The Terraform resource naming is a trap: `aws_api_gateway_*` is REST API (v1), `aws_apigatewayv2_*` is HTTP API (v2), and agents consistently pick the wrong one because REST API has more training data.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

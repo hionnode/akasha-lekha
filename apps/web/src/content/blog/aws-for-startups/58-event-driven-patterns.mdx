@@ -1,0 +1,683 @@
+---
+title: "Event-Driven Patterns: Making Async Reliable"
+description: "Production patterns for event-driven architecture: idempotency, correlation IDs, saga pattern, and the distributed system patterns that prevent data loss."
+excerpt: "Making async reliable. Idempotency, correlation IDs, saga pattern: the distributed system patterns that prevent your event-driven architecture from losing data."
+date: "2026-08-18"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "serverless", "observability"]
+series: "aws-for-startups"
+seriesPart: 58
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your SQS consumer processes an order. Midway through, the Lambda times out. SQS delivers the message again because it never got a delete confirmation. Your consumer processes the same order a second time. The customer gets charged twice, two shipments go out, and your support team spends the afternoon issuing refunds. The message was processed. It was also processed again. Nothing in your code prevented it.
+
+**Time:** About 45 minutes.
+
+**Outcome:** Idempotent event handlers that survive retries, correlation IDs that trace requests across async boundaries, the saga pattern for multi-step workflows, the outbox pattern for reliable event publishing, and a versioning strategy that lets you evolve event schemas without breaking consumers.
+
+---
+
+## Why This Matters
+
+In [Part 54](/blog/aws-for-startups/54-sqs-queues) and [Part 55](/blog/aws-for-startups/55-sns-eventbridge), you built event-driven services with SQS, SNS, and EventBridge. Those services work. Messages flow from producers to consumers. But "works" and "works reliably under failure conditions" are different things.
+
+Distributed systems fail in ways monoliths never do. A message gets delivered twice. A downstream service is temporarily unavailable. Two events arrive out of order. A consumer crashes halfway through processing. These are not edge cases. These are Tuesday.
+
+The patterns in this post are the difference between an event-driven architecture that works in demo conditions and one that works at 3 AM when your payment processor returns intermittent 503s and SQS is retrying every message three times.
+
+---
+
+## What We're Building
+
+- Idempotent event handlers using DynamoDB conditional writes
+- Correlation ID propagation across SQS, SNS, and EventBridge boundaries
+- The saga pattern for multi-step order processing with compensating actions
+- The outbox pattern for atomic event publishing alongside database writes
+- Event schema versioning with backward compatibility
+
+---
+
+## Idempotency Patterns
+
+Idempotency means processing the same message twice produces the same result as processing it once. This is the single most important pattern in event-driven systems, and the one most frequently skipped.
+
+### Why At-Least-Once Delivery Matters
+
+SQS guarantees at-least-once delivery. Not exactly-once. At-least-once. That means every message will arrive, but some messages will arrive more than once. The reasons are mechanical: visibility timeout expires before your consumer finishes, the consumer crashes after processing but before calling `DeleteMessage`, or SQS's internal replication delivers a copy.
+
+SQS FIFO queues offer exactly-once processing within a deduplication window (5 minutes), but only for messages with the same `MessageDeduplicationId`. Outside that window, or with standard queues, you need application-level idempotency.
+
+### The Idempotency Key Pattern
+
+Every event gets a unique idempotency key. Before processing, your handler checks whether that key has been seen. If yes, skip. If no, process and record the key.
+
+```typescript title="src/handlers/order-processor.ts"
+import { DynamoDBClient, PutItemCommand, ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+
+const dynamodb = new DynamoDBClient({});
+
+interface OrderEvent {
+  idempotencyKey: string;
+  orderId: string;
+  amount: number;
+  customerId: string;
+}
+
+export async function handleOrder(event: OrderEvent): Promise<void> {
+  // Step 1: Claim the idempotency key with a conditional write
+  try {
+    await dynamodb.send(new PutItemCommand({
+      TableName: 'idempotency-keys',
+      Item: {
+        pk: { S: `ORDER#${event.idempotencyKey}` },
+        status: { S: 'PROCESSING' },
+        orderId: { S: event.orderId },
+        ttl: { N: String(Math.floor(Date.now() / 1000) + 86400) }, // 24h TTL
+        createdAt: { S: new Date().toISOString() },
+      },
+      ConditionExpression: 'attribute_not_exists(pk)',
+    }));
+  } catch (error) {
+    if (error instanceof ConditionalCheckFailedException) {
+      console.log(`Duplicate event detected: ${event.idempotencyKey}. Skipping.`);
+      return;
+    }
+    throw error;
+  }
+
+  // Step 2: Process the order (this only runs once per idempotency key)
+  try {
+    await processPayment(event.orderId, event.amount);
+    await updateInventory(event.orderId);
+    await sendConfirmation(event.customerId, event.orderId);
+
+    // Step 3: Mark as completed
+    await dynamodb.send(new PutItemCommand({
+      TableName: 'idempotency-keys',
+      Item: {
+        pk: { S: `ORDER#${event.idempotencyKey}` },
+        status: { S: 'COMPLETED' },
+        orderId: { S: event.orderId },
+        ttl: { N: String(Math.floor(Date.now() / 1000) + 86400) },
+        completedAt: { S: new Date().toISOString() },
+      },
+    }));
+  } catch (error) {
+    // Step 4: Mark as failed so retries can try again
+    await dynamodb.send(new PutItemCommand({
+      TableName: 'idempotency-keys',
+      Item: {
+        pk: { S: `ORDER#${event.idempotencyKey}` },
+        status: { S: 'FAILED' },
+        orderId: { S: event.orderId },
+        ttl: { N: String(Math.floor(Date.now() / 1000) + 86400) },
+        error: { S: String(error) },
+      },
+    }));
+    throw error;
+  }
+}
+```
+
+The `ConditionExpression: 'attribute_not_exists(pk)'` is what makes this work. DynamoDB's conditional write is atomic. If two Lambda invocations try to claim the same key simultaneously, exactly one succeeds. The other gets `ConditionalCheckFailedException` and skips processing.
+
+### The DynamoDB Idempotency Table
+
+```hcl title="infra/modules/idempotency/main.tf"
+resource "aws_dynamodb_table" "idempotency" {
+  name         = "${var.project}-${var.environment}-idempotency"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  tags = {
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+    Purpose     = "idempotency-keys"
+  }
+}
+```
+
+PAY_PER_REQUEST billing is correct here. Idempotency checks are lightweight (single-item conditional writes), and traffic scales with your event volume. The TTL automatically cleans up old keys after 24 hours, keeping the table small.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate idempotency checks using `GetItem` followed by `PutItem` as two separate calls. This has a race condition: two consumers can both read "not found," then both write and both process. The conditional write (`ConditionExpression: 'attribute_not_exists(pk)'`) is a single atomic operation that eliminates the race. Always verify agent-generated idempotency code uses conditional writes, not read-then-write.
+
+</Alert>
+
+### Choosing Your Idempotency Key
+
+The idempotency key must be deterministic from the event itself. If you generate a random UUID per processing attempt, every retry looks like a new event, defeating the purpose.
+
+Good idempotency keys:
+
+| Source | Key Pattern | Example |
+|--------|-------------|---------|
+| SQS message | `MessageId` | `a1b2c3d4-e5f6-7890-abcd-ef1234567890` |
+| API Gateway request | Request header `Idempotency-Key` | Client-generated UUID |
+| EventBridge event | `detail.eventId` or `id` | Application-defined event ID |
+| Webhook | Webhook payload ID | `evt_1234567890` (Stripe) |
+
+For SQS, the `MessageId` is unique per delivery attempt with standard queues, but the same message retried will have the same `MessageId`. For FIFO queues, use the `MessageDeduplicationId`.
+
+---
+
+## Correlation IDs
+
+When a single user action triggers a chain of events across four services, you need a way to connect those events. A correlation ID is a unique identifier that follows a request from its origin through every service it touches.
+
+### Propagating Through Message Attributes
+
+Every message sent to SQS, SNS, or EventBridge carries the correlation ID as a message attribute:
+
+```typescript title="src/lib/correlation.ts"
+import { randomUUID } from 'crypto';
+import { context, trace, SpanContext } from '@opentelemetry/api';
+
+export interface CorrelationContext {
+  correlationId: string;
+  traceId: string;
+  spanId: string;
+  source: string;
+  timestamp: string;
+}
+
+export function createCorrelationContext(source: string): CorrelationContext {
+  const activeSpan = trace.getActiveSpan();
+  const spanContext: SpanContext | undefined = activeSpan?.spanContext();
+
+  return {
+    correlationId: randomUUID(),
+    traceId: spanContext?.traceId ?? randomUUID().replace(/-/g, ''),
+    spanId: spanContext?.spanId ?? randomUUID().slice(0, 16),
+    source,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+export function extractCorrelationContext(
+  messageAttributes: Record<string, { DataType: string; StringValue: string }>
+): CorrelationContext {
+  return {
+    correlationId: messageAttributes['correlationId']?.StringValue ?? randomUUID(),
+    traceId: messageAttributes['traceId']?.StringValue ?? '',
+    spanId: messageAttributes['spanId']?.StringValue ?? '',
+    source: messageAttributes['source']?.StringValue ?? 'unknown',
+    timestamp: messageAttributes['timestamp']?.StringValue ?? new Date().toISOString(),
+  };
+}
+```
+
+### Attaching to SQS Messages
+
+```typescript title="src/lib/messaging.ts"
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { CorrelationContext } from './correlation';
+
+const sqs = new SQSClient({});
+
+export async function sendMessage(
+  queueUrl: string,
+  body: Record<string, unknown>,
+  correlation: CorrelationContext
+): Promise<void> {
+  await sqs.send(new SendMessageCommand({
+    QueueUrl: queueUrl,
+    MessageBody: JSON.stringify(body),
+    MessageAttributes: {
+      correlationId: { DataType: 'String', StringValue: correlation.correlationId },
+      traceId: { DataType: 'String', StringValue: correlation.traceId },
+      spanId: { DataType: 'String', StringValue: correlation.spanId },
+      source: { DataType: 'String', StringValue: correlation.source },
+      timestamp: { DataType: 'String', StringValue: correlation.timestamp },
+    },
+  }));
+}
+```
+
+### Connecting to OpenTelemetry
+
+The correlation context includes the OpenTelemetry trace ID from [Part 5](/blog/aws-for-startups/05-opentelemetry-setup). When a downstream consumer receives the message, it creates a new span linked to the original trace:
+
+```typescript title="src/handlers/sqs-consumer.ts"
+import { trace, SpanKind, context } from '@opentelemetry/api';
+import { extractCorrelationContext } from '../lib/correlation';
+
+const tracer = trace.getTracer('order-service');
+
+export async function handler(event: SQSEvent): Promise<void> {
+  for (const record of event.Records) {
+    const correlation = extractCorrelationContext(
+      record.messageAttributes as any
+    );
+
+    const span = tracer.startSpan('process-order', {
+      kind: SpanKind.CONSUMER,
+      attributes: {
+        'messaging.correlation_id': correlation.correlationId,
+        'messaging.source': correlation.source,
+        'messaging.message_id': record.messageId,
+      },
+      links: [{
+        context: {
+          traceId: correlation.traceId,
+          spanId: correlation.spanId,
+          traceFlags: 1,
+        },
+      }],
+    });
+
+    try {
+      await context.with(trace.setSpan(context.active(), span), async () => {
+        await processRecord(record, correlation);
+      });
+    } finally {
+      span.end();
+    }
+  }
+}
+```
+
+In SigNoz, you can now search for all spans with the same `messaging.correlation_id` to see the complete journey of a single user action across every service it touched.
+
+---
+
+## The Saga Pattern
+
+Distributed transactions do not exist in event-driven architectures. You cannot roll back an SQS message that has already been consumed by another service. The saga pattern replaces transactions with a sequence of local operations, each with a compensating action that undoes its effect if a later step fails.
+
+### Order Processing Saga
+
+Consider an order flow: charge the customer, reserve inventory, schedule shipping. If shipping fails, you need to release the inventory and refund the charge.
+
+```typescript title="src/sagas/order-saga.ts"
+interface SagaStep<T> {
+  name: string;
+  execute: (context: T) => Promise<void>;
+  compensate: (context: T) => Promise<void>;
+}
+
+interface OrderContext {
+  orderId: string;
+  customerId: string;
+  amount: number;
+  items: Array<{ productId: string; quantity: number }>;
+  paymentId?: string;
+  reservationId?: string;
+  shipmentId?: string;
+}
+
+const orderSagaSteps: SagaStep<OrderContext>[] = [
+  {
+    name: 'charge-payment',
+    execute: async (ctx) => {
+      ctx.paymentId = await chargeCustomer(ctx.customerId, ctx.amount);
+    },
+    compensate: async (ctx) => {
+      if (ctx.paymentId) {
+        await refundPayment(ctx.paymentId);
+      }
+    },
+  },
+  {
+    name: 'reserve-inventory',
+    execute: async (ctx) => {
+      ctx.reservationId = await reserveInventory(ctx.items);
+    },
+    compensate: async (ctx) => {
+      if (ctx.reservationId) {
+        await releaseInventory(ctx.reservationId);
+      }
+    },
+  },
+  {
+    name: 'schedule-shipping',
+    execute: async (ctx) => {
+      ctx.shipmentId = await scheduleShipment(ctx.orderId, ctx.items);
+    },
+    compensate: async (ctx) => {
+      if (ctx.shipmentId) {
+        await cancelShipment(ctx.shipmentId);
+      }
+    },
+  },
+];
+
+export async function executeSaga(context: OrderContext): Promise<void> {
+  const completedSteps: SagaStep<OrderContext>[] = [];
+
+  for (const step of orderSagaSteps) {
+    try {
+      console.log(`Executing saga step: ${step.name}`);
+      await step.execute(context);
+      completedSteps.push(step);
+    } catch (error) {
+      console.error(`Saga step failed: ${step.name}`, error);
+
+      // Compensate in reverse order
+      for (const completed of completedSteps.reverse()) {
+        try {
+          console.log(`Compensating: ${completed.name}`);
+          await completed.compensate(context);
+        } catch (compensateError) {
+          console.error(
+            `Compensation failed for ${completed.name}. Manual intervention required.`,
+            compensateError
+          );
+          // Log to dead letter for manual resolution
+          await sendToDeadLetter({
+            sagaId: context.orderId,
+            failedStep: step.name,
+            compensationFailure: completed.name,
+            context,
+            error: String(compensateError),
+          });
+        }
+      }
+
+      throw new Error(`Saga failed at step ${step.name}: ${error}`);
+    }
+  }
+}
+```
+
+### Key Design Decisions
+
+Three things to notice about this implementation:
+
+**Compensations run in reverse order.** If step 3 fails, you compensate step 2 first, then step 1. This mirrors database rollback semantics where the most recent operation is undone first.
+
+**Compensation failures go to a dead letter queue.** If you charged the customer but the refund API is also down, you cannot just log and move on. That money is in limbo. The dead letter queue creates a trail that your operations team (or a future process) picks up for manual resolution.
+
+**Each step is idempotent.** Compensating actions must also be idempotent. A refund that runs twice should not credit the customer double. The same DynamoDB conditional write pattern from the idempotency section applies here.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Choreography", "Orchestration"]} />
+  <ComparisonRow feature="Coordination" Choreography="Services react to events" Orchestration="Central coordinator directs flow" />
+  <ComparisonRow feature="Coupling" Choreography="Loose (services independent)" Orchestration="Central point of control" />
+  <ComparisonRow feature="Debugging" Choreography="Hard (trace events across services)" Orchestration="Easy (single execution log) (Best)" />
+  <ComparisonRow feature="Complexity" Choreography="Grows with service count" Orchestration="Concentrated in coordinator" />
+  <ComparisonRow feature="Best for" Choreography="Simple flows (2-3 steps)" Orchestration="Complex flows (4+ steps) (Best)" />
+</ComparisonTable>
+
+For a startup with fewer than five services, orchestration (the pattern shown above) is the right choice. You get a single place to see the saga's state, debug failures, and add new steps. Choreography sounds elegant but becomes a debugging nightmare when you have eight services reacting to events and you need to figure out why an order got stuck.
+
+---
+
+## The Outbox Pattern
+
+Here is a subtle bug: your service writes an order to the database, then publishes an event to SQS. The database write succeeds. The SQS publish fails (network blip, throttling, Lambda timeout). The order exists in the database but no event was published. Downstream services never learn about it.
+
+The outbox pattern solves this by writing the event to the database in the same transaction as the business data. A separate process reads the outbox table and publishes events.
+
+### Writing to the Outbox
+
+```typescript title="src/lib/outbox.ts"
+import { DynamoDBClient, TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
+
+const dynamodb = new DynamoDBClient({});
+
+interface OutboxEvent {
+  eventId: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+  destination: string; // SQS queue URL or SNS topic ARN
+}
+
+export async function writeWithOutbox(
+  tableName: string,
+  item: Record<string, any>,
+  event: OutboxEvent
+): Promise<void> {
+  await dynamodb.send(new TransactWriteItemsCommand({
+    TransactItems: [
+      {
+        Put: {
+          TableName: tableName,
+          Item: item,
+        },
+      },
+      {
+        Put: {
+          TableName: `${tableName}-outbox`,
+          Item: {
+            pk: { S: event.eventId },
+            eventType: { S: event.eventType },
+            payload: { S: JSON.stringify(event.payload) },
+            destination: { S: event.destination },
+            status: { S: 'PENDING' },
+            createdAt: { S: new Date().toISOString() },
+            ttl: { N: String(Math.floor(Date.now() / 1000) + 604800) }, // 7 day TTL
+          },
+        },
+      },
+    ],
+  }));
+}
+```
+
+### The Outbox Publisher
+
+A separate Lambda, triggered by DynamoDB Streams on the outbox table, reads pending events and publishes them:
+
+```typescript title="src/handlers/outbox-publisher.ts"
+import { DynamoDBStreamEvent } from 'aws-lambda';
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+
+const sqs = new SQSClient({});
+const sns = new SNSClient({});
+
+export async function handler(event: DynamoDBStreamEvent): Promise<void> {
+  for (const record of event.Records) {
+    if (record.eventName !== 'INSERT') continue;
+
+    const newImage = record.dynamodb?.NewImage;
+    if (!newImage || newImage.status?.S !== 'PENDING') continue;
+
+    const destination = newImage.destination?.S ?? '';
+    const payload = newImage.payload?.S ?? '{}';
+    const eventType = newImage.eventType?.S ?? '';
+
+    try {
+      if (destination.includes('sqs')) {
+        await sqs.send(new SendMessageCommand({
+          QueueUrl: destination,
+          MessageBody: payload,
+          MessageAttributes: {
+            eventType: { DataType: 'String', StringValue: eventType },
+          },
+        }));
+      } else if (destination.startsWith('arn:aws:sns')) {
+        await sns.send(new PublishCommand({
+          TopicArn: destination,
+          Message: payload,
+          MessageAttributes: {
+            eventType: { DataType: 'String', StringValue: eventType },
+          },
+        }));
+      }
+    } catch (error) {
+      console.error(`Failed to publish outbox event: ${newImage.pk?.S}`, error);
+      // DynamoDB Streams will retry the batch
+      throw error;
+    }
+  }
+}
+```
+
+The beauty of this approach: DynamoDB Streams guarantees at-least-once delivery of change records. If the publisher Lambda fails, the stream retries. Combined with idempotent consumers, you get reliable end-to-end event delivery with exactly-once processing semantics.
+
+---
+
+## Event Versioning
+
+Events are contracts. Once a consumer depends on a field, you cannot remove it without breaking that consumer. Event versioning lets you evolve schemas while maintaining backward compatibility.
+
+### The Additive-Only Rule
+
+The simplest versioning strategy: never remove or rename fields. Only add new ones. Consumers that do not know about new fields ignore them. Consumers that need new fields check for their presence.
+
+```typescript title="src/events/order-events.ts"
+// Version 1: Original event
+interface OrderCreatedV1 {
+  version: 1;
+  orderId: string;
+  customerId: string;
+  amount: number;
+  createdAt: string;
+}
+
+// Version 2: Added shipping address (new field, backward compatible)
+interface OrderCreatedV2 {
+  version: 2;
+  orderId: string;
+  customerId: string;
+  amount: number;
+  createdAt: string;
+  shippingAddress?: {
+    street: string;
+    city: string;
+    country: string;
+    postalCode: string;
+  };
+}
+
+// Consumer handles both versions
+type OrderCreatedEvent = OrderCreatedV1 | OrderCreatedV2;
+
+function processOrderCreated(event: OrderCreatedEvent): void {
+  // Core fields are guaranteed
+  console.log(`Order ${event.orderId} for $${event.amount}`);
+
+  // New fields are checked
+  if (event.version >= 2 && 'shippingAddress' in event && event.shippingAddress) {
+    console.log(`Shipping to ${event.shippingAddress.city}`);
+  }
+}
+```
+
+### When Additive-Only Is Not Enough
+
+Sometimes you need to change a field's type or meaning. In that case, create a new event type entirely:
+
+```typescript title="src/events/pricing-events.ts"
+// Original: amount was in dollars
+interface OrderPricedV1 {
+  eventType: 'order.priced';
+  version: 1;
+  orderId: string;
+  amount: number; // USD, always
+}
+
+// New: amount has currency
+// This is NOT backward compatible, so it gets a new event type
+interface OrderPricedMultiCurrencyV1 {
+  eventType: 'order.priced.multicurrency';
+  version: 1;
+  orderId: string;
+  amount: number;
+  currency: string; // ISO 4217
+  exchangeRate: number;
+}
+```
+
+Producers publish both events during a migration period. Old consumers read `order.priced`. New consumers read `order.priced.multicurrency`. When all consumers have migrated, you stop publishing the old event.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents add new required fields to existing event schemas without considering backward compatibility. They will add `shippingAddress` as a required field on `OrderCreatedEvent`, breaking every existing consumer that does not send it. Always verify that new fields on existing events are optional. Required fields belong on new event types.
+
+</Alert>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Fire-and-forget events with no idempotency. SQS retries cause double charges. No correlation IDs, so tracing a request across three services requires grepping CloudWatch logs in four browser tabs. |
+| ✅ **Right** | Idempotent handlers using DynamoDB conditional writes. Correlation IDs in message attributes linked to OpenTelemetry traces. Saga pattern for multi-step workflows with compensating actions. Outbox pattern for reliable event publishing. |
+| ❌ **Over** | Full event sourcing with CQRS, a schema registry, and Avro serialization for a CRUD app that processes 50 events per hour. You spent three months building infrastructure for a scale you will not hit for two years. |
+| 🤖 **Agent Trap** | Agent generates event handlers without idempotency because the handler "works" on the first invocation. It uses `GetItem` then `PutItem` for deduplication, creating a race condition. The verification step catches this: grep all handlers for `conditional write` and flag any that use read-then-write for idempotency checks. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 59: Debugging Production Issues**, you take these patterns into a live debugging scenario. When your saga's compensation step fails at 2 AM, you need a structured debugging workflow: SigNoz for traces, Grafana for deploy correlation, and a new observability MCP server that lets agents query your traces and correlate errors with deployments.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Idempotency",
+    tasks: [
+      { text: "Idempotency table created in DynamoDB with TTL enabled", syncKey: "part-58-idempotency-table" },
+      { text: "Event handlers use conditional writes (not read-then-write)", syncKey: "part-58-conditional-writes" },
+      { text: "Idempotency keys derived from event data (not random UUIDs per attempt)", syncKey: "part-58-idempotency-keys" }
+    ]
+  },
+  {
+    category: "Correlation & Tracing",
+    tasks: [
+      { text: "Correlation ID helper creates and extracts context from message attributes", syncKey: "part-58-correlation-helper" },
+      { text: "All SQS/SNS messages include correlationId, traceId, spanId attributes", syncKey: "part-58-message-attributes" },
+      { text: "Consumer spans link to producer trace via OpenTelemetry span links", syncKey: "part-58-span-links" }
+    ]
+  },
+  {
+    category: "Reliability Patterns",
+    tasks: [
+      { text: "Saga pattern implemented with compensating actions for each step", syncKey: "part-58-saga-pattern" },
+      { text: "Compensation failures routed to dead letter queue for manual resolution", syncKey: "part-58-compensation-dlq" },
+      { text: "Outbox table created alongside business data tables", syncKey: "part-58-outbox-table" },
+      { text: "Outbox publisher Lambda triggered by DynamoDB Streams", syncKey: "part-58-outbox-publisher" }
+    ]
+  },
+  {
+    category: "Event Contracts",
+    tasks: [
+      { text: "Events include a version field", syncKey: "part-58-event-version" },
+      { text: "New fields on existing events are optional (not required)", syncKey: "part-58-backward-compat" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Idempotency is the foundation of reliable event processing: without DynamoDB conditional writes (or equivalent atomic checks), every SQS retry risks duplicate processing.
+2. Correlation IDs carried in message attributes connect OpenTelemetry traces across async boundaries, turning four separate logs into one coherent story in SigNoz.
+3. The saga pattern replaces distributed transactions with local operations plus compensating actions, and compensation failures must route to a dead letter queue for human resolution.
+4. The outbox pattern eliminates the gap between "data saved" and "event published" by writing both in a single DynamoDB transaction.
+5. Event schemas evolve safely with one rule: new fields are always optional, and breaking changes get new event types.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

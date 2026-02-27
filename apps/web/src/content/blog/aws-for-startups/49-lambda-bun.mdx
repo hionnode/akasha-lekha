@@ -1,0 +1,738 @@
+---
+title: "Lambda with Bun: Fast Functions, Real Traces"
+description: "Deploy Bun.js Lambda functions with OpenTelemetry. Custom runtime, cold start optimization, and traces in SigNoz for serverless observability."
+excerpt: "Bun on Lambda. Custom runtime, fast cold starts, real traces. Serverless with the observability you already have."
+date: "2026-07-14"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "lambda", "serverless", "opentelemetry"]
+series: "aws-for-startups"
+seriesPart: 49
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your Bun API server runs on ECS Fargate with 50ms response times and full OpenTelemetry traces in SigNoz. Now you need a webhook handler, an image resizer, and a scheduled cleanup job. Spinning up three more Fargate services for functions that each handle 100 requests per day is like renting three apartments to store one box each. Lambda is the storage unit.
+
+**Time:** About 60 minutes.
+
+**Outcome:** A Bun Lambda function deployed with a custom runtime layer, OpenTelemetry traces flowing to SigNoz, an optimized bundle under 5MB, and Terraform modules you will reuse for every Lambda function in this project.
+
+---
+
+## Why This Matters
+
+In [Part 48](/blog/aws-for-startups/48-lambda-fundamentals), you learned Lambda's execution model, pricing, and configuration rules. Now you build something real.
+
+Bun is not a first-class Lambda runtime. AWS provides managed runtimes for Node.js, Python, Java, .NET, Go, and Ruby. Bun requires a **custom runtime**: you provide the executable, you handle the runtime API communication, and you control the entire bootstrap process.
+
+This extra work buys you three things. First, Bun starts faster than Node.js because it skips the V8 warmup that dominates Node.js cold starts. Second, Bun bundles TypeScript natively, so your deployment artifact is smaller. Third, you already write Bun for your API server ([Part 29](/blog/aws-for-startups/29-backend-bun-signoz)), so your Lambda functions share types, utilities, and patterns with your main application.
+
+The cold start difference is meaningful. A Node.js 20.x Lambda function with the AWS SDK imported cold starts in 300-600ms. A Bun custom runtime with the same logic cold starts in 100-250ms. That 200-400ms difference matters when it hits your API Gateway's 29-second budget and your users' patience.
+
+---
+
+## What We're Building
+
+- Bun custom runtime Lambda layer
+- A Lambda function handler with proper request/response types
+- OpenTelemetry instrumentation sending traces to SigNoz
+- Optimized bundle with `bun build` targeting Lambda
+- Terraform module for deploying Bun Lambda functions
+- IAM role with least-privilege permissions
+
+---
+
+## Bun Custom Runtime
+
+### How Custom Runtimes Work
+
+Lambda custom runtimes communicate with the Lambda Runtime API. Your executable:
+
+1. Starts up and runs initialization code
+2. Polls `http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime/invocation/next` for the next event
+3. Processes the event
+4. Posts the response to `http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime/invocation/${requestId}/response`
+5. Loops back to step 2
+
+You provide a `bootstrap` file in your deployment package. Lambda runs this file as the entrypoint.
+
+### The Bootstrap Script
+
+```typescript title="lambda/bootstrap.ts"
+const RUNTIME_API = process.env.AWS_LAMBDA_RUNTIME_API;
+const HANDLER = process.env._HANDLER || "index.handler";
+
+async function main() {
+  // Load the handler module
+  const [modulePath, handlerName] = HANDLER.split(".");
+  const handlerModule = await import(`./${modulePath}`);
+  const handler = handlerModule[handlerName];
+
+  if (typeof handler !== "function") {
+    throw new Error(`Handler ${HANDLER} is not a function`);
+  }
+
+  // Event loop: poll for invocations
+  while (true) {
+    // Get next event
+    const nextResponse = await fetch(
+      `http://${RUNTIME_API}/2018-06-01/runtime/invocation/next`
+    );
+
+    const requestId = nextResponse.headers.get(
+      "lambda-runtime-aws-request-id"
+    );
+    const event = await nextResponse.json();
+
+    // Build context
+    const context = {
+      functionName: process.env.AWS_LAMBDA_FUNCTION_NAME,
+      functionVersion: process.env.AWS_LAMBDA_FUNCTION_VERSION,
+      memoryLimitInMB: process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE,
+      logGroupName: process.env.AWS_LAMBDA_LOG_GROUP_NAME,
+      logStreamName: process.env.AWS_LAMBDA_LOG_STREAM_NAME,
+      awsRequestId: requestId,
+      getRemainingTimeInMillis: () => {
+        const deadline = Number(
+          nextResponse.headers.get("lambda-runtime-deadline-ms")
+        );
+        return deadline - Date.now();
+      },
+    };
+
+    try {
+      const result = await handler(event, context);
+      // Send response
+      await fetch(
+        `http://${RUNTIME_API}/2018-06-01/runtime/invocation/${requestId}/response`,
+        {
+          method: "POST",
+          body: JSON.stringify(result),
+        }
+      );
+    } catch (error) {
+      // Send error
+      await fetch(
+        `http://${RUNTIME_API}/2018-06-01/runtime/invocation/${requestId}/error`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            errorMessage: error instanceof Error ? error.message : String(error),
+            errorType: error instanceof Error ? error.constructor.name : "Error",
+          }),
+        }
+      );
+    }
+  }
+}
+
+main().catch(console.error);
+```
+
+This bootstrap handles the Lambda runtime API protocol. It loads your handler, polls for events, and posts responses. Error handling ensures Lambda knows when things fail instead of hanging on a timeout.
+
+### Building the Runtime Layer
+
+A Lambda layer packages the Bun binary so every function does not need to include it:
+
+```bash terminal
+mkdir -p lambda-layer/bin
+```
+
+```bash terminal
+# Download Bun for Amazon Linux 2 (Lambda's OS)
+curl -fsSL https://bun.sh/install | BUN_INSTALL=./lambda-layer bash
+mv lambda-layer/bin/bun lambda-layer/bin/bun
+```
+
+```bash terminal
+# Create the layer zip
+cd lambda-layer && zip -r ../bun-runtime-layer.zip . && cd ..
+```
+
+The layer provides `/opt/bin/bun`. Your bootstrap script needs `/opt/bin/bun` in its shebang or you configure it in the runtime settings.
+
+---
+
+## Function Implementation
+
+### Handler Pattern
+
+Lambda handlers follow a simple pattern: receive an event, return a response.
+
+```typescript title="lambda/functions/webhook/index.ts"
+import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
+
+interface WebhookPayload {
+  event: string;
+  data: Record<string, unknown>;
+  timestamp: string;
+}
+
+export async function handler(
+  event: APIGatewayProxyEventV2
+): Promise<APIGatewayProxyResultV2> {
+  const requestId = event.requestContext?.requestId || "unknown";
+
+  try {
+    const body: WebhookPayload = JSON.parse(event.body || "{}");
+
+    // Validate payload
+    if (!body.event || !body.data) {
+      return {
+        statusCode: 400,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          error: "Invalid payload",
+          message: "Missing required fields: event, data",
+          request_id: requestId,
+        }),
+      };
+    }
+
+    // Process the webhook
+    console.log(JSON.stringify({
+      level: "info",
+      message: "Webhook received",
+      event_type: body.event,
+      request_id: requestId,
+    }));
+
+    // Your business logic here
+    await processWebhook(body);
+
+    return {
+      statusCode: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        status: "accepted",
+        request_id: requestId,
+      }),
+    };
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "Webhook processing failed",
+      error: error instanceof Error ? error.message : String(error),
+      request_id: requestId,
+    }));
+
+    return {
+      statusCode: 500,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        error: "Internal server error",
+        request_id: requestId,
+      }),
+    };
+  }
+}
+
+async function processWebhook(payload: WebhookPayload): Promise<void> {
+  // Implementation depends on webhook type
+  // This is where your business logic lives
+}
+```
+
+Three things to notice:
+
+1. **Structured JSON logging.** CloudWatch parses JSON logs natively. Structured logs let you query by `request_id`, `event_type`, or `level` without regex.
+
+2. **Consistent error response format.** Same format as your API from [Part 23](/blog/aws-for-startups/23-api-design-rest): `error`, `message`, `request_id`. Consistency across Lambda and ECS means your frontend handles errors the same way regardless of the backend compute.
+
+3. **Request ID propagation.** API Gateway provides a request ID. Your function includes it in every response and log entry. When a user reports a problem, you trace the entire request with one ID.
+
+### Project Structure
+
+<FileTree>
+lambda/
+  bootstrap.ts
+  functions/
+    webhook/
+      index.ts
+    image-resize/
+      index.ts
+    cleanup/
+      index.ts
+  shared/
+    types.ts
+    logger.ts
+    otel.ts
+  build.ts
+  package.json
+  tsconfig.json
+</FileTree>
+
+The `shared/` directory contains code reused across functions. The `build.ts` script bundles each function independently.
+
+---
+
+## OTel Instrumentation
+
+Your SigNoz instance from [Part 5](/blog/aws-for-startups/05-observability-setup) already receives traces from your Bun API server. Lambda functions should feed the same system.
+
+### Lambda OTel Setup
+
+```typescript title="lambda/shared/otel.ts"
+import { trace, context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import {
+  BasicTracerProvider,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
+import { Resource } from "@opentelemetry/resources";
+
+let provider: BasicTracerProvider | null = null;
+
+export function initTracing(serviceName: string): void {
+  if (provider) return; // Already initialized (warm start)
+
+  const resource = new Resource({
+    "service.name": serviceName,
+    "service.version": process.env.FUNCTION_VERSION || "unknown",
+    "deployment.environment": process.env.ENVIRONMENT || "dev",
+    "cloud.provider": "aws",
+    "cloud.platform": "aws_lambda",
+    "faas.name": process.env.AWS_LAMBDA_FUNCTION_NAME,
+    "faas.version": process.env.AWS_LAMBDA_FUNCTION_VERSION,
+  });
+
+  const exporter = new OTLPTraceExporter({
+    url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4318/v1/traces",
+  });
+
+  provider = new BasicTracerProvider({ resource });
+  provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
+  provider.register();
+}
+
+export function getTracer(name: string) {
+  return trace.getTracer(name);
+}
+
+export async function flushTraces(): Promise<void> {
+  if (provider) {
+    await provider.forceFlush();
+  }
+}
+```
+
+Key decisions:
+
+- **SimpleSpanProcessor** instead of **BatchSpanProcessor**. In Lambda, the execution environment can freeze between invocations. BatchSpanProcessor buffers spans and flushes periodically, but "periodically" does not work when the environment freezes. SimpleSpanProcessor sends each span immediately. It adds 1-2ms per span but guarantees delivery.
+
+- **Resource attributes** include Lambda-specific fields (`faas.name`, `faas.version`, `cloud.platform`). SigNoz uses these to group Lambda traces separately from ECS traces in your service map.
+
+- **`flushTraces()`** must be called before your handler returns. Lambda can freeze the environment immediately after your handler completes. If spans are buffered, they are lost.
+
+### Wrapping the Handler
+
+```typescript title="lambda/functions/webhook/index.ts"
+import { initTracing, getTracer, flushTraces } from "../../shared/otel";
+import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
+
+// Init runs once per cold start
+initTracing("webhook-handler");
+const tracer = getTracer("webhook");
+
+export async function handler(
+  event: APIGatewayProxyEventV2
+): Promise<APIGatewayProxyResultV2> {
+  return tracer.startActiveSpan(
+    "webhook.process",
+    { kind: SpanKind.SERVER },
+    async (span) => {
+      try {
+        span.setAttribute("http.method", event.requestContext.http.method);
+        span.setAttribute("http.route", event.rawPath);
+
+        const body = JSON.parse(event.body || "{}");
+        span.setAttribute("webhook.event_type", body.event || "unknown");
+
+        const result = await processWebhook(body);
+
+        span.setStatus({ code: SpanStatusCode.OK });
+        return {
+          statusCode: 200,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "accepted" }),
+        };
+      } catch (error) {
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+        span.recordException(error as Error);
+
+        return {
+          statusCode: 500,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ error: "Internal server error" }),
+        };
+      } finally {
+        span.end();
+        await flushTraces();
+      }
+    }
+  );
+}
+```
+
+The `finally` block is critical. `flushTraces()` must run whether the handler succeeds or fails. Without it, the last span before a cold start disappears.
+
+---
+
+## Cold Start Optimization
+
+Bundle size is the largest factor you control for cold start time. Smaller bundle means less code to download and parse.
+
+### Build Script
+
+```typescript title="lambda/build.ts"
+import { $ } from "bun";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+
+const FUNCTIONS_DIR = "./functions";
+const OUT_DIR = "./dist";
+
+async function build() {
+  const functions = await readdir(FUNCTIONS_DIR);
+
+  for (const fn of functions) {
+    const entrypoint = join(FUNCTIONS_DIR, fn, "index.ts");
+    const outdir = join(OUT_DIR, fn);
+
+    console.log(`Building ${fn}...`);
+
+    const result = await Bun.build({
+      entrypoints: [entrypoint],
+      outdir,
+      target: "bun",
+      minify: true,
+      sourcemap: "external",
+      external: [],  // Bundle everything
+    });
+
+    if (!result.success) {
+      console.error(`Build failed for ${fn}:`, result.logs);
+      process.exit(1);
+    }
+
+    // Report bundle size
+    const stat = await Bun.file(join(outdir, "index.js")).stat();
+    const sizeKB = (stat.size / 1024).toFixed(1);
+    console.log(`  ${fn}: ${sizeKB} KB`);
+  }
+}
+
+build();
+```
+
+```bash terminal
+bun run lambda/build.ts
+```
+
+<TerminalOutput title="bun run lambda/build.ts">
+
+```
+Building webhook...
+  webhook: 142.3 KB
+Building image-resize...
+  image-resize: 387.1 KB
+Building cleanup...
+  cleanup: 98.7 KB
+```
+
+</TerminalOutput>
+
+### Bundle Size Targets
+
+| Category | Target | Why |
+|----------|--------|-----|
+| API handlers | < 500 KB | Keeps cold start under 200ms |
+| Data processors | < 2 MB | More dependencies acceptable for async functions |
+| Image/media | < 5 MB | Large libraries (Sharp) are fine for async workloads |
+
+If your bundle exceeds these targets, investigate imports. Common offenders:
+
+- **AWS SDK v3**: Import only the client you need (`@aws-sdk/client-s3`), not the full SDK
+- **Logging libraries**: Use `console.log` with JSON.stringify instead of importing winston or pino
+- **OTel packages**: Import specific exporters, not `@opentelemetry/auto-instrumentations-node`
+
+<Alert type="caution" title="Agent Trap">
+
+Agents import the full `aws-sdk` v2 package (3MB+ bundled) instead of individual v3 clients. A single `import AWS from 'aws-sdk'` adds 3MB to your bundle and 300-500ms to your cold start. The agent does this because v2 examples are more common in its training data. Always use `@aws-sdk/client-s3`, `@aws-sdk/client-dynamodb`, etc. Each v3 client is 50-200KB.
+
+**What catches it:** The `infra-verify-mcp` tool scans `package.json` for `aws-sdk` (v2) in Lambda function directories and flags it. The AGENT-INSTRUCTIONS.md bundle size rule triggers a review when Lambda artifacts exceed size targets.
+
+</Alert>
+
+---
+
+## Deployment with Terraform
+
+### Lambda Module
+
+```hcl title="modules/lambda-bun/main.tf"
+data "archive_file" "function" {
+  type        = "zip"
+  source_dir  = "${var.source_dir}/dist/${var.function_name}"
+  output_path = "${path.module}/.build/${var.function_name}.zip"
+}
+
+resource "aws_lambda_layer_version" "bun_runtime" {
+  filename            = var.bun_layer_path
+  layer_name          = "${var.project}-${var.environment}-bun-runtime"
+  compatible_runtimes = ["provided.al2023"]
+  source_code_hash    = filebase64sha256(var.bun_layer_path)
+}
+
+resource "aws_lambda_function" "this" {
+  function_name = "${var.project}-${var.environment}-${var.function_name}"
+  role          = aws_iam_role.lambda.arn
+  handler       = "index.handler"
+  runtime       = "provided.al2023"
+  architectures = ["arm64"]
+  memory_size   = var.memory_size
+  timeout       = var.timeout
+
+  filename         = data.archive_file.function.output_path
+  source_code_hash = data.archive_file.function.output_base64sha256
+
+  layers = [aws_lambda_layer_version.bun_runtime.arn]
+
+  environment {
+    variables = merge(var.environment_variables, {
+      ENVIRONMENT                  = var.environment
+      OTEL_EXPORTER_OTLP_ENDPOINT = var.otel_endpoint
+      FUNCTION_VERSION             = var.function_version
+    })
+  }
+
+  dead_letter_config {
+    target_arn = aws_sqs_queue.dlq.arn
+  }
+
+  reserved_concurrent_executions = var.reserved_concurrency
+
+  tags = var.common_tags
+}
+
+resource "aws_sqs_queue" "dlq" {
+  name                      = "${var.project}-${var.environment}-${var.function_name}-dlq"
+  message_retention_seconds = 1209600
+
+  tags = var.common_tags
+}
+```
+
+Two choices worth noting:
+
+1. **`arm64` architecture.** ARM (Graviton2) Lambda functions are 20% cheaper than x86 and often faster. Bun supports ARM natively. Use ARM unless you have a dependency that requires x86.
+
+2. **`provided.al2023`** runtime. This is Amazon Linux 2023, the latest base image. Use it instead of `provided.al2` for better security patching.
+
+### IAM Role
+
+```hcl title="modules/lambda-bun/iam.tf"
+data "aws_iam_policy_document" "assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "lambda" {
+  name               = "${var.project}-${var.environment}-${var.function_name}-role"
+  assume_role_policy = data.aws_iam_policy_document.assume.json
+
+  tags = var.common_tags
+}
+
+# Basic execution: CloudWatch Logs
+resource "aws_iam_role_policy_attachment" "basic_execution" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# DLQ access
+data "aws_iam_policy_document" "dlq" {
+  statement {
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.dlq.arn]
+  }
+}
+
+resource "aws_iam_policy" "dlq" {
+  name   = "${var.project}-${var.environment}-${var.function_name}-dlq"
+  policy = data.aws_iam_policy_document.dlq.json
+}
+
+resource "aws_iam_role_policy_attachment" "dlq" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = aws_iam_policy.dlq.arn
+}
+```
+
+The role has exactly two permissions: writing CloudWatch Logs (required for any Lambda function) and sending messages to the DLQ. Additional permissions (S3, DynamoDB, etc.) are added per-function through the `additional_policies` variable, never through wildcard policies.
+
+### Variables
+
+```hcl title="modules/lambda-bun/variables.tf"
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Deployment environment (dev, staging, prod)"
+  type        = string
+}
+
+variable "function_name" {
+  description = "Lambda function name"
+  type        = string
+}
+
+variable "source_dir" {
+  description = "Path to lambda source directory"
+  type        = string
+}
+
+variable "bun_layer_path" {
+  description = "Path to the Bun runtime layer zip"
+  type        = string
+}
+
+variable "memory_size" {
+  description = "Memory in MB. Default 128. Profile before increasing."
+  type        = number
+  default     = 128
+}
+
+variable "timeout" {
+  description = "Timeout in seconds. Must be set explicitly."
+  type        = number
+}
+
+variable "reserved_concurrency" {
+  description = "Reserved concurrent executions. -1 for unreserved."
+  type        = number
+  default     = -1
+}
+
+variable "otel_endpoint" {
+  description = "OpenTelemetry collector endpoint URL"
+  type        = string
+}
+
+variable "function_version" {
+  description = "Function version for tracing"
+  type        = string
+  default     = "1.0.0"
+}
+
+variable "environment_variables" {
+  description = "Additional environment variables"
+  type        = map(string)
+  default     = {}
+}
+
+variable "common_tags" {
+  description = "Tags applied to all resources"
+  type        = map(string)
+}
+```
+
+### Usage
+
+```hcl title="environments/dev/lambda.tf"
+module "webhook" {
+  source = "../../modules/lambda-bun"
+
+  project        = "shipfast"
+  environment    = "dev"
+  function_name  = "webhook"
+  source_dir     = "${path.root}/../../lambda"
+  bun_layer_path = "${path.root}/../../lambda/bun-runtime-layer.zip"
+  timeout        = 10
+  otel_endpoint  = "https://signoz.${var.domain}:4318/v1/traces"
+
+  common_tags = var.common_tags
+}
+```
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Using the managed Node.js runtime with full `aws-sdk` v2 import, a 5MB bundle, 600ms cold starts, and no traces. You are flying blind in serverless. |
+| ✅ **Right** | Bun custom runtime with OTel traces, optimized bundle under 500KB for API handlers, ARM64 architecture, IAM scoped per function, DLQ on every async function. |
+| ❌ **Over** | Custom Lambda extensions for metrics, Datadog Lambda layer, AWS X-Ray integration alongside OTel, performance tuning before you have any traffic to measure. |
+| 🤖 **Agent Trap** | Agent bundles all dependencies without tree-shaking, producing a 4MB artifact when 200KB would suffice. It imports `@opentelemetry/auto-instrumentations-node` (2MB of auto-instrumentation for libraries you do not use) instead of the specific exporter and tracer packages. Bundle size is a number, not a feeling: run `bun build` and check the output before deploying. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 50: API Gateway: The Serverless Front Door**, we put an API Gateway in front of these Lambda functions. Routes, stages, throttling, and custom domains. If Lambda is the compute, API Gateway is the load balancer. You already know the ALB pattern from [Part 22](/blog/aws-for-startups/22-alb-load-balancer). API Gateway is the serverless equivalent.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Lambda Deployment",
+    tasks: [
+      { text: "Bun runtime layer built and zipped for provided.al2023", syncKey: "part-49-layer" },
+      { text: "Lambda function deploys with ARM64 architecture", syncKey: "part-49-arm64" },
+      { text: "Handler responds correctly to test invocation", syncKey: "part-49-handler" },
+      { text: "DLQ configured on the Lambda function", syncKey: "part-49-dlq" }
+    ]
+  },
+  {
+    category: "Observability",
+    tasks: [
+      { text: "OTel traces appear in SigNoz for Lambda invocations", syncKey: "part-49-otel" },
+      { text: "Spans include Lambda-specific attributes (faas.name, cloud.platform)", syncKey: "part-49-span-attrs" },
+      { text: "flushTraces() called in handler's finally block", syncKey: "part-49-flush" }
+    ]
+  },
+  {
+    category: "Optimization",
+    tasks: [
+      { text: "Bundle size under 500KB for API handler functions", syncKey: "part-49-bundle" },
+      { text: "No aws-sdk v2 in package.json (using v3 individual clients)", syncKey: "part-49-sdk" },
+      { text: "Memory set to 128MB (default)", syncKey: "part-49-memory" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Bun's custom runtime on Lambda offers 100-250ms cold starts versus 300-600ms for Node.js, and you already write Bun for your API server so the mental model transfers directly.
+2. Bundle size is the cold start lever you control: a 142KB bundle cold starts in under 200ms while a 4MB bundle takes over 500ms regardless of memory allocation.
+3. SimpleSpanProcessor (not BatchSpanProcessor) is the correct choice for Lambda because the execution environment can freeze between invocations and buffered spans disappear.
+4. ARM64 Lambda functions cost 20% less than x86 with equal or better performance, so use Graviton unless a dependency forces x86.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

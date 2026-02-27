@@ -1,0 +1,823 @@
+---
+title: "Debugging Production: Agents Assist, Humans Decide"
+description: "Production debugging workflow with SigNoz + Grafana dual surfaces and agent-assisted triage via the observability MCP server. Alert to resolution."
+excerpt: "Agents assist, humans decide. Production debugging with the SigNoz + Grafana dual-surface workflow and a new observability MCP server."
+date: "2026-08-24"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "observability", "ai-agents", "mcp", "incident-response"]
+series: "aws-for-startups"
+seriesPart: 59
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your p95 latency just tripled. The alert fired 7 minutes ago. You have SigNoz showing you traces, Grafana showing you infrastructure metrics, CloudWatch showing you Lambda errors, and a deployment that went out 45 minutes ago. You are staring at four browser tabs, correlating timestamps manually, and you still do not know whether the deploy caused this or whether it is a downstream dependency issue.
+
+**Time:** About 60 minutes.
+
+**Outcome:** A structured debugging workflow that uses SigNoz for application traces and Grafana for deploy correlation. An observability MCP server that lets your coding agent query traces, pull deployment history, and correlate errors with deploys. And a new Scorecard panel that tracks whether agent-authored deploys correlate with incidents more than human deploys.
+
+---
+
+## Why This Matters
+
+You have two observability surfaces. SigNoz (set up in [Part 5](/blog/aws-for-startups/05-opentelemetry-setup)) answers "what is happening inside my application." Grafana (your Agent Scorecard host) answers "what changed in my infrastructure and when."
+
+Most production issues fall into one of two categories: something broke inside the application (bad query, unhandled error, resource exhaustion), or something changed in the environment (new deployment, scaling event, dependency failure). You need both surfaces to distinguish between them, and you need a process that does not depend on you remembering which tab to check first.
+
+The debugging workflow in this post connects SigNoz traces to Grafana deploy timelines. When an alert fires, you follow a fixed sequence: detect, correlate, investigate, decide. The first three steps are data gathering. The last step is judgment. Agents are excellent at data gathering. They are terrible at judgment.
+
+This is where the observability MCP server comes in. Instead of you alt-tabbing between SigNoz and Grafana, your agent queries both through structured MCP tools and presents correlated findings. You make the decision.
+
+---
+
+## What We're Building
+
+- A structured debugging workflow: alert to resolution in four phases
+- The observability MCP server with three tools: `query-traces`, `deployment-history`, `correlate-error`
+- Agent-assisted triage that surfaces correlations without making decisions
+- Scorecard Panel 26: incidents within 2 hours of deploy (agent vs human)
+
+---
+
+## The Debugging Workflow
+
+Every production issue follows the same four phases. The phases never change. The depth within each phase varies by severity.
+
+### Phase 1: Detect
+
+An alert fires. This is not "someone noticed the app is slow." This is a CloudWatch Alarm or SigNoz alert rule with a defined threshold that was breached.
+
+The detection phase answers one question: **what metric crossed which threshold at what time?**
+
+Record three things before doing anything else:
+
+```markdown title="incident-notes.md"
+## Incident: [YYYY-MM-DD HH:MM]
+
+### Detection
+- **Alert:** p95 latency > 2000ms (order-service)
+- **Threshold breached at:** 14:32 UTC
+- **Current value:** 4,200ms (2.1x threshold)
+- **Duration:** 7 minutes and counting
+```
+
+This takes 30 seconds. It prevents the most common debugging mistake: starting to investigate before you know exactly what you are investigating.
+
+### Phase 2: Correlate
+
+Before reading a single log line, check what changed. Most production issues are caused by something that changed in the last 2 hours: a deployment, a configuration change, a scaling event, a dependency update.
+
+Open your Grafana Agent Scorecard and answer:
+
+1. **Was there a deploy in the last 2 hours?** Check the deployment markers on your metrics dashboard. If yes, note the deploy time, what changed, and who (or what) deployed it.
+2. **Did traffic patterns change?** Check request rate. A 5x traffic spike and a latency increase have a different root cause than a latency increase at normal traffic.
+3. **Did a dependency change?** Check external API response times if you track them. A payment processor that went from 200ms to 5000ms causes latency spikes that look like your problem but are not your problem.
+
+```markdown title="incident-notes.md (continued)"
+### Correlation
+- **Last deploy:** 13:48 UTC (44 minutes before alert)
+  - PR #234: "feat: add user preference caching"
+  - Author: agent-assisted, reviewed by @dev1
+- **Traffic:** Normal range (120 req/min, baseline 100-140)
+- **Dependencies:** All healthy
+- **Hypothesis:** Deploy #234 introduced the latency regression
+```
+
+### Phase 3: Investigate
+
+Now you go to SigNoz. You have a time range (13:48 to 14:32), a hypothesis (the deploy caused it), and a specific metric (p95 latency on order-service).
+
+In SigNoz, filter traces by:
+- Service: `order-service`
+- Time range: 13:48 to 14:40
+- Duration: > 2000ms (only slow traces)
+- Sort by: duration descending
+
+Look at the slowest traces. The spans will tell you where the time is spent: database query, external API call, in-process computation, or queue wait time.
+
+```markdown title="incident-notes.md (continued)"
+### Investigation
+- **Slow traces:** 47 traces > 2s in last 8 minutes
+- **Common pattern:** All slow traces have a 3.8s span on `redis.get`
+- **Root span:** `GET /api/orders/:id` → `cache.getUserPreferences` → `redis.get`
+- **Finding:** The new caching code from PR #234 added a Redis lookup for user
+  preferences on every order fetch. The Redis key pattern is `user:*:prefs`,
+  and the key does not exist for most users, causing a timeout fallback.
+```
+
+### Phase 4: Decide
+
+This is the human part. The agent can gather every piece of data above. It cannot make this decision:
+
+| Option | Risk | Recovery Time | Data Loss |
+|--------|------|---------------|-----------|
+| Rollback deploy #234 | Low (known good state) | 5-10 minutes | Lose caching feature |
+| Hotfix: add TTL to Redis lookup | Medium (new code in prod) | 15-20 minutes | None |
+| Increase Redis timeout | Low | 2 minutes | None, but masks root cause |
+
+The decision depends on context the agent does not have: how critical is the caching feature for a demo tomorrow, how confident are you in writing a hotfix under pressure, how many customers are affected right now. This is judgment.
+
+<Alert type="caution" title="Agent Trap">
+
+When given a slow Redis query, agents suggest adding a database index. They pattern-match "slow data access" to "missing index" because that is the most common fix in their training data. But the issue here is a timeout on a nonexistent key, not a slow query on existing data. The fix is a default value with a short TTL, not an index. Always verify that the agent's suggested fix addresses the actual root cause, not just the symptom category.
+
+</Alert>
+
+---
+
+## The Observability MCP Server
+
+Until now, the debugging workflow is manual: open SigNoz, filter traces, open Grafana, check deploys, correlate timestamps in your head. The observability MCP server automates the data gathering phases so your agent can do correlation work.
+
+### Architecture
+
+<Alert type="important" title="Observability MCP Architecture">
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     Coding Agent (Claude, etc.)               │
+│                                                               │
+│  "What happened to order-service in the last hour?"           │
+└──────────────────────┬───────────────────────────────────────┘
+                       │ MCP Protocol
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│                  observability-mcp server                      │
+│                                                               │
+│  ┌─────────────┐  ┌──────────────────┐  ┌────────────────┐   │
+│  │ query-traces │  │ deployment-history│  │ correlate-error│   │
+│  └──────┬──────┘  └────────┬─────────┘  └───────┬────────┘   │
+│         │                  │                     │             │
+│         ▼                  ▼                     ▼             │
+│    SigNoz API       GitHub API / SSM       SigNoz + GitHub    │
+│    (traces,logs)    (deploy records)       (joined query)     │
+└──────────────────────────────────────────────────────────────┘
+```
+
+</Alert>
+
+### Server Implementation
+
+```typescript title="tools/observability-mcp/src/server.ts"
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { queryTraces } from './tools/query-traces.js';
+import { getDeploymentHistory } from './tools/deployment-history.js';
+import { correlateError } from './tools/correlate-error.js';
+
+const server = new McpServer({
+  name: 'observability-mcp',
+  version: '1.0.0',
+});
+
+server.tool(
+  'query-traces',
+  'Query traces from SigNoz by service, time range, and duration threshold',
+  {
+    service: z.string().describe('Service name to filter traces'),
+    startTime: z.string().describe('ISO 8601 start time'),
+    endTime: z.string().describe('ISO 8601 end time'),
+    minDuration: z.number().optional().describe('Minimum span duration in ms'),
+    limit: z.number().default(20).describe('Max traces to return'),
+  },
+  async ({ service, startTime, endTime, minDuration, limit }) => {
+    const result = await queryTraces({ service, startTime, endTime, minDuration, limit });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
+server.tool(
+  'deployment-history',
+  'Get recent deployments from GitHub Actions and SSM Parameter Store',
+  {
+    service: z.string().optional().describe('Filter by service name'),
+    hours: z.number().default(4).describe('Look back N hours'),
+  },
+  async ({ service, hours }) => {
+    const result = await getDeploymentHistory({ service, hours });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
+server.tool(
+  'correlate-error',
+  'Correlate an error spike with recent deployments and infrastructure changes',
+  {
+    service: z.string().describe('Service experiencing the error'),
+    errorPattern: z.string().describe('Error message pattern to search for'),
+    startTime: z.string().describe('When the error started (ISO 8601)'),
+  },
+  async ({ service, errorPattern, startTime }) => {
+    const result = await correlateError({ service, errorPattern, startTime });
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
+export { server };
+```
+
+### Tool: query-traces
+
+The `query-traces` tool wraps the SigNoz API to return structured trace data:
+
+```typescript title="tools/observability-mcp/src/tools/query-traces.ts"
+interface TraceQuery {
+  service: string;
+  startTime: string;
+  endTime: string;
+  minDuration?: number;
+  limit: number;
+}
+
+interface TraceResult {
+  traceId: string;
+  rootSpan: string;
+  duration: number;
+  status: 'OK' | 'ERROR';
+  spanCount: number;
+  slowestSpan: {
+    operation: string;
+    duration: number;
+    service: string;
+  };
+  timestamp: string;
+}
+
+export async function queryTraces(query: TraceQuery): Promise<{
+  traces: TraceResult[];
+  summary: {
+    total: number;
+    errors: number;
+    p50Duration: number;
+    p95Duration: number;
+    slowestOperation: string;
+  };
+}> {
+  const signozUrl = process.env.SIGNOZ_API_URL;
+  const apiKey = process.env.SIGNOZ_API_KEY;
+
+  const startNanos = new Date(query.startTime).getTime() * 1_000_000;
+  const endNanos = new Date(query.endTime).getTime() * 1_000_000;
+
+  const response = await fetch(`${signozUrl}/api/v3/query_range`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'SIGNOZ-API-KEY': apiKey ?? '',
+    },
+    body: JSON.stringify({
+      start: startNanos,
+      end: endNanos,
+      compositeQuery: {
+        queryType: 'builder',
+        builderQueries: {
+          traces: {
+            dataSource: 'traces',
+            queryName: 'traces',
+            filters: {
+              items: [
+                {
+                  key: { key: 'serviceName', dataType: 'string', isColumn: true },
+                  op: '=',
+                  value: query.service,
+                },
+                ...(query.minDuration ? [{
+                  key: { key: 'durationNano', dataType: 'int64', isColumn: true },
+                  op: '>=',
+                  value: query.minDuration * 1_000_000,
+                }] : []),
+              ],
+              op: 'AND',
+            },
+            limit: query.limit,
+            orderBy: [{ columnName: 'durationNano', order: 'desc' }],
+          },
+        },
+      },
+    }),
+  });
+
+  const data = await response.json();
+  return formatTraceResults(data);
+}
+```
+
+### Tool: deployment-history
+
+```typescript title="tools/observability-mcp/src/tools/deployment-history.ts"
+interface DeployQuery {
+  service?: string;
+  hours: number;
+}
+
+interface Deployment {
+  id: string;
+  service: string;
+  version: string;
+  timestamp: string;
+  author: string;
+  prNumber: number;
+  prTitle: string;
+  generationMethod: 'human' | 'agent-assisted' | 'agent-generated';
+  status: 'success' | 'failure' | 'rollback';
+}
+
+export async function getDeploymentHistory(query: DeployQuery): Promise<{
+  deployments: Deployment[];
+  summary: {
+    total: number;
+    agentDeploys: number;
+    humanDeploys: number;
+    rollbacks: number;
+  };
+}> {
+  const since = new Date(Date.now() - query.hours * 60 * 60 * 1000).toISOString();
+
+  // Query GitHub Actions workflow runs
+  const ghToken = process.env.GITHUB_TOKEN;
+  const repo = process.env.GITHUB_REPOSITORY;
+
+  const response = await fetch(
+    `https://api.github.com/repos/${repo}/actions/runs?created=>${since}&event=push&branch=main`,
+    {
+      headers: {
+        Authorization: `Bearer ${ghToken}`,
+        Accept: 'application/vnd.github.v3+json',
+      },
+    }
+  );
+
+  const runs = await response.json();
+  const deployments: Deployment[] = [];
+
+  for (const run of runs.workflow_runs ?? []) {
+    if (run.name !== 'Deploy Production') continue;
+
+    // Get the PR that triggered this deploy
+    const prResponse = await fetch(
+      `https://api.github.com/repos/${repo}/commits/${run.head_sha}/pulls`,
+      {
+        headers: {
+          Authorization: `Bearer ${ghToken}`,
+          Accept: 'application/vnd.github.v3+json',
+        },
+      }
+    );
+    const prs = await prResponse.json();
+    const pr = prs[0];
+
+    const labels = pr?.labels?.map((l: any) => l.name) ?? [];
+    let generationMethod: Deployment['generationMethod'] = 'human';
+    if (labels.includes('agent-generated')) generationMethod = 'agent-generated';
+    else if (labels.includes('agent-assisted')) generationMethod = 'agent-assisted';
+
+    deployments.push({
+      id: String(run.id),
+      service: extractServiceFromPath(run),
+      version: run.head_sha.slice(0, 8),
+      timestamp: run.created_at,
+      author: run.actor.login,
+      prNumber: pr?.number ?? 0,
+      prTitle: pr?.title ?? 'Direct push',
+      generationMethod,
+      status: run.conclusion === 'success' ? 'success' : 'failure',
+    });
+  }
+
+  // Filter by service if specified
+  const filtered = query.service
+    ? deployments.filter(d => d.service === query.service)
+    : deployments;
+
+  return {
+    deployments: filtered,
+    summary: {
+      total: filtered.length,
+      agentDeploys: filtered.filter(d => d.generationMethod !== 'human').length,
+      humanDeploys: filtered.filter(d => d.generationMethod === 'human').length,
+      rollbacks: filtered.filter(d => d.status === 'rollback').length,
+    },
+  };
+}
+
+function extractServiceFromPath(run: any): string {
+  // Extract service name from workflow path or commit message
+  const path = run.path ?? '';
+  if (path.includes('order-service')) return 'order-service';
+  if (path.includes('user-service')) return 'user-service';
+  if (path.includes('web')) return 'web';
+  return 'unknown';
+}
+```
+
+### Tool: correlate-error
+
+The most powerful tool combines both data sources. Given an error and a start time, it finds matching traces and any deployments in the 2-hour window before the error started:
+
+```typescript title="tools/observability-mcp/src/tools/correlate-error.ts"
+interface CorrelationQuery {
+  service: string;
+  errorPattern: string;
+  startTime: string;
+}
+
+interface CorrelationResult {
+  error: {
+    firstSeen: string;
+    count: number;
+    affectedEndpoints: string[];
+    sampleTraceIds: string[];
+  };
+  recentDeploys: Array<{
+    timestamp: string;
+    prTitle: string;
+    author: string;
+    generationMethod: string;
+    timeBefore: string; // "44 minutes before first error"
+  }>;
+  correlation: {
+    deployCorrelated: boolean;
+    confidence: 'high' | 'medium' | 'low';
+    reasoning: string;
+  };
+}
+
+export async function correlateError(
+  query: CorrelationQuery
+): Promise<CorrelationResult> {
+  // Step 1: Find error traces
+  const errorTraces = await queryTraces({
+    service: query.service,
+    startTime: new Date(new Date(query.startTime).getTime() - 30 * 60 * 1000).toISOString(),
+    endTime: new Date().toISOString(),
+    limit: 50,
+  });
+
+  const errorResults = errorTraces.traces.filter(t =>
+    t.status === 'ERROR'
+  );
+
+  // Step 2: Find deployments in the 2h window before the error
+  const deployHistory = await getDeploymentHistory({
+    service: query.service,
+    hours: 2,
+  });
+
+  const errorTime = new Date(query.startTime).getTime();
+
+  const recentDeploys = deployHistory.deployments
+    .filter(d => new Date(d.timestamp).getTime() < errorTime)
+    .map(d => {
+      const deployTime = new Date(d.timestamp).getTime();
+      const minutesBefore = Math.round((errorTime - deployTime) / 60000);
+      return {
+        timestamp: d.timestamp,
+        prTitle: d.prTitle,
+        author: d.author,
+        generationMethod: d.generationMethod,
+        timeBefore: `${minutesBefore} minutes before first error`,
+      };
+    });
+
+  // Step 3: Determine correlation confidence
+  let confidence: 'high' | 'medium' | 'low' = 'low';
+  let reasoning = 'No deployments found in the 2-hour window before the error.';
+
+  if (recentDeploys.length > 0) {
+    const closestDeploy = recentDeploys[recentDeploys.length - 1];
+    const minutesBefore = parseInt(closestDeploy.timeBefore);
+
+    if (minutesBefore <= 30) {
+      confidence = 'high';
+      reasoning = `Deploy "${recentDeploys[0].prTitle}" occurred ${closestDeploy.timeBefore}. Strong temporal correlation.`;
+    } else if (minutesBefore <= 90) {
+      confidence = 'medium';
+      reasoning = `Deploy "${recentDeploys[0].prTitle}" occurred ${closestDeploy.timeBefore}. Possible correlation, but latency suggests indirect cause.`;
+    } else {
+      confidence = 'low';
+      reasoning = `Deploy "${recentDeploys[0].prTitle}" occurred ${closestDeploy.timeBefore}. Unlikely to be the direct cause.`;
+    }
+  }
+
+  return {
+    error: {
+      firstSeen: query.startTime,
+      count: errorResults.length,
+      affectedEndpoints: [...new Set(errorResults.map(t => t.rootSpan))],
+      sampleTraceIds: errorResults.slice(0, 5).map(t => t.traceId),
+    },
+    recentDeploys,
+    correlation: {
+      deployCorrelated: recentDeploys.length > 0 && confidence !== 'low',
+      confidence,
+      reasoning,
+    },
+  };
+}
+```
+
+### MCP Server File Structure
+
+<FileTree>
+tools/
+  observability-mcp/
+    src/
+      server.ts
+      index.ts
+      tools/
+        query-traces.ts
+        deployment-history.ts
+        correlate-error.ts
+    package.json
+    tsconfig.json
+</FileTree>
+
+### Configuring the MCP Server
+
+Add the observability MCP server to your agent's MCP configuration:
+
+```json title=".mcp/observability.json"
+{
+  "mcpServers": {
+    "observability": {
+      "command": "npx",
+      "args": ["tsx", "tools/observability-mcp/src/index.ts"],
+      "env": {
+        "SIGNOZ_API_URL": "https://your-signoz-instance.example.com",
+        "SIGNOZ_API_KEY": "${SIGNOZ_API_KEY}",
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}",
+        "GITHUB_REPOSITORY": "your-org/your-repo"
+      }
+    }
+  }
+}
+```
+
+:::warning
+The MCP server has read-only access to SigNoz and GitHub. It cannot modify traces, trigger deployments, or execute rollbacks. This is deliberate. The agent gathers data. You decide what to do with it.
+:::
+
+---
+
+## Agent-Assisted Triage in Practice
+
+Here is what agent-assisted debugging looks like with the observability MCP server in place. The agent handles data correlation. You handle judgment.
+
+### The Prompt
+
+When an alert fires, give your agent a structured prompt:
+
+```text title="agent-prompt.txt"
+An alert fired for order-service:
+- Alert: p95 latency > 2000ms
+- Triggered at: 2026-08-24T14:32:00Z
+- Current value: 4200ms
+
+Use the observability MCP tools to:
+1. Query traces for order-service from the last hour, filtered to spans > 2000ms
+2. Get deployment history for the last 4 hours
+3. Correlate the latency spike with any recent deployments
+
+Present findings in this format:
+- What traces show (slowest operations, error patterns)
+- What deployments happened recently (with generation method)
+- Correlation assessment (deploy-related or not)
+- DO NOT recommend a fix. Present the data and let me decide.
+```
+
+### The Agent's Response
+
+The agent calls the MCP tools and returns structured findings:
+
+<TerminalOutput title="Agent triage output">
+
+```
+## Trace Analysis (14:00 - 14:40 UTC)
+
+47 traces exceeded 2000ms on order-service.
+
+Slowest operations:
+1. redis.get (cache.getUserPreferences) - avg 3,800ms - 47 occurrences
+2. pg.query (orders.findById) - avg 45ms - normal
+3. http.request (payment-service) - avg 120ms - normal
+
+Pattern: All slow traces include the redis.get span.
+The operation was not present before 13:48 UTC.
+
+## Deployment History (last 4 hours)
+
+1. 13:48 UTC - PR #234 "feat: add user preference caching"
+   - Author: @dev1 (agent-assisted)
+   - Status: success
+   - Changed: src/services/order-service/cache.ts (new file)
+
+2. 11:15 UTC - PR #231 "fix: update payment retry logic"
+   - Author: @dev2 (human)
+   - Status: success
+
+## Correlation Assessment
+
+Confidence: HIGH
+Deploy PR #234 at 13:48 UTC introduced redis.get calls to order-service.
+The latency spike started at 14:32 UTC (44 minutes after deploy).
+The new cache.getUserPreferences function queries Redis for keys that
+do not exist for most users, causing timeout fallback behavior.
+
+No recommendation provided. Presenting data for your decision.
+```
+
+</TerminalOutput>
+
+The agent did the work of opening SigNoz, filtering traces, checking Grafana deploy markers, and correlating timestamps. That would have taken you 10-15 minutes of tab-switching. The agent did it in seconds.
+
+But notice what the agent did not do: it did not recommend rolling back, hotfixing, or ignoring the issue. It presented the data. You decide.
+
+---
+
+## Scorecard: Panel 26
+
+This phase adds one panel to your Grafana Agent Scorecard: **Incidents within 2 hours of deploy (agent vs human)**.
+
+### Why This Panel Matters
+
+Over time, this panel answers a critical question: do agent-assisted deployments cause more incidents than human deployments? If agent deploys correlate with incidents more frequently, you have a systemic problem in your agent review process. If the rates are similar, your review process is working.
+
+### Panel Configuration
+
+```json title="grafana/dashboards/scorecard/panel-26-incident-correlation.json"
+{
+  "title": "Incidents Within 2h of Deploy",
+  "type": "barchart",
+  "description": "Incidents that occurred within 2 hours of a deployment, split by generation method",
+  "targets": [
+    {
+      "datasource": "Loki",
+      "expr": "sum by (generation_method) (count_over_time({job=\"incident-tracker\"} | json | deploy_correlated=\"true\" [$__range]))",
+      "legendFormat": "{{generation_method}}"
+    }
+  ],
+  "fieldConfig": {
+    "overrides": [
+      {
+        "matcher": { "id": "byName", "options": "agent-generated" },
+        "properties": [{ "id": "color", "value": { "fixedColor": "#7057ff" } }]
+      },
+      {
+        "matcher": { "id": "byName", "options": "agent-assisted" },
+        "properties": [{ "id": "color", "value": { "fixedColor": "#0075ca" } }]
+      },
+      {
+        "matcher": { "id": "byName", "options": "human" },
+        "properties": [{ "id": "color", "value": { "fixedColor": "#008672" } }]
+      }
+    ]
+  }
+}
+```
+
+### Logging Incidents for the Panel
+
+When you resolve an incident, log the correlation data so Grafana can display it:
+
+```typescript title="scripts/log-incident.ts"
+import { createLogger, format, transports } from 'winston';
+
+const incidentLogger = createLogger({
+  format: format.json(),
+  transports: [
+    new transports.File({ filename: '/var/log/incidents/resolved.json' }),
+  ],
+});
+
+interface IncidentRecord {
+  incidentId: string;
+  service: string;
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  detectedAt: string;
+  resolvedAt: string;
+  deployCorrelated: boolean;
+  correlatedDeploy?: {
+    prNumber: number;
+    generationMethod: 'human' | 'agent-assisted' | 'agent-generated';
+    deployedAt: string;
+    minutesBefore: number;
+  };
+  resolution: 'rollback' | 'hotfix' | 'config-change' | 'self-resolved';
+  ttd: number; // time to detect (minutes)
+  ttr: number; // time to resolve (minutes)
+}
+
+export function logIncident(record: IncidentRecord): void {
+  incidentLogger.info('incident-resolved', record);
+}
+```
+
+The label colors match the PR labels from [Part 7](/blog/aws-for-startups/07-branch-protection-pr): purple for agent-generated, blue for agent-assisted, green for human. Over months, the bar chart tells a story about your deployment quality.
+
+---
+
+## Dual-Surface Debugging Reference
+
+<ComparisonTable>
+  <ComparisonHeader columns={["SigNoz", "Grafana"]} />
+  <ComparisonRow feature="Primary question" SigNoz="What is wrong with my app?" Grafana="Did a change cause this?" />
+  <ComparisonRow feature="Data source" SigNoz="OpenTelemetry traces, logs, metrics" Grafana="Deploy logs, Scorecard metrics, infra metrics" />
+  <ComparisonRow feature="Use first when" SigNoz="Error rate spike, latency increase" Grafana="Unknown cause after trace analysis" />
+  <ComparisonRow feature="Key view" SigNoz="Trace waterfall, service map" Grafana="Deploy timeline with metric overlays" />
+  <ComparisonRow feature="Agent access" SigNoz="query-traces MCP tool (Best)" Grafana="deployment-history MCP tool" />
+  <ComparisonRow feature="Tells you" SigNoz="Which operation is slow, which call failed" Grafana="Whether a deploy correlates with the problem" />
+</ComparisonTable>
+
+The two surfaces complement each other. SigNoz tells you what is wrong. Grafana tells you why it started. Neither alone gives you the full picture.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Log-grepping through CloudWatch with four browser tabs. Manual timestamp correlation. No structured debugging process. You spend 45 minutes finding what an agent with MCP access finds in 30 seconds. |
+| ✅ **Right** | Dual-surface debugging workflow: SigNoz for traces, Grafana for deploy correlation. Observability MCP server gives agents structured access to both. Agent presents correlated findings. Human decides rollback vs hotfix. Scorecard tracks deploy-incident correlation by generation method. |
+| ❌ **Over** | Fully automated incident response that triggers rollbacks on any anomaly detection. Auto-remediation that rolls back three deploys in one night because a traffic spike triggered the latency threshold. No human in the loop for decisions that need context. |
+| 🤖 **Agent Trap** | Agent identifies the symptom correctly (slow Redis query) but suggests adding a database index instead of fixing the timeout on nonexistent keys. The agent pattern-matches "slow data access" to "missing index" because that is the most common fix in its training data. The observability MCP server surfaces the right data, but the agent's interpretation still requires human verification. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 59B: The Debugging Decision Tree**, we formalize when to reach for an agent during debugging and when to rely on your own judgment. Seven debugging phases, each mapped to "agent excels" or "human essential." Plus a full worked example: a subtle memory leak that the agent correctly detects but incorrectly diagnoses.
+
+:::note
+**Coming in Part 63:** The incident response post builds on this debugging workflow, adding runbooks, escalation paths, and post-mortem templates. The observability MCP server you built here becomes the foundation of your incident response tooling.
+:::
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Debugging Workflow",
+    tasks: [
+      { text: "Incident notes template created with Detection/Correlation/Investigation/Decision sections", syncKey: "part-59-incident-template" },
+      { text: "SigNoz trace filtering works for service + duration + time range", syncKey: "part-59-signoz-filter" },
+      { text: "Grafana deploy markers visible on metrics dashboards", syncKey: "part-59-grafana-markers" }
+    ]
+  },
+  {
+    category: "Observability MCP",
+    tasks: [
+      { text: "observability-mcp server created with query-traces, deployment-history, correlate-error tools", syncKey: "part-59-mcp-server" },
+      { text: "MCP server configured with SigNoz API and GitHub token", syncKey: "part-59-mcp-config" },
+      { text: "MCP server has read-only access (no write operations)", syncKey: "part-59-mcp-readonly" },
+      { text: "Agent triage prompt template saved for reuse", syncKey: "part-59-triage-prompt" }
+    ]
+  },
+  {
+    category: "Scorecard",
+    tasks: [
+      { text: "Panel 26 added: Incidents within 2h of deploy (agent vs human)", syncKey: "part-59-panel-26" },
+      { text: "Incident logging script records deploy correlation and generation method", syncKey: "part-59-incident-logging" },
+      { text: "Panel colors match PR labels (purple/blue/green)", syncKey: "part-59-panel-colors" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "Agent triage tested against a real or simulated alert", syncKey: "part-59-triage-tested" },
+      { text: "Agent presents data without recommending fixes (verified in prompt)", syncKey: "part-59-no-recommendations" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Two observability surfaces serve two questions: SigNoz answers "what is wrong with my app," and Grafana answers "did a deploy cause this."
+2. The observability MCP server lets agents query traces and correlate errors with deployments in seconds, replacing 15 minutes of manual tab-switching.
+3. Agents excel at data correlation (finding which deploy happened 44 minutes before the error) but fail at judgment (deciding whether to roll back or hotfix), so structure your workflow to separate data gathering from decision-making.
+4. Scorecard Panel 26 tracks whether agent-authored deploys correlate with incidents more than human deploys, giving you a data-driven answer to "can I trust agent deployments?"
+5. The debugging workflow never changes: detect, correlate, investigate, decide. The tools change. The sequence does not.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

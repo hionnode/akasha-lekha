@@ -1,0 +1,575 @@
+---
+title: "SNS + EventBridge: Pub/Sub and Event Routing"
+description: "Implement pub/sub with SNS and event routing with EventBridge. Fan-out patterns, event rules, and choosing between the two services."
+excerpt: "Pub/sub and event routing. SNS for fan-out, EventBridge for smart routing, and when to use which."
+date: "2026-08-06"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "sns", "eventbridge", "serverless"]
+series: "aws-for-startups"
+seriesPart: 55
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+A new order comes in. Your order service needs to notify the inventory service, the billing service, the email service, and the analytics pipeline. You write four HTTP calls in sequence. Billing is down for maintenance. The entire order flow fails. The customer retries, inventory double-decrements, and you spend the afternoon manually reconciling stock counts.
+
+**Time:** About 75 minutes.
+
+**Outcome:** SNS topics for fan-out to multiple subscribers, EventBridge rules for content-based event routing, and a clear decision framework for when to use which service.
+
+---
+
+## Why This Matters
+
+In [Part 54](/blog/aws-for-startups/54-sqs-queues), you decoupled a producer from a single consumer with SQS. But real systems have one event that multiple services care about. An "order created" event needs to reach inventory, billing, email, and analytics. If you create four separate SQS queues and publish to each one individually, your producer needs to know about every consumer. Add a fifth consumer, and you update the producer code.
+
+SNS and EventBridge solve this with the publish/subscribe pattern. The producer publishes once. The routing layer delivers to all interested consumers. The producer does not know (or care) how many subscribers exist.
+
+The question is which routing layer: SNS or EventBridge. They overlap enough to confuse agents and developers alike, but they solve different problems. SNS is a simple megaphone: publish to a topic, every subscriber gets the message. EventBridge is a smart router: publish to a bus, and rules filter events to specific targets based on content.
+
+Choose wrong, and you either pay for Lambda invocations that immediately discard irrelevant events (SNS when you need filtering) or add unnecessary complexity for simple fan-out (EventBridge when SNS would do).
+
+---
+
+## What We're Building
+
+- An SNS topic with SQS and Lambda subscriptions for fan-out
+- An EventBridge custom event bus with content-based routing rules
+- Filter policies on SNS subscriptions to reduce unnecessary deliveries
+- Cross-service event patterns (S3 events routed through EventBridge)
+- A decision framework: SNS vs EventBridge for common startup scenarios
+
+---
+
+## SNS: Simple Fan-Out
+
+SNS (Simple Notification Service) is a pub/sub messaging service. You create a topic, subscribers register interest, and every message published to the topic gets delivered to every subscriber.
+
+### Creating an SNS Topic
+
+```hcl title="infra/modules/sns/main.tf"
+resource "aws_sns_topic" "order_events" {
+  name = "${var.project}-${var.environment}-order-events"
+
+  # Server-side encryption
+  kms_master_key_id = "alias/aws/sns"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-order-events"
+  })
+}
+```
+
+### Subscribing SQS Queues
+
+The most common SNS pattern is SNS-to-SQS fan-out. The SNS topic pushes messages to multiple SQS queues, and each queue has its own consumer:
+
+```hcl title="infra/modules/sns/subscriptions.tf"
+# Inventory service queue gets all order events
+resource "aws_sns_topic_subscription" "inventory" {
+  topic_arn = aws_sns_topic.order_events.arn
+  protocol  = "sqs"
+  endpoint  = var.inventory_queue_arn
+
+  # Deliver as raw message (no SNS wrapper)
+  raw_message_delivery = true
+}
+
+# Billing service queue gets all order events
+resource "aws_sns_topic_subscription" "billing" {
+  topic_arn = aws_sns_topic.order_events.arn
+  protocol  = "sqs"
+  endpoint  = var.billing_queue_arn
+
+  raw_message_delivery = true
+}
+
+# Analytics queue gets all order events
+resource "aws_sns_topic_subscription" "analytics" {
+  topic_arn = aws_sns_topic.order_events.arn
+  protocol  = "sqs"
+  endpoint  = var.analytics_queue_arn
+
+  raw_message_delivery = true
+}
+```
+
+**`raw_message_delivery = true`** is important. Without it, SNS wraps your message in an SNS envelope with metadata. Your SQS consumers then have to unwrap the envelope to get the actual payload. With raw delivery, the message arrives exactly as published.
+
+### SQS Queue Policy
+
+SQS queues need an explicit policy to allow SNS to send messages:
+
+```hcl title="infra/modules/sns/queue-policy.tf"
+data "aws_iam_policy_document" "sns_to_sqs" {
+  statement {
+    sid    = "AllowSNSPublish"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["sns.amazonaws.com"]
+    }
+
+    actions   = ["sqs:SendMessage"]
+    resources = [var.queue_arn]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_sns_topic.order_events.arn]
+    }
+  }
+}
+
+resource "aws_sqs_queue_policy" "allow_sns" {
+  queue_url = var.queue_url
+  policy    = data.aws_iam_policy_document.sns_to_sqs.json
+}
+```
+
+The condition on `aws:SourceArn` ensures only your specific SNS topic can write to the queue. Without this condition, any SNS topic in your account could send messages to the queue.
+
+### SNS Filter Policies
+
+Not every subscriber needs every message. SNS filter policies let subscribers receive only messages matching specific attributes:
+
+```hcl title="infra/modules/sns/subscriptions.tf"
+# Billing only cares about paid orders, not free tier signups
+resource "aws_sns_topic_subscription" "billing" {
+  topic_arn = aws_sns_topic.order_events.arn
+  protocol  = "sqs"
+  endpoint  = var.billing_queue_arn
+
+  raw_message_delivery = true
+
+  filter_policy = jsonencode({
+    order_type = ["paid"]
+  })
+
+  filter_policy_scope = "MessageAttributes"
+}
+```
+
+When publishing, include the attribute:
+
+```typescript title="src/lib/sns-publisher.ts"
+import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+
+const sns = new SNSClient({});
+
+export async function publishOrderEvent(
+  topicArn: string,
+  order: { id: string; type: 'paid' | 'free'; amount: number }
+): Promise<void> {
+  await sns.send(new PublishCommand({
+    TopicArn: topicArn,
+    Message: JSON.stringify(order),
+    MessageAttributes: {
+      order_type: {
+        DataType: 'String',
+        StringValue: order.type,
+      },
+    },
+  }));
+}
+```
+
+Now the billing queue only receives paid orders. Free tier signups skip billing entirely, saving you Lambda invocations and processing time.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents use SNS for every pub/sub scenario, even when EventBridge's content-based filtering would be more efficient. When you need to route events based on the message body (not just attributes), SNS filter policies cannot help. The agent generates an SNS subscription with a Lambda function that parses the message body and discards 80% of messages. You pay for every invocation, including the ones that immediately return.
+
+**What catches it:** Review the ratio of received messages to processed messages in your Lambda consumer. If more than 20% of invocations are no-ops (message discarded after parsing), you need EventBridge content filtering instead of SNS.
+
+</Alert>
+
+---
+
+## EventBridge: Smart Event Routing
+
+EventBridge is an event bus with content-based routing. Instead of subscribers filtering messages after delivery, EventBridge evaluates rules before delivery and only sends events to matching targets.
+
+### Custom Event Bus
+
+Every AWS account has a default event bus that receives AWS service events. Create a custom bus for your application events:
+
+```hcl title="infra/modules/eventbridge/main.tf"
+resource "aws_cloudwatch_event_bus" "app" {
+  name = "${var.project}-${var.environment}-app-events"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-app-events"
+  })
+}
+```
+
+### Event Rules with Content Filtering
+
+EventBridge rules match events based on their content. This is where EventBridge shines over SNS:
+
+```hcl title="infra/modules/eventbridge/rules.tf"
+# Route order events to the order processing Lambda
+resource "aws_cloudwatch_event_rule" "order_created" {
+  name           = "${var.project}-${var.environment}-order-created"
+  event_bus_name = aws_cloudwatch_event_bus.app.name
+  description    = "Routes order.created events to the order processor"
+
+  event_pattern = jsonencode({
+    source      = ["com.shipfast.orders"]
+    detail-type = ["order.created"]
+    detail = {
+      amount = [{
+        numeric = [">", 0]
+      }]
+    }
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "order_processor" {
+  rule           = aws_cloudwatch_event_rule.order_created.name
+  event_bus_name = aws_cloudwatch_event_bus.app.name
+  target_id      = "order-processor"
+  arn            = var.order_processor_lambda_arn
+}
+
+# Route high-value orders to a separate priority queue
+resource "aws_cloudwatch_event_rule" "high_value_order" {
+  name           = "${var.project}-${var.environment}-high-value-order"
+  event_bus_name = aws_cloudwatch_event_bus.app.name
+  description    = "Routes high-value orders (>$500) to priority processing"
+
+  event_pattern = jsonencode({
+    source      = ["com.shipfast.orders"]
+    detail-type = ["order.created"]
+    detail = {
+      amount = [{
+        numeric = [">", 500]
+      }]
+    }
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "priority_queue" {
+  rule           = aws_cloudwatch_event_rule.high_value_order.name
+  event_bus_name = aws_cloudwatch_event_bus.app.name
+  target_id      = "priority-queue"
+  arn            = var.priority_queue_arn
+}
+```
+
+The `detail` field supports numeric comparisons, prefix matching, exists/not-exists checks, and IP address matching. This filtering happens inside EventBridge before your Lambda is invoked. You pay nothing for events that do not match.
+
+### Publishing Events
+
+EventBridge events follow a specific envelope format:
+
+```typescript title="src/lib/eventbridge-publisher.ts"
+import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+
+const eventbridge = new EventBridgeClient({});
+
+export async function publishEvent(
+  eventBusName: string,
+  source: string,
+  detailType: string,
+  detail: Record<string, unknown>
+): Promise<void> {
+  const result = await eventbridge.send(new PutEventsCommand({
+    Entries: [{
+      EventBusName: eventBusName,
+      Source: source,
+      DetailType: detailType,
+      Detail: JSON.stringify(detail),
+      Time: new Date(),
+    }],
+  }));
+
+  if (result.FailedEntryCount && result.FailedEntryCount > 0) {
+    console.error('Failed to publish events', {
+      failedEntries: result.Entries?.filter(e => e.ErrorCode),
+    });
+    throw new Error(`Failed to publish ${result.FailedEntryCount} events`);
+  }
+}
+
+// Usage
+await publishEvent(
+  'shipfast-prod-app-events',
+  'com.shipfast.orders',
+  'order.created',
+  { orderId: 'ord-123', amount: 750, customerId: 'cust-456' }
+);
+```
+
+**`Source`** identifies which service published the event. Use reverse-domain notation: `com.shipfast.orders`, `com.shipfast.inventory`.
+
+**`DetailType`** is the event name. Use dot notation: `order.created`, `order.shipped`, `inventory.low`.
+
+**`Detail`** is the event payload as a JSON string. EventBridge rules can filter on any field in this payload.
+
+### Lambda Permission for EventBridge
+
+Your Lambda function needs to allow EventBridge to invoke it:
+
+```hcl title="infra/modules/eventbridge/permissions.tf"
+resource "aws_lambda_permission" "eventbridge" {
+  statement_id  = "AllowEventBridgeInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = var.lambda_function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.order_created.arn
+}
+```
+
+---
+
+## SNS vs EventBridge: When to Use Which
+
+This is the decision that trips up agents and developers. Here is the comparison:
+
+<ComparisonTable>
+  <ComparisonHeader columns={["SNS", "EventBridge"]} />
+  <ComparisonRow feature="Primary use" SNS="Fan-out to multiple subscribers" EventBridge="Content-based routing (Best)" />
+  <ComparisonRow feature="Filtering" SNS="Message attributes only" EventBridge="Full event body (Best)" />
+  <ComparisonRow feature="Targets" SNS="SQS, Lambda, HTTP, email, SMS" EventBridge="170+ AWS services (Best)" />
+  <ComparisonRow feature="Throughput" SNS="Soft limit: 30K msg/s (Best)" EventBridge="Soft limit: 10K events/s" />
+  <ComparisonRow feature="Message size" SNS="256 KB" EventBridge="256 KB" />
+  <ComparisonRow feature="Cost per event" SNS="$0.50/million (Best)" EventBridge="$1.00/million" />
+  <ComparisonRow feature="Dead Letter Queue" SNS="Per-subscription" EventBridge="Per-rule target" />
+  <ComparisonRow feature="Schema registry" SNS="No" EventBridge="Yes (Best)" />
+  <ComparisonRow feature="Event replay" SNS="No" EventBridge="Yes, up to 90 days (Best)" />
+</ComparisonTable>
+
+### Decision Framework
+
+**Use SNS when:**
+- You need simple fan-out (one event, multiple subscribers all get it)
+- Filtering is based on a small set of message attributes (order type, region, priority)
+- You need SMS or email notifications
+- Raw throughput matters (30K+ messages per second)
+- Cost sensitivity is high (SNS is half the price per event)
+
+**Use EventBridge when:**
+- You need content-based filtering on the event body (order amount > $500)
+- Events come from multiple sources and need different routing rules
+- You want to route AWS service events (S3 uploads, CodePipeline state changes)
+- You need event replay for debugging or reprocessing
+- You want schema validation and discovery
+
+**Use SNS + SQS together when:**
+- You need fan-out AND each subscriber needs its own retry/DLQ behavior
+- This is the most common production pattern: SNS distributes, SQS buffers
+
+**Use EventBridge + SQS together when:**
+- You need content-based routing AND reliable message processing
+- EventBridge routes the event to the correct SQS queue, SQS handles retry/DLQ
+
+---
+
+## Cross-Service Events with EventBridge
+
+AWS services emit events to the default EventBridge bus. You can create rules on the default bus to react to these events without writing any producer code.
+
+### S3 Upload Events
+
+When a user uploads a file to S3, trigger a processing Lambda:
+
+```hcl title="infra/modules/eventbridge/s3-events.tf"
+# S3 bucket must have EventBridge notifications enabled
+resource "aws_s3_bucket_notification" "eventbridge" {
+  bucket      = var.uploads_bucket_id
+  eventbridge = true
+}
+
+resource "aws_cloudwatch_event_rule" "s3_upload" {
+  name        = "${var.project}-${var.environment}-s3-upload"
+  description = "Triggers processing when files are uploaded to the uploads bucket"
+
+  event_pattern = jsonencode({
+    source      = ["aws.s3"]
+    detail-type = ["Object Created"]
+    detail = {
+      bucket = {
+        name = [var.uploads_bucket_name]
+      }
+      object = {
+        key = [{
+          prefix = "uploads/"
+        }]
+      }
+    }
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "process_upload" {
+  rule      = aws_cloudwatch_event_rule.s3_upload.name
+  target_id = "process-upload"
+  arn       = var.upload_processor_lambda_arn
+}
+```
+
+This replaces the older S3 notification configuration (which goes directly to Lambda or SQS). EventBridge gives you content-based filtering on the key prefix, file size, and other metadata.
+
+### Common AWS Events Worth Routing
+
+| Source | Detail Type | Use Case |
+|--------|-------------|----------|
+| `aws.s3` | Object Created | Process uploads, trigger thumbnailing |
+| `aws.codepipeline` | CodePipeline Stage Execution State Change | Slack notifications on deploy |
+| `aws.health` | AWS Health Event | Alert on service degradation |
+| `aws.ec2` | EC2 Instance State-change Notification | Auto-remediation on instance termination |
+| `aws.guardduty` | GuardDuty Finding | Security alert routing |
+
+---
+
+## Event Schema Design
+
+Whether you use SNS or EventBridge, your events need a consistent schema. This matters for two reasons: consumers can trust the shape of the data, and agents can generate handlers that actually match your events.
+
+```typescript title="src/events/schemas.ts"
+// Base event envelope
+interface BaseEvent {
+  id: string;          // Unique event ID (UUID)
+  source: string;      // Service that produced it
+  type: string;        // Event type (dot notation)
+  version: string;     // Schema version
+  timestamp: string;   // ISO 8601
+  traceId?: string;    // Trace context
+}
+
+// Domain events
+interface OrderCreatedEvent extends BaseEvent {
+  type: 'order.created';
+  data: {
+    orderId: string;
+    customerId: string;
+    items: Array<{ productId: string; quantity: number; price: number }>;
+    total: number;
+    currency: string;
+  };
+}
+
+interface OrderShippedEvent extends BaseEvent {
+  type: 'order.shipped';
+  data: {
+    orderId: string;
+    trackingNumber: string;
+    carrier: string;
+    estimatedDelivery: string;
+  };
+}
+
+type AppEvent = OrderCreatedEvent | OrderShippedEvent;
+```
+
+**`version`** in the schema is non-negotiable. When you add a field to `OrderCreatedEvent`, consumers using version 1 must not break. Version the schema from day one, and your consumers can handle both v1 and v2 events during the migration window.
+
+---
+
+## Module Structure
+
+<FileTree>
+infra/
+  modules/
+    sns/
+      main.tf
+      subscriptions.tf
+      queue-policy.tf
+      variables.tf
+      outputs.tf
+    eventbridge/
+      main.tf
+      rules.tf
+      permissions.tf
+      s3-events.tf
+      variables.tf
+      outputs.tf
+</FileTree>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Direct service-to-service HTTP calls for everything. Your order service imports the billing client, the inventory client, the email client, and the analytics client. Tight coupling means one failing downstream service breaks the entire flow, and adding a new subscriber requires redeploying the producer. |
+| ✅ **Right** | SNS for simple fan-out (order events to inventory, billing, analytics queues). EventBridge for content-based routing (high-value orders to priority processing, S3 uploads to image processor). Each subscriber has its own SQS queue with DLQ from [Part 54](/blog/aws-for-startups/54-sqs-queues). |
+| ❌ **Over** | EventBridge schema registry, event replay archives, and dead letter queues on every rule target before you have more than two event types. You are building an enterprise event mesh for a system that publishes "order.created" and "user.signed_up." |
+| 🤖 **Agent Trap** | Agent uses SNS for every pub/sub pattern, even when 80% of subscribers discard the message after inspecting its body. The agent does not know about EventBridge's content filtering because SNS appears more frequently in its training data. You pay for Lambda invocations that do nothing. Reviewing the discard rate in your consumer metrics catches this: if more than 20% of invocations are no-ops, switch to EventBridge. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 56: WebSockets**, we add real-time bidirectional communication to your application. API Gateway WebSocket APIs let your backend push updates to connected clients without polling. We will store connection IDs in DynamoDB, handle authentication on the `$connect` route, and broadcast messages to specific connections or all connected users.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "SNS",
+    tasks: [
+      { text: "SNS topic created with server-side encryption", syncKey: "part-55-sns-topic" },
+      { text: "At least two SQS subscriptions with raw_message_delivery", syncKey: "part-55-sns-sqs-subs" },
+      { text: "SQS queue policy allows SNS to send messages (with SourceArn condition)", syncKey: "part-55-queue-policy" },
+      { text: "Filter policy applied on at least one subscription", syncKey: "part-55-filter-policy" }
+    ]
+  },
+  {
+    category: "EventBridge",
+    tasks: [
+      { text: "Custom event bus created for application events", syncKey: "part-55-event-bus" },
+      { text: "Event rule with content-based filtering on event body", syncKey: "part-55-event-rule" },
+      { text: "Lambda permission configured for EventBridge invocation", syncKey: "part-55-lambda-permission" },
+      { text: "S3 EventBridge notification enabled on uploads bucket", syncKey: "part-55-s3-events" }
+    ]
+  },
+  {
+    category: "Application",
+    tasks: [
+      { text: "Event publisher function sends to SNS or EventBridge", syncKey: "part-55-publisher" },
+      { text: "Event schema defined with version field", syncKey: "part-55-schema" },
+      { text: "Source and DetailType follow naming conventions", syncKey: "part-55-naming" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "Agent-generated event routing reviewed for correct service choice (SNS vs EventBridge)", syncKey: "part-55-agent-reviewed" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. SNS is simple fan-out: publish to a topic, all subscribers get the message. EventBridge is smart routing: rules filter events before delivery, so subscribers only receive what they care about.
+2. EventBridge's content-based filtering prevents unnecessary Lambda invocations, which is cheaper than SNS plus a Lambda function that discards 80% of messages.
+3. The most common production pattern is SNS-to-SQS fan-out: SNS distributes the event, each SQS queue buffers and retries independently with its own DLQ.
+4. Version your event schemas from day one: adding a field to an event must not break existing consumers.
+5. AWS service events (S3 uploads, CodePipeline state changes, GuardDuty findings) flow through the default EventBridge bus for free, and you should route them.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

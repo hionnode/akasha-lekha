@@ -1,0 +1,393 @@
+---
+title: "Lambda Fundamentals: Functions That Scale to Zero"
+description: "AWS Lambda execution model, pricing, cold starts, and the agent mistakes that 4x your serverless bill. Foundation for serverless deployment."
+excerpt: "Functions that scale to zero. Lambda fundamentals: execution model, pricing, and the agent mistakes that quadruple your serverless bill."
+date: "2026-07-10"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "lambda", "serverless", "terraform"]
+series: "aws-for-startups"
+seriesPart: 48
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your ECS Fargate service idles at $9.40/month, handling 200 requests/day. That is $9.40 for a container sitting there waiting. Lambda would cost $0.20/month for the same traffic. You are paying 47x more to keep a container warm that spends 99.7% of its time doing nothing.
+
+**Time:** About 45 minutes.
+
+**Outcome:** A solid understanding of Lambda's execution model, pricing structure, memory/timeout configuration, reserved concurrency, and Dead Letter Queues. Plus six new rules in your AGENT-INSTRUCTIONS.md that prevent your agent from quadrupling your serverless bill.
+
+---
+
+## Why This Matters
+
+You have three compute options on AWS now. EC2 gives you full servers ([Part 28](/blog/aws-for-startups/28-ec2-compute-fundamentals)). ECS Fargate gives you containers ([Part 41](/blog/aws-for-startups/41-ecs-fargate-bun)). Lambda gives you functions. Each has a sweet spot.
+
+Lambda's sweet spot is bursty, event-driven workloads where traffic is unpredictable and idle time is high. Webhook handlers, image processors, cron jobs, API endpoints that get 10 requests per minute, not 10,000 requests per second. When nobody calls your function, you pay nothing. When 1,000 users hit it simultaneously, Lambda scales to 1,000 concurrent executions in seconds. You did not provision anything. You did not configure auto-scaling. You did not choose an instance type.
+
+The tradeoff is control. You do not pick the operating system. You do not choose the CPU architecture (well, you choose between x86 and ARM). You do not SSH into the machine. And your function has a hard 15-minute execution limit. If your workload runs longer than 15 minutes, Lambda is the wrong choice.
+
+The other tradeoff is cold starts. When Lambda creates a new execution environment for your function, that first request takes longer. How much longer depends on the runtime, your bundle size, and your memory allocation. We will measure this in [Part 53](/blog/aws-for-startups/53-k6-serverless) with real K6 data instead of guessing.
+
+---
+
+## What We're Building
+
+- Understanding of Lambda's execution model (cold start, warm start, execution environment lifecycle)
+- Lambda pricing model (request count + duration x memory)
+- Memory and timeout configuration strategy (128MB default, profile before increasing)
+- Reserved concurrency for protecting shared resources
+- Dead Letter Queue configuration for failed invocations
+- Six new Lambda rules in AGENT-INSTRUCTIONS.md
+
+---
+
+## The Execution Model
+
+Lambda runs your code in an **execution environment**: a lightweight container that AWS manages. Understanding the lifecycle of this environment is the foundation of every Lambda optimization decision you will make.
+
+### Cold Start vs Warm Start
+
+When Lambda receives a request and no execution environment exists, it creates one. This is a **cold start**. It involves:
+
+1. AWS provisions the execution environment (download code, start runtime)
+2. Your function's initialization code runs (imports, database connections, SDK setup)
+3. Your handler function executes
+
+When Lambda receives another request and an existing execution environment is available, it reuses it. This is a **warm start**. Only step 3 happens. Steps 1 and 2 are skipped entirely.
+
+```
+Cold Start (first request):
+┌──────────────────────┬────────────────────┬──────────────┐
+│  Provision env       │  Init code         │  Handler     │
+│  (AWS-managed)       │  (your imports)    │  (your code) │
+│  ~100-500ms          │  ~50-500ms         │  variable    │
+└──────────────────────┴────────────────────┴──────────────┘
+
+Warm Start (subsequent requests):
+                                             ┌──────────────┐
+                                             │  Handler     │
+                                             │  (your code) │
+                                             │  variable    │
+                                             └──────────────┘
+```
+
+The critical insight: **you control the init phase**. The less code you import and the fewer connections you establish at module load time, the shorter your cold starts. We will optimize this in [Part 49](/blog/aws-for-startups/49-lambda-bun) with Bun.
+
+### Execution Environment Lifecycle
+
+AWS does not document exactly how long it keeps warm environments alive. In practice, environments stay warm for 5-15 minutes of inactivity. After that, AWS reclaims them.
+
+This means:
+
+- If your function gets steady traffic (at least one request every few minutes), cold starts are rare
+- If your function is a cron job that runs once per hour, every invocation is a cold start
+- If your function gets burst traffic after quiet periods, the first few requests in each burst experience cold starts
+
+You cannot control this. You can observe it (we will in Part 53), and you can mitigate it with provisioned concurrency, but provisioned concurrency costs money. Do not add it before you have data showing cold starts are actually a problem.
+
+### Concurrency
+
+Each execution environment handles **one request at a time**. If 100 requests arrive simultaneously, Lambda creates 100 execution environments. Your account has a default regional concurrency limit of 1,000. After 1,000 concurrent executions, additional requests are throttled.
+
+This is fundamentally different from a container or server, where one process handles many concurrent requests. Lambda's model is simpler (no thread safety concerns, no connection pooling within a single invocation) but scales differently.
+
+---
+
+## Pricing
+
+Lambda pricing has three components. All three matter.
+
+### Request Count
+
+$0.20 per million requests. The first million requests per month are free (forever, not just free tier).
+
+For context: 1 million requests is about 23 requests per minute, 24/7. Most startups in their first year do not hit 1 million Lambda requests per month across all functions.
+
+### Duration x Memory
+
+This is where the money is. Lambda charges per millisecond of execution time, scaled by memory allocation.
+
+The base rate for 128MB is $0.0000000021 per millisecond. Double the memory to 256MB, and the rate doubles to $0.0000000042 per millisecond. At 512MB, it is $0.0000000083 per millisecond. At 1024MB, it is $0.0000000167 per millisecond.
+
+Real numbers for a function that runs 200ms per invocation at 100,000 invocations/month:
+
+| Memory | Cost/Month |
+|--------|-----------|
+| 128 MB | $0.04 |
+| 256 MB | $0.08 |
+| 512 MB | $0.17 |
+| 1024 MB | $0.33 |
+| 1536 MB | $0.50 |
+| 3008 MB | $1.00 |
+
+The difference between 128MB and 512MB is 4x. Your agent does not know what your function needs. It picks 512MB because "that should be enough" and you pay 4x more than necessary for every function it creates.
+
+### CPU Allocation
+
+Lambda allocates CPU proportional to memory. At 1,769MB, you get one full vCPU. Below that, you get a fraction. Above that, you get more than one vCPU.
+
+This means increasing memory also increases CPU. Sometimes a function runs faster at 256MB than 128MB because it gets more CPU, and the reduced duration offsets the increased memory cost. Profile your functions to find the optimal point. Do not guess.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents set Lambda memory to 512MB or 1024MB "to be safe." This is the single most common Lambda cost mistake. A function that needs 70MB of memory runs identically at 128MB and 512MB, but the 512MB version costs 4x more. At scale, this adds up fast: 10 functions at 512MB each, running 1 million invocations/month at 200ms average, costs $167/month instead of $42/month.
+
+**What catches it:** The Lambda rules in AGENT-INSTRUCTIONS.md require 128MB default with documented justification for increases. The `infra-verify-mcp` tool flags memory allocations above 128MB without a corresponding profiling annotation.
+
+</Alert>
+
+---
+
+## Memory and Timeout Configuration
+
+### Memory: Start at 128MB
+
+Set every function to 128MB until you have profiling data that says otherwise. Here is the Terraform pattern:
+
+```hcl title="modules/lambda/variables.tf"
+variable "memory_size" {
+  description = "Lambda memory in MB. Default 128MB. Profile before increasing."
+  type        = number
+  default     = 128
+
+  validation {
+    condition     = var.memory_size >= 128 && var.memory_size <= 10240
+    error_message = "Memory must be between 128MB and 10240MB."
+  }
+}
+```
+
+```hcl title="modules/lambda/main.tf"
+resource "aws_lambda_function" "this" {
+  function_name = "${var.project}-${var.environment}-${var.function_name}"
+  role          = aws_iam_role.lambda.arn
+  handler       = var.handler
+  runtime       = var.runtime
+  memory_size   = var.memory_size
+  timeout       = var.timeout
+
+  # ... other configuration
+}
+```
+
+When you need more memory, change the variable for that specific function and add a comment explaining why:
+
+```hcl title="environments/dev/main.tf"
+module "image_processor" {
+  source = "../../modules/lambda"
+
+  function_name = "image-processor"
+  # Profiled: needs 256MB for Sharp image library
+  # See: docs/lambda-profiling/image-processor.md
+  memory_size = 256
+  timeout     = 30
+}
+```
+
+### Timeout: Always Set Explicitly
+
+Lambda's default timeout is 3 seconds. This is wrong for almost every function. Too short for an API handler that queries a database. Too long for a function that should fail fast if its downstream dependency is unavailable.
+
+The rules:
+
+- **API handlers:** 10-30 seconds. Accounts for cold start + database query + response serialization. API Gateway has a 29-second hard limit, so anything above 29 seconds for API-triggered functions is meaningless.
+- **Async processors:** 60-300 seconds. Image processing, PDF generation, data transformation. Set based on the slowest observed execution plus 50% buffer.
+- **Cron jobs:** Up to 900 seconds (15 minutes). Lambda's hard limit. If your job takes longer than 15 minutes, use ECS Fargate instead.
+
+```hcl title="modules/lambda/variables.tf"
+variable "timeout" {
+  description = "Lambda timeout in seconds. Always set explicitly."
+  type        = number
+
+  validation {
+    condition     = var.timeout >= 1 && var.timeout <= 900
+    error_message = "Timeout must be between 1 and 900 seconds."
+  }
+}
+```
+
+No default value. The function caller must explicitly choose a timeout. This prevents the "I forgot to set it" failure mode.
+
+---
+
+## Reserved Concurrency
+
+By default, all Lambda functions in your account share the 1,000-concurrent-execution regional limit. One runaway function can consume all 1,000 executions and throttle every other function in your account.
+
+**Reserved concurrency** sets a maximum for a specific function. If you set reserved concurrency to 50, that function can never run more than 50 concurrent executions, and 50 of your 1,000 regional limit is reserved for it.
+
+Two use cases:
+
+1. **Protecting shared resources.** Your database connection pool has 20 connections. If Lambda scales to 200 concurrent executions, each trying to open a database connection, you overwhelm the pool. Set reserved concurrency to 20.
+
+2. **Preventing runaway costs.** A badly configured event source (an SQS queue with millions of messages) can trigger thousands of Lambda invocations. Reserved concurrency caps the blast radius.
+
+```hcl title="modules/lambda/main.tf"
+resource "aws_lambda_function" "this" {
+  # ... other configuration
+
+  reserved_concurrent_executions = var.reserved_concurrency
+}
+```
+
+```hcl title="modules/lambda/variables.tf"
+variable "reserved_concurrency" {
+  description = "Reserved concurrent executions. Set for functions accessing shared resources."
+  type        = number
+  default     = -1  # -1 means unreserved (uses account pool)
+}
+```
+
+:::warning
+Setting reserved concurrency to 0 disables the function entirely. No invocations will be processed. This is useful for emergency stop, but do not set it accidentally.
+:::
+
+---
+
+## Dead Letter Queues
+
+Lambda retries failed asynchronous invocations twice. After three total attempts (original + two retries), the event is discarded. Gone. No record. No debugging data. No way to reprocess it.
+
+A **Dead Letter Queue (DLQ)** captures these failed events. Configure it on every Lambda function that handles asynchronous events.
+
+```hcl title="modules/lambda/main.tf"
+resource "aws_sqs_queue" "dlq" {
+  name                      = "${var.project}-${var.environment}-${var.function_name}-dlq"
+  message_retention_seconds = 1209600  # 14 days
+
+  tags = var.common_tags
+}
+
+resource "aws_lambda_function" "this" {
+  # ... other configuration
+
+  dead_letter_config {
+    target_arn = aws_sqs_queue.dlq.arn
+  }
+}
+```
+
+The DLQ gives you three things:
+
+1. **Visibility.** You know invocations are failing. Without a DLQ, failures are silent.
+2. **Debugging.** The failed event payload is in the queue. You can inspect what caused the failure.
+3. **Reprocessing.** Once you fix the bug, you can replay the failed events from the DLQ.
+
+Set `message_retention_seconds` to 14 days (the maximum). This gives you two weeks to notice, investigate, and fix failures before events expire.
+
+### DLQ vs Lambda Destinations
+
+Lambda Destinations are a newer alternative. They support both success and failure routing, and they include additional context (response payload, error details). For new functions, consider destinations:
+
+```hcl title="modules/lambda/main.tf"
+resource "aws_lambda_function_event_invoke_config" "this" {
+  function_name = aws_lambda_function.this.function_name
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.dlq.arn
+    }
+  }
+
+  maximum_retry_attempts = 2
+}
+```
+
+The key difference: DLQ is configured on the function itself. Destinations are configured on the event invoke config and provide richer failure context. Both send failed events to SQS. Use Destinations for new functions. Keep DLQ for existing functions that already use it.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents skip DLQ configuration because Lambda "works without it." Technically true. Practically dangerous. Without a DLQ, failed async events vanish after three attempts. You discover the failure when a customer reports missing data, not when the failure happens. The agent sees "function deployed successfully" and moves on. Your CloudWatch metrics show invocation errors, but the events themselves are gone.
+
+**What catches it:** The Lambda rules in AGENT-INSTRUCTIONS.md require DLQ on all async functions. The `infra-verify-mcp` tool flags `aws_lambda_function` resources that lack `dead_letter_config` or a corresponding `aws_lambda_function_event_invoke_config` with failure destinations.
+
+</Alert>
+
+---
+
+## AGENT-INSTRUCTIONS.md Addition
+
+Add the Lambda section to your AGENT-INSTRUCTIONS.md. These six rules encode the decisions from this post:
+
+```markdown title="AGENT-INSTRUCTIONS.md"
+## Lambda
+- Default memory: 128MB unless profiled and documented otherwise
+- Always set explicit timeout
+- Reserved concurrency must be set for shared resources
+- Always configure Dead Letter Queues
+- Cold start budget: document acceptable cold start time
+- Bundle size must be monitored
+```
+
+Your AGENT-INSTRUCTIONS.md now has 77 lines. The Lambda section prevents the three most expensive agent mistakes: memory over-provisioning (4x cost), missing timeouts (silent failures or unnecessary duration charges), and missing DLQs (invisible data loss).
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No timeout set, no DLQ, default 512MB memory because the agent said so. Failed invocations vanish. Your bill is 4x what it should be. You find out when a customer asks why their webhook never fired. |
+| ✅ **Right** | Explicit timeout per function type, 128MB default (profiled before increasing), reserved concurrency on functions that access shared resources, DLQ on every async function. |
+| ❌ **Over** | Provisioned concurrency on every function, SnapStart enabled, AWS Lambda Power Tuning running weekly, before you have measured a single cold start or received a single user complaint about latency. |
+| 🤖 **Agent Trap** | Agent sets memory to 512MB "to avoid out-of-memory errors" and leaves timeout at the 3-second default. The function costs 4x more than necessary, and API calls that take 4 seconds fail silently because the timeout kills them before they complete. The agent's reasoning: "512MB provides adequate headroom." The correct approach: start at 128MB, measure, increase only with documented justification. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 49: Lambda with Bun: Fast Functions, Real Traces**, we deploy actual Bun Lambda functions with OpenTelemetry instrumentation. The execution model from this part becomes concrete code: a custom runtime bootstrap, optimized bundles, and traces flowing to the SigNoz instance you set up in [Part 5](/blog/aws-for-startups/05-observability-setup).
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Lambda Configuration",
+    tasks: [
+      { text: "Lambda module has memory_size variable with 128MB default", syncKey: "part-48-memory" },
+      { text: "Lambda module has timeout variable with no default (caller must set explicitly)", syncKey: "part-48-timeout" },
+      { text: "Lambda module includes DLQ (SQS) with 14-day retention", syncKey: "part-48-dlq" },
+      { text: "Reserved concurrency variable exists for shared-resource functions", syncKey: "part-48-concurrency" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "AGENT-INSTRUCTIONS.md updated with Lambda section (6 lines)", syncKey: "part-48-agent-instructions" },
+      { text: "Lambda rules cover memory, timeout, concurrency, DLQ, cold start, bundle size", syncKey: "part-48-agent-rules" }
+    ]
+  },
+  {
+    category: "Understanding",
+    tasks: [
+      { text: "Can explain cold start vs warm start execution lifecycle", syncKey: "part-48-cold-warm" },
+      { text: "Can calculate Lambda cost for a given memory/duration/invocation count", syncKey: "part-48-pricing" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Lambda pricing is memory x duration: setting 512MB when 128MB works costs 4x more, and agents default to the expensive option every time.
+2. Always set explicit timeouts because the 3-second default is wrong for API handlers (too short) and async processors (too long), and silent timeout failures are invisible without monitoring.
+3. Dead Letter Queues are non-negotiable for async Lambda functions because without them, failed events disappear after three retries and you discover the data loss from customer complaints, not alerts.
+4. Reserved concurrency protects your database connection pool and caps runaway costs, but setting it to 0 disables the function entirely, so treat it with the same care as a security group rule.
+5. Cold starts are measurable, not guessable: do not add provisioned concurrency until you have K6 data showing cold starts actually hurt your users.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
