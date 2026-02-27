@@ -1,0 +1,596 @@
+---
+title: "SigNoz Dashboards & Alerts: The Panels That Wake You Up"
+description: "Build production SigNoz dashboards with Golden Signals, custom alerting rules, and SLO tracking. The application observability surface, fully operational."
+excerpt: "The panels that wake you up (and the ones that let you sleep). SigNoz dashboards with Golden Signals, alerting, and SLOs."
+date: "2026-09-08"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "observability"]
+series: "aws-for-startups"
+seriesPart: 61
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your application has been running in production for three weeks. SigNoz is collecting traces, metrics, and logs. You have 47 million data points, and zero dashboards. When a customer messages you "the app feels slow today," you open SigNoz, spend 20 minutes clicking through the Traces tab, manually comparing p95 latencies to what you think they were yesterday, and then reply "looks normal to me." It was not normal. You just did not have a baseline to compare against.
+
+**Time:** About 90 minutes.
+
+**Outcome:** Four Golden Signals dashboards (latency, traffic, errors, saturation), service-specific panels with the custom attributes from [Part 60](/blog/aws-for-startups/60-opentelemetry-mastery), alerting rules with severity tiers, SLOs with error budgets, and an alert routing strategy that prevents fatigue.
+
+---
+
+## Why This Matters
+
+Collecting telemetry data is step one. Turning that data into panels that answer questions before you ask them is step two. Most teams get stuck between those steps. They have SigNoz running, traces flowing, maybe some metrics, but no dashboards. Every investigation starts from a blank search.
+
+Dashboards are opinions made visible. A dashboard that shows p95 latency by endpoint says "I care about latency at the 95th percentile, broken down by route." A dashboard that shows error rate by tenant says "I care about per-customer reliability." The act of building dashboards forces you to decide what matters.
+
+Three things make dashboards dangerous:
+
+1. **Too many panels.** A dashboard with 50 panels tells you nothing because you cannot process 50 data points at a glance. You need 4-8 panels per dashboard, each answering one specific question.
+
+2. **No alerting.** A dashboard you have to remember to check is a dashboard you will forget to check. Critical metrics need alerts that come to you.
+
+3. **Wrong thresholds.** An alert that fires 15 times a day trains you to ignore alerts. Within a week, you are ignoring the real ones too.
+
+This part builds dashboards that answer the right questions, alerts that fire for the right reasons, and SLOs that tell you how much margin you have left.
+
+---
+
+## What We're Building
+
+- A Golden Signals dashboard: latency, traffic, errors, saturation (4 panels)
+- A service-specific dashboard for your API with per-endpoint breakdowns
+- A tenant health dashboard using the custom attributes from Part 60
+- Alerting rules: critical (pages you), warning (queues for morning), info (logged only)
+- Two SLOs: availability (99.9%) and latency (p95 < 500ms)
+- Alert routing to Slack and PagerDuty
+
+---
+
+## Golden Signals: The Four Dashboards That Matter
+
+Google's Site Reliability Engineering book defines four Golden Signals. They are the minimum viable monitoring for any production service. Every other dashboard you build is a refinement of these four.
+
+### 1. Latency
+
+Latency measures how long requests take. Not the average (which hides outliers) but the percentiles: p50 (median), p95, and p99.
+
+In SigNoz, create a new dashboard and add a time series panel with this PromQL query:
+
+```promql title="Panel: API Latency (p50, p95, p99)"
+histogram_quantile(0.50, sum(rate(signoz_latency_bucket{service_name="api-service"}[5m])) by (le))
+```
+
+Add two more queries to the same panel for p95 and p99:
+
+```promql title="Panel: API Latency - p95"
+histogram_quantile(0.95, sum(rate(signoz_latency_bucket{service_name="api-service"}[5m])) by (le))
+```
+
+```promql title="Panel: API Latency - p99"
+histogram_quantile(0.99, sum(rate(signoz_latency_bucket{service_name="api-service"}[5m])) by (le))
+```
+
+Set the Y-axis unit to milliseconds. Set the time range to 24 hours as the default. This single panel answers "how fast is the API right now, and how fast was it yesterday at the same time?"
+
+:::tip
+If you configured the `spanmetrics` processor in [Part 60](/blog/aws-for-startups/60-opentelemetry-mastery), your latency histograms come from span-derived metrics. The metric name depends on your collector configuration: `traces_spanmetrics_latency_bucket` if you used the default, or `signoz_latency_bucket` if SigNoz auto-generates it from traces.
+:::
+
+### 2. Traffic
+
+Traffic measures demand on your system: requests per second, broken down by endpoint.
+
+```promql title="Panel: Request Rate by Endpoint"
+sum(rate(signoz_calls_total{service_name="api-service"}[5m])) by (operation)
+```
+
+This shows each endpoint's traffic as a separate line. A sudden spike on `/api/webhooks` while everything else is flat tells you an upstream system changed behavior. A gradual rise across all endpoints tells you organic traffic growth.
+
+### 3. Errors
+
+Error rate is the percentage of requests returning 5xx status codes. Not the count (which scales with traffic) but the rate.
+
+```promql title="Panel: Error Rate (%)"
+sum(rate(signoz_calls_total{service_name="api-service", status_code="STATUS_CODE_ERROR"}[5m]))
+/
+sum(rate(signoz_calls_total{service_name="api-service"}[5m]))
+* 100
+```
+
+Set a visual threshold line at 1% on the Y-axis. Below 1% is green. Above 1% is worth investigating. Above 5% is an incident.
+
+### 4. Saturation
+
+Saturation measures how full your resources are. For a container-based service on ECS (as configured in [Part 41](/blog/aws-for-startups/41-ecs-fargate-bun)), this means CPU and memory utilization.
+
+```promql title="Panel: CPU Utilization (%)"
+avg(container_cpu_utilization{service_name="api-service"}) * 100
+```
+
+```promql title="Panel: Memory Utilization (%)"
+avg(container_memory_utilization{service_name="api-service"}) * 100
+```
+
+CPU above 70% sustained means you need to scale up or out. Memory above 80% means you are approaching OOM territory. Both of these are signals to act before they become incidents.
+
+### Golden Signals Dashboard Layout
+
+Arrange the four signals in a 2x2 grid:
+
+| | Left | Right |
+|---|---|---|
+| **Top** | Latency (p50/p95/p99) | Traffic (req/s by endpoint) |
+| **Bottom** | Error Rate (%) | Saturation (CPU + Memory) |
+
+This is the dashboard you open first during any investigation. The four panels tell you whether the system is slow (latency), busy (traffic), broken (errors), or starving (saturation). Most problems are visible in one of these four panels within 30 seconds.
+
+---
+
+## Service-Specific Dashboards
+
+The Golden Signals dashboard gives you the overview. Service dashboards give you the detail.
+
+### API Service Dashboard
+
+For your API service, create a dashboard with these panels:
+
+```promql title="Panel: Latency by Endpoint"
+histogram_quantile(0.95, sum(rate(signoz_latency_bucket{service_name="api-service"}[5m])) by (le, operation))
+```
+
+This breaks down p95 latency per endpoint. If `/api/orders` is 3x slower than `/api/users`, you know where to focus.
+
+```promql title="Panel: Error Rate by Endpoint"
+sum(rate(signoz_calls_total{service_name="api-service", status_code="STATUS_CODE_ERROR"}[5m])) by (operation)
+/
+sum(rate(signoz_calls_total{service_name="api-service"}[5m])) by (operation)
+* 100
+```
+
+```promql title="Panel: Database Query Duration"
+histogram_quantile(0.95, sum(rate(signoz_db_latency_bucket{service_name="api-service"}[5m])) by (le, db_operation))
+```
+
+```promql title="Panel: External Service Call Duration"
+histogram_quantile(0.95, sum(rate(signoz_external_call_latency_bucket{service_name="api-service"}[5m])) by (le, peer_service))
+```
+
+### Tenant Health Dashboard
+
+Using the custom attributes from [Part 60](/blog/aws-for-startups/60-opentelemetry-mastery), build a tenant-level view:
+
+```promql title="Panel: p95 Latency by Tenant"
+histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket{service_name="api-service"}[5m])) by (le, tenant_id))
+```
+
+```promql title="Panel: Error Rate by Tenant"
+sum(rate(traces_spanmetrics_calls_total{service_name="api-service", status_code="STATUS_CODE_ERROR"}[5m])) by (tenant_id)
+/
+sum(rate(traces_spanmetrics_calls_total{service_name="api-service"}[5m])) by (tenant_id)
+* 100
+```
+
+This is the dashboard you open when a specific customer says "your service is slow." Instead of guessing, you filter by their tenant ID and see their exact experience: latency percentiles, error rates, and which endpoints they are hitting.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents create dashboard panels using `avg()` instead of `histogram_quantile()` for latency metrics. Average latency hides outliers. A service with p50 = 100ms and p99 = 8000ms shows "average latency 150ms," which looks fine. The 1% of users experiencing 8-second response times are invisible.
+
+**What catches it:** Check every latency panel. If the query uses `avg()` or `mean()` instead of `histogram_quantile()`, replace it. Latency should always be shown as percentiles (p50, p95, p99).
+
+</Alert>
+
+---
+
+## Alerting Rules: What to Alert On
+
+The goal of alerting is not to notify you about every metric deviation. The goal is to notify you about conditions that require human action. Everything else is noise.
+
+### Severity Tiers
+
+Define three severity levels before creating any alert:
+
+| Severity | Response Time | Channel | Example |
+|----------|--------------|---------|---------|
+| **Critical** | Immediate (pages you) | PagerDuty + Slack | Error rate > 5% for 5 minutes |
+| **Warning** | Next business morning | Slack channel | p95 latency > 1s for 15 minutes |
+| **Info** | Review weekly | Logged in SigNoz | Disk usage > 60% |
+
+Critical alerts wake you up. Warning alerts queue for the morning. Info alerts are data points you review during your weekly ops review.
+
+### Creating Alerts in SigNoz
+
+SigNoz supports PromQL-based alerting rules. Navigate to **Alerts > New Alert Rule** and configure:
+
+**Alert 1: High Error Rate (Critical)**
+
+```yaml title="Alert: High Error Rate"
+alert: HighErrorRate
+expr: |
+  sum(rate(signoz_calls_total{service_name="api-service", status_code="STATUS_CODE_ERROR"}[5m]))
+  /
+  sum(rate(signoz_calls_total{service_name="api-service"}[5m]))
+  * 100 > 5
+for: 5m
+labels:
+  severity: critical
+  service: api-service
+annotations:
+  summary: "API error rate above 5%"
+  description: "Error rate is {{ $value }}% over the last 5 minutes"
+  runbook: "https://wiki.internal/runbooks/high-error-rate"
+```
+
+The `for: 5m` clause is critical. It means the condition must be true for 5 consecutive minutes before the alert fires. Without it, a 30-second spike that resolves on its own triggers a page.
+
+**Alert 2: High Latency (Warning)**
+
+```yaml title="Alert: High Latency"
+alert: HighLatency
+expr: |
+  histogram_quantile(0.95, sum(rate(signoz_latency_bucket{service_name="api-service"}[5m])) by (le))
+  > 1000
+for: 15m
+labels:
+  severity: warning
+  service: api-service
+annotations:
+  summary: "API p95 latency above 1 second"
+  description: "p95 latency is {{ $value }}ms over the last 15 minutes"
+```
+
+**Alert 3: High CPU Utilization (Warning)**
+
+```yaml title="Alert: High CPU"
+alert: HighCPU
+expr: |
+  avg(container_cpu_utilization{service_name="api-service"}) * 100 > 80
+for: 10m
+labels:
+  severity: warning
+  service: api-service
+annotations:
+  summary: "API service CPU above 80%"
+  description: "CPU utilization is {{ $value }}% over the last 10 minutes"
+```
+
+**Alert 4: Service Down (Critical)**
+
+```yaml title="Alert: Service Down"
+alert: ServiceDown
+expr: |
+  sum(rate(signoz_calls_total{service_name="api-service"}[5m])) == 0
+for: 2m
+labels:
+  severity: critical
+  service: api-service
+annotations:
+  summary: "API service receiving zero traffic"
+  description: "No requests received in the last 2 minutes"
+```
+
+### Alert Routing
+
+SigNoz integrates with notification channels. Configure two channels:
+
+**Slack (for warnings and above):**
+
+Navigate to **Settings > Alert Channels > Add New Channel**. Select Slack and provide your webhook URL. Route all `severity: warning` and `severity: critical` alerts to your `#ops-alerts` channel.
+
+**PagerDuty (for critical only):**
+
+Add a PagerDuty integration in **Settings > Alert Channels**. Provide your PagerDuty integration key. Route only `severity: critical` alerts to PagerDuty. This is the channel that wakes you up at 3 AM, so keep it clean.
+
+```yaml title="Alert Channel Routing"
+routes:
+  - match:
+      severity: critical
+    channels:
+      - pagerduty-ops
+      - slack-ops-alerts
+  - match:
+      severity: warning
+    channels:
+      - slack-ops-alerts
+  - match:
+      severity: info
+    channels:
+      - slack-ops-info
+```
+
+---
+
+## SLOs: How Reliable Do You Need to Be?
+
+Alerts tell you "something is broken right now." SLOs tell you "how much breakage can we afford this month?" These are different questions with different answers.
+
+### Defining Your SLOs
+
+An SLO is a target: "99.9% of requests return successfully in under 500ms." That target comes with an **error budget**: the amount of failure you can tolerate.
+
+For a 99.9% availability SLO over 30 days:
+
+- Total minutes in 30 days: 43,200
+- Allowed downtime: 43.2 minutes
+- That is your error budget
+
+For a 99.9% latency SLO (p95 < 500ms):
+
+- Out of every 1,000 requests, 999 must complete in under 500ms at the 95th percentile
+- 1 in 1,000 can be slow, and you are still within budget
+
+### Configuring SLOs in SigNoz
+
+SigNoz supports SLO configuration through the UI. Navigate to **Service Level Objectives > Create New SLO**.
+
+**SLO 1: Availability**
+
+```yaml title="SLO: API Availability"
+name: API Availability
+description: "99.9% of API requests return non-5xx responses"
+target: 99.9
+window: 30d
+sli:
+  type: ratio
+  good_events:
+    query: |
+      sum(rate(signoz_calls_total{service_name="api-service", status_code!="STATUS_CODE_ERROR"}[5m]))
+  total_events:
+    query: |
+      sum(rate(signoz_calls_total{service_name="api-service"}[5m]))
+```
+
+**SLO 2: Latency**
+
+```yaml title="SLO: API Latency"
+name: API Latency
+description: "95% of API requests complete in under 500ms"
+target: 95
+window: 30d
+sli:
+  type: ratio
+  good_events:
+    query: |
+      sum(rate(signoz_latency_bucket{service_name="api-service", le="500"}[5m]))
+  total_events:
+    query: |
+      sum(rate(signoz_latency_count{service_name="api-service"}[5m]))
+```
+
+### Error Budget Burn Rate Alerts
+
+The real power of SLOs is burn rate alerts. Instead of alerting on absolute thresholds ("error rate > 5%"), you alert on how fast you are consuming your error budget.
+
+A **burn rate** of 1x means you will exhaust your 30-day error budget in exactly 30 days. A burn rate of 14.4x means you will exhaust it in 2 days. A burn rate of 720x means you will exhaust it in 1 hour.
+
+```yaml title="Alert: Fast Error Budget Burn"
+alert: HighBurnRate
+expr: |
+  (
+    sum(rate(signoz_calls_total{service_name="api-service", status_code="STATUS_CODE_ERROR"}[1h]))
+    /
+    sum(rate(signoz_calls_total{service_name="api-service"}[1h]))
+  ) > (14.4 * 0.001)
+for: 5m
+labels:
+  severity: critical
+  service: api-service
+  slo: availability
+annotations:
+  summary: "Error budget burning at 14.4x rate"
+  description: "At this rate, the 30-day error budget will be exhausted in 2 days"
+```
+
+```yaml title="Alert: Slow Error Budget Burn"
+alert: SlowBurnRate
+expr: |
+  (
+    sum(rate(signoz_calls_total{service_name="api-service", status_code="STATUS_CODE_ERROR"}[6h]))
+    /
+    sum(rate(signoz_calls_total{service_name="api-service"}[6h]))
+  ) > (6 * 0.001)
+for: 30m
+labels:
+  severity: warning
+  service: api-service
+  slo: availability
+annotations:
+  summary: "Error budget burning at 6x rate"
+  description: "At this rate, the 30-day error budget will be exhausted in 5 days"
+```
+
+The fast burn alert (14.4x over 1 hour) catches sudden incidents. The slow burn alert (6x over 6 hours) catches gradual degradation that flies under the radar of threshold-based alerts.
+
+### SLO Dashboard Panel
+
+Add an error budget remaining panel to your Golden Signals dashboard:
+
+```promql title="Panel: Error Budget Remaining (%)"
+(1 - (
+  sum(rate(signoz_calls_total{service_name="api-service", status_code="STATUS_CODE_ERROR"}[30d]))
+  /
+  sum(rate(signoz_calls_total{service_name="api-service"}[30d]))
+)) / 0.001 * 100
+```
+
+When this number drops below 50%, you are halfway through your monthly error budget. Below 20%, you should freeze deployments and focus on reliability.
+
+---
+
+## Alert Fatigue Prevention
+
+Alert fatigue is worse than having no alerts. When every metric deviation triggers a notification, you stop reading notifications. When you stop reading notifications, you miss the real incident.
+
+### Rules for Preventing Alert Fatigue
+
+**1. Every alert must have a runbook link.**
+
+If you cannot write a runbook for an alert, you cannot act on it. An alert without a runbook is a notification that says "something is happening" without telling you what to do. Delete it.
+
+**2. Every alert must have a `for` duration.**
+
+No alert should fire on a single data point. A 30-second error spike that self-resolves does not need human attention. Use `for: 5m` as the minimum for critical alerts and `for: 15m` for warnings.
+
+**3. Review alert frequency monthly.**
+
+If an alert fires more than 5 times per week without requiring action, either:
+- The threshold is too tight (widen it)
+- The condition is not actionable (delete the alert)
+- The underlying issue needs fixing (fix it instead of alerting on it)
+
+**4. Start with fewer alerts.**
+
+Four alerts are enough for a single service at this stage:
+
+| Alert | Severity | Threshold | For Duration |
+|-------|----------|-----------|-------------|
+| Error rate > 5% | Critical | 5% | 5 minutes |
+| p95 latency > 1s | Warning | 1000ms | 15 minutes |
+| CPU > 80% | Warning | 80% | 10 minutes |
+| Zero traffic | Critical | 0 req/s | 2 minutes |
+
+You will add more alerts as your traffic patterns become clear. But start with four. Learn what normal looks like before you define what abnormal looks like.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents create alerts on every available metric with default thresholds when asked to "set up alerting." Memory usage > 50%? Alert. Disk usage > 40%? Alert. p50 latency > 100ms? Alert. The result: 30+ alerts, 15 of which fire within the first day because the thresholds were set without understanding baseline behavior.
+
+**What catches it:** Count your alerts. If you have more than 6-8 for a single service before you have 30 days of production traffic data, you have too many. Delete everything except the four core alerts above and add new ones only after you understand your baselines.
+
+</Alert>
+
+---
+
+## Dashboard Organization
+
+As you add more services, organize dashboards into a hierarchy:
+
+<FileTree>
+dashboards/
+  overview/
+    golden-signals.json
+    error-budget.json
+  services/
+    api-service.json
+    payment-service.json
+    notification-service.json
+  business/
+    tenant-health.json
+    order-metrics.json
+</FileTree>
+
+**Overview dashboards** answer "is the system healthy?" You check these first.
+
+**Service dashboards** answer "what is wrong with service X?" You drill into these during an investigation.
+
+**Business dashboards** answer "how is this affecting customers?" You check these to assess impact.
+
+In SigNoz, create separate dashboard folders matching this hierarchy. Pin the Golden Signals dashboard as the default view.
+
+### Sharing Dashboards as Code
+
+Export your dashboards as JSON from SigNoz and store them in your repository. This gives you version control on your dashboards and the ability to recreate them in a new environment.
+
+```bash terminal
+# Export dashboard from SigNoz API
+curl -s "http://signoz:3301/api/v1/dashboards" \
+  -H "Authorization: Bearer ${SIGNOZ_API_KEY}" \
+  | jq '.data[] | select(.title == "Golden Signals")' \
+  > dashboards/overview/golden-signals.json
+```
+
+Store these JSON files alongside your infrastructure code. When you spin up a new environment, import the dashboards:
+
+```bash terminal
+# Import dashboard to SigNoz
+curl -X POST "http://signoz:3301/api/v1/dashboards" \
+  -H "Authorization: Bearer ${SIGNOZ_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d @dashboards/overview/golden-signals.json
+```
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No dashboards. No alerts. You open SigNoz and manually search traces when a customer complains. You find out about outages from customer support tickets, not from your monitoring. |
+| ✅ **Right** | Golden Signals dashboard (4 panels). Service-specific dashboards per service. 4-6 alerts per service with severity tiers. Two SLOs (availability and latency) with burn rate alerts. Dashboards exported as JSON in your repository. |
+| ❌ **Over** | 50+ dashboard panels, alerts on every metric with thresholds guessed before you have traffic data, separate SLOs for every endpoint, a dedicated SRE on-call rotation for a pre-launch app serving 10 requests per minute. |
+| 🤖 **Agent Trap** | Agent creates 25 alerts with tight thresholds (p50 > 100ms, memory > 50%, CPU > 30%) based on "best practices" from its training data. Within 48 hours, you have 200+ alert notifications in Slack. You mute the channel. The next real incident goes unnoticed for 4 hours. Alert fatigue is worse than no alerts. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 62: Feature Flags & Guardrails**, we add feature flags with AWS AppConfig and build the governance layer that controls what agents can do in each environment. The observability you built in Parts 58-61 becomes the feedback loop: deploy a feature flag, watch the dashboards, roll back if the error budget starts burning.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Dashboards",
+    tasks: [
+      { text: "Golden Signals dashboard created with 4 panels (latency, traffic, errors, saturation)", syncKey: "part-61-golden-signals" },
+      { text: "Latency panel uses histogram_quantile, not avg()", syncKey: "part-61-latency-percentiles" },
+      { text: "Service-specific dashboard created for API service", syncKey: "part-61-service-dashboard" },
+      { text: "Tenant health dashboard shows per-tenant latency and error rate", syncKey: "part-61-tenant-dashboard" }
+    ]
+  },
+  {
+    category: "Alerting",
+    tasks: [
+      { text: "Critical alert configured: error rate > 5% for 5 minutes", syncKey: "part-61-alert-error-rate" },
+      { text: "Warning alert configured: p95 latency > 1s for 15 minutes", syncKey: "part-61-alert-latency" },
+      { text: "Critical alert configured: zero traffic for 2 minutes", syncKey: "part-61-alert-zero-traffic" },
+      { text: "All alerts have for duration (no single-datapoint alerts)", syncKey: "part-61-alert-duration" },
+      { text: "Slack notification channel configured", syncKey: "part-61-slack-channel" }
+    ]
+  },
+  {
+    category: "SLOs",
+    tasks: [
+      { text: "Availability SLO defined: 99.9% non-error responses", syncKey: "part-61-slo-availability" },
+      { text: "Latency SLO defined: 95% of requests under 500ms", syncKey: "part-61-slo-latency" },
+      { text: "Fast burn rate alert configured (14.4x, 1h window)", syncKey: "part-61-burn-fast" },
+      { text: "Slow burn rate alert configured (6x, 6h window)", syncKey: "part-61-burn-slow" }
+    ]
+  },
+  {
+    category: "Organization",
+    tasks: [
+      { text: "Dashboards organized into overview/services/business folders", syncKey: "part-61-dashboard-folders" },
+      { text: "Golden Signals dashboard exported as JSON and committed to repo", syncKey: "part-61-dashboard-json" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Golden Signals (latency, traffic, errors, saturation) are the four panels you check first during any incident, and the only four you need to start.
+2. SLOs with error budgets answer "how much reliability margin do we have left this month," which is more actionable than "is something broken right now."
+3. Alert fatigue is worse than no alerts: start with 4 alerts per service, each with a `for` duration and a runbook, and add more only after you understand your baselines.
+4. Burn rate alerts catch both sudden failures (14.4x over 1 hour) and gradual degradation (6x over 6 hours), which threshold-based alerts consistently miss.
+5. Dashboards stored as JSON in your repository are infrastructure, not art: they should be version-controlled, reviewable, and reproducible across environments.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

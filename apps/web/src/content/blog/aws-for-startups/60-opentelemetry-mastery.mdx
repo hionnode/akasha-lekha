@@ -1,0 +1,627 @@
+---
+title: "OpenTelemetry Mastery: Beyond Auto-Instrumentation"
+description: "Advanced OpenTelemetry patterns: manual spans, custom attributes, baggage propagation, tail-based sampling, and the instrumentation that auto-mode misses."
+excerpt: "Beyond auto-instrumentation. Manual spans, custom attributes, baggage, and sampling strategies: the OTel skills that separate monitoring from observability."
+date: "2026-09-04"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "opentelemetry", "observability"]
+series: "aws-for-startups"
+seriesPart: 60
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your SigNoz dashboard shows a trace for an API request that took 4.2 seconds. The trace has 23 spans: HTTP handler, database queries, Redis lookups. You can see *where* the time went. But the trace tells you nothing about *who* was affected, which tenant triggered the request, or whether this was a paid user on the enterprise plan whose SLA you just violated. Auto-instrumentation gave you the skeleton. The business context is missing.
+
+**Time:** About 90 minutes.
+
+**Outcome:** Manual spans on business-critical operations, custom attributes that link traces to users and tenants, baggage propagation across service boundaries, and a tail-based sampling strategy that keeps the interesting traces while dropping routine ones.
+
+---
+
+## Why This Matters
+
+In [Part 5](/blog/aws-for-startups/05-opentelemetry-setup), you set up OpenTelemetry with auto-instrumentation. In [Part 29](/blog/aws-for-startups/29-backend-bun-signoz), you wired it into your Bun backend and SigNoz. Auto-instrumentation gave you HTTP spans, database query spans, and framework middleware spans for free.
+
+That "free" instrumentation covers roughly 80% of what you need. The other 20% is where observability separates from monitoring. Monitoring tells you the `/api/orders` endpoint is slow. Observability tells you it is slow specifically for tenant `acme-corp` because their order history query scans 2.3 million rows due to a missing index on the `tenant_id` column.
+
+The gap between those two statements is manual spans, custom attributes, and context propagation. Auto-instrumentation cannot add `tenant_id` to your spans because it does not know your domain model. It cannot create a span called `order.fulfillment.validate` because it does not know where your business logic boundaries are. It cannot propagate a feature flag value across three microservices because that is your application's concern, not the HTTP library's.
+
+This part teaches you to close that gap without turning every function call into a span.
+
+---
+
+## What We're Building
+
+- Manual spans on critical business operations (order processing, payment validation, user provisioning)
+- Custom attributes on spans: `user.id`, `tenant.id`, `feature_flag.variant`, `plan.tier`
+- Baggage propagation for cross-service context (tenant ID, correlation ID, feature flags)
+- A tail-based sampling configuration that keeps error traces and slow traces at 100% while sampling routine successful traces at 10%
+- Span-to-metrics conversion for latency histograms by endpoint and tenant
+
+---
+
+## Manual Spans: Instrumenting What Matters
+
+Auto-instrumentation creates spans at framework boundaries: HTTP handlers, database drivers, Redis clients. Your business logic lives between those boundaries, invisible to the trace.
+
+### When to Create Manual Spans
+
+Create manual spans when:
+
+- A business operation spans multiple database calls and you need to see the operation as a unit, not individual queries
+- You need to measure a specific code path that is not a network call (validation logic, data transformation, rule evaluation)
+- A function is called from multiple places and you need to distinguish the calling context in traces
+
+Do not create manual spans for:
+
+- Every function call (this is the over-engineering trap)
+- Operations that already have auto-instrumented spans (HTTP calls, DB queries)
+- Simple synchronous code that completes in microseconds
+
+### Creating Spans in TypeScript/Bun
+
+The OpenTelemetry SDK exposes a `Tracer` that creates spans. Here is the pattern:
+
+```typescript title="src/tracing/tracer.ts"
+import { trace } from '@opentelemetry/api';
+
+// One tracer per logical component
+export const orderTracer = trace.getTracer('order-service', '1.0.0');
+export const paymentTracer = trace.getTracer('payment-service', '1.0.0');
+export const userTracer = trace.getTracer('user-service', '1.0.0');
+```
+
+Name your tracers after the logical service or domain, not the file. The tracer name appears in SigNoz as the instrumentation library, which helps you filter traces by domain.
+
+```typescript title="src/services/order.service.ts"
+import { SpanStatusCode } from '@opentelemetry/api';
+import { orderTracer } from '../tracing/tracer';
+
+export async function processOrder(orderId: string, tenantId: string) {
+  return orderTracer.startActiveSpan('order.process', async (span) => {
+    try {
+      span.setAttribute('order.id', orderId);
+      span.setAttribute('tenant.id', tenantId);
+
+      // Validate inventory: this becomes a child span
+      const inventory = await orderTracer.startActiveSpan(
+        'order.validate_inventory',
+        async (validateSpan) => {
+          const result = await checkInventory(orderId);
+          validateSpan.setAttribute('order.item_count', result.itemCount);
+          validateSpan.setAttribute('order.has_backorder', result.hasBackorder);
+          validateSpan.end();
+          return result;
+        }
+      );
+
+      // Calculate pricing: another child span
+      const pricing = await orderTracer.startActiveSpan(
+        'order.calculate_pricing',
+        async (pricingSpan) => {
+          const result = await calculateTotal(orderId, tenantId);
+          pricingSpan.setAttribute('order.total_cents', result.totalCents);
+          pricingSpan.setAttribute('order.discount_applied', result.discountApplied);
+          pricingSpan.end();
+          return result;
+        }
+      );
+
+      // Submit payment
+      await orderTracer.startActiveSpan(
+        'order.submit_payment',
+        async (paymentSpan) => {
+          await submitPayment(orderId, pricing.totalCents);
+          paymentSpan.setAttribute('payment.method', 'stripe');
+          paymentSpan.end();
+        }
+      );
+
+      span.setStatus({ code: SpanStatusCode.OK });
+    } catch (error) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+      span.recordException(error as Error);
+      throw error;
+    } finally {
+      span.end();
+    }
+  });
+}
+```
+
+The nesting matters. `order.validate_inventory` and `order.calculate_pricing` are child spans of `order.process`. In SigNoz, this shows as a waterfall: you see the total order processing time, then drill into each step. Without the parent span, those individual operations are disconnected fragments.
+
+### Span Naming Conventions
+
+Use a consistent naming convention across your codebase. The pattern `{domain}.{operation}` works well:
+
+| Span Name | Domain | Operation |
+|-----------|--------|-----------|
+| `order.process` | order | process |
+| `order.validate_inventory` | order | validate_inventory |
+| `payment.charge` | payment | charge |
+| `user.provision` | user | provision |
+| `notification.send_email` | notification | send_email |
+
+Do not use class names or file paths as span names. `OrderService.processOrder` tells you the code structure. `order.process` tells you the business operation. When you are debugging at 2 AM, you care about the operation.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents wrap every function in a span when asked to "add OpenTelemetry instrumentation." A 50-function service gets 50 manual spans, most measuring operations that take less than a millisecond. The result: traces with 200+ spans where 180 of them are noise, and the actual business logic is buried.
+
+**What catches it:** Review span count in SigNoz. If your average trace has more than 30-40 spans for a single API request, you have over-instrumented. Remove spans on synchronous helper functions and keep them on I/O boundaries and business operations.
+
+</Alert>
+
+---
+
+## Custom Attributes: Adding Business Context
+
+A span without custom attributes tells you *what* happened. A span with custom attributes tells you *who* it happened to and *why* it matters.
+
+### Essential Attributes for Startup Applications
+
+These are the attributes every business-critical span should carry:
+
+```typescript title="src/tracing/attributes.ts"
+import { Span } from '@opentelemetry/api';
+
+// Standard attribute keys: use semantic conventions where they exist,
+// custom namespaced keys where they don't
+export const ATTR = {
+  // User context
+  USER_ID: 'user.id',
+  USER_EMAIL: 'user.email',           // careful with PII
+  USER_ROLE: 'user.role',
+
+  // Tenant context (multi-tenant apps)
+  TENANT_ID: 'tenant.id',
+  TENANT_PLAN: 'tenant.plan',         // free, pro, enterprise
+  TENANT_REGION: 'tenant.region',
+
+  // Feature flags
+  FEATURE_FLAG_KEY: 'feature_flag.key',
+  FEATURE_FLAG_VARIANT: 'feature_flag.variant',
+
+  // Business metrics
+  ORDER_VALUE_CENTS: 'order.value_cents',
+  ITEMS_COUNT: 'items.count',
+  QUEUE_DEPTH: 'queue.depth',
+} as const;
+
+// Helper to set common request context on a span
+export function setRequestContext(
+  span: Span,
+  ctx: { userId: string; tenantId: string; plan: string }
+) {
+  span.setAttribute(ATTR.USER_ID, ctx.userId);
+  span.setAttribute(ATTR.TENANT_ID, ctx.tenantId);
+  span.setAttribute(ATTR.TENANT_PLAN, ctx.plan);
+}
+```
+
+### Middleware-Level Attribute Injection
+
+Instead of adding user context to every span manually, inject it at the middleware level so every span in the request automatically inherits it:
+
+```typescript title="src/middleware/tracing.middleware.ts"
+import { trace, context } from '@opentelemetry/api';
+import { setRequestContext } from '../tracing/attributes';
+
+export function tracingMiddleware(req: Request, next: () => Promise<Response>) {
+  const span = trace.getActiveSpan();
+  if (!span) return next();
+
+  // Extract user from auth (already verified by auth middleware)
+  const user = req.auth?.user;
+  if (user) {
+    setRequestContext(span, {
+      userId: user.id,
+      tenantId: user.tenantId,
+      plan: user.plan,
+    });
+  }
+
+  // Add request-level attributes
+  span.setAttribute('http.request_id', req.headers.get('x-request-id') || '');
+
+  return next();
+}
+```
+
+Now every trace for an authenticated request carries the user ID, tenant ID, and plan tier. In SigNoz, you can filter traces by `tenant.id = acme-corp` and see every request from that tenant, their latencies, and their error rates. That is the difference between "the API is slow" and "the API is slow for Acme Corp on the enterprise plan."
+
+### PII Considerations
+
+Be deliberate about what you put in span attributes. User IDs and tenant IDs are fine. Email addresses, names, and IP addresses are PII that may violate GDPR or your privacy policy if they end up in a tracing backend.
+
+Rules:
+
+- `user.id` (opaque identifier): always safe
+- `user.email`: avoid unless you have explicit data processing grounds
+- `tenant.id`: safe (business identifier)
+- Request body contents: never put in attributes
+- Error messages: safe if they do not contain user data
+
+:::tip
+If you need to search traces by email later, store a hash: `span.setAttribute('user.email_hash', sha256(email))`. You can look up the hash from your database when investigating, without storing PII in your tracing pipeline.
+:::
+
+---
+
+## Baggage: Propagating Context Across Services
+
+Custom attributes live on a single span. If your order service calls a payment service that calls a notification service, the `tenant.id` attribute you set on the order span does not automatically appear on spans in the other services. That is where **baggage** comes in.
+
+OpenTelemetry Baggage is a set of key-value pairs that propagates across service boundaries through HTTP headers. Every service in the request chain can read and add to the baggage.
+
+### Setting Baggage
+
+```typescript title="src/middleware/baggage.middleware.ts"
+import { propagation, context, ROOT_CONTEXT, BaggageEntry } from '@opentelemetry/api';
+
+export function setBaggageMiddleware(req: Request, next: () => Promise<Response>) {
+  const user = req.auth?.user;
+  if (!user) return next();
+
+  // Create baggage entries
+  const baggage = propagation.createBaggage({
+    'tenant.id': { value: user.tenantId },
+    'user.plan': { value: user.plan },
+    'request.id': { value: req.headers.get('x-request-id') || crypto.randomUUID() },
+  });
+
+  // Set baggage in the current context
+  const ctxWithBaggage = propagation.setBaggage(context.active(), baggage);
+
+  // Run the rest of the request within this context
+  return context.with(ctxWithBaggage, () => next());
+}
+```
+
+### Reading Baggage in Downstream Services
+
+When the payment service receives an HTTP request from the order service, the OTel SDK automatically extracts baggage from the `baggage` HTTP header (this is a W3C standard). The downstream service reads it:
+
+```typescript title="src/middleware/read-baggage.middleware.ts"
+import { propagation, context, trace } from '@opentelemetry/api';
+
+export function readBaggageMiddleware(req: Request, next: () => Promise<Response>) {
+  const baggage = propagation.getBaggage(context.active());
+  if (!baggage) return next();
+
+  const span = trace.getActiveSpan();
+  if (!span) return next();
+
+  // Copy baggage values to span attributes
+  // so they appear in traces for this service too
+  const tenantId = baggage.getEntry('tenant.id');
+  if (tenantId) {
+    span.setAttribute('tenant.id', tenantId.value);
+  }
+
+  const plan = baggage.getEntry('user.plan');
+  if (plan) {
+    span.setAttribute('tenant.plan', plan.value);
+  }
+
+  return next();
+}
+```
+
+### Baggage vs. Span Attributes: When to Use Which
+
+| Mechanism | Scope | Propagation | Use When |
+|-----------|-------|-------------|----------|
+| Span Attributes | Single span | No propagation | Adding context to one operation |
+| Baggage | Entire request chain | Crosses service boundaries via HTTP headers | Context needed by downstream services |
+
+Use baggage sparingly. Every baggage entry adds bytes to every HTTP request header in the chain. Tenant ID, plan tier, and a correlation ID are good candidates. A 500-character feature flag configuration is not.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents put sensitive data in baggage when asked to "propagate user context across services." Baggage travels as plain-text HTTP headers. If any service in the chain logs request headers (and many do by default), you have PII in your logs. Only put opaque identifiers in baggage, never emails, tokens, or personal data.
+
+**What catches it:** Search your logs for the `baggage` HTTP header. If you see emails or names in the header value, you have a data leak.
+
+</Alert>
+
+---
+
+## Sampling Strategies: Keeping Costs Under Control
+
+At 100 requests per second, with 20 spans per request and 30 days of retention, you generate roughly 5 billion spans per month. Even with SigNoz's efficient storage, that is a lot of data. Sampling lets you keep the traces that matter while dropping the ones that do not.
+
+### Head-Based Sampling
+
+Head-based sampling makes the decision at the start of the trace: keep or drop. Every downstream service respects that decision. It is simple and predictable.
+
+```typescript title="src/tracing/sampler.ts"
+import { TraceIdRatioBasedSampler } from '@opentelemetry/sdk-trace-base';
+
+// Keep 10% of all traces
+const sampler = new TraceIdRatioBasedSampler(0.1);
+```
+
+The problem: head-based sampling is random. It drops 90% of traces regardless of whether they are interesting. That slow request with a 5-second database query? 90% chance it gets dropped. That error trace showing a payment failure? 90% chance you never see it.
+
+### Tail-Based Sampling
+
+Tail-based sampling makes the decision after the trace completes. It can inspect the entire trace, see the status codes, check the duration, and then decide. Slow traces and error traces are kept at 100%. Fast, successful traces are sampled down.
+
+The OpenTelemetry Collector handles tail-based sampling. Your application sends all traces to the collector, and the collector applies the rules:
+
+```yaml title="otel-collector-config.yaml"
+processors:
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100000
+    expected_new_traces_per_sec: 100
+    policies:
+      # Always keep error traces
+      - name: errors-policy
+        type: status_code
+        status_code:
+          status_codes:
+            - ERROR
+
+      # Always keep slow traces (> 2 seconds)
+      - name: latency-policy
+        type: latency
+        latency:
+          threshold_ms: 2000
+
+      # Always keep traces with specific attributes
+      - name: high-value-policy
+        type: string_attribute
+        string_attribute:
+          key: tenant.plan
+          values:
+            - enterprise
+
+      # Sample everything else at 10%
+      - name: probabilistic-policy
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+```
+
+This configuration says:
+
+- Every error trace: kept (you always want to see failures)
+- Every trace slower than 2 seconds: kept (these are your performance problems)
+- Every trace from enterprise tenants: kept (these are your SLA obligations)
+- Everything else: 10% sample (enough to understand normal behavior)
+
+### Configuring the Collector Pipeline
+
+```yaml title="otel-collector-config.yaml"
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100000
+    expected_new_traces_per_sec: 100
+    policies:
+      - name: errors-policy
+        type: status_code
+        status_code:
+          status_codes:
+            - ERROR
+      - name: latency-policy
+        type: latency
+        latency:
+          threshold_ms: 2000
+      - name: high-value-policy
+        type: string_attribute
+        string_attribute:
+          key: tenant.plan
+          values:
+            - enterprise
+      - name: probabilistic-policy
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+
+exporters:
+  otlp/signoz:
+    endpoint: "http://signoz-otel-collector:4317"
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [tail_sampling, batch]
+      exporters: [otlp/signoz]
+```
+
+The key detail: `decision_wait: 10s` means the collector waits 10 seconds for all spans in a trace to arrive before making the sampling decision. If your traces regularly take longer than 10 seconds to complete, increase this value. The trade-off is memory: longer waits mean more in-flight traces stored in memory.
+
+### Comparing Sampling Strategies
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Head-Based", "Tail-Based"]} />
+  <ComparisonRow feature="Decision point" Head_Based="Trace start" Tail_Based="Trace completion" />
+  <ComparisonRow feature="Can filter by error" Head_Based="No" Tail_Based="Yes (Best)" />
+  <ComparisonRow feature="Can filter by latency" Head_Based="No" Tail_Based="Yes (Best)" />
+  <ComparisonRow feature="Memory overhead" Head_Based="None (Best)" Tail_Based="Moderate (buffered traces)" />
+  <ComparisonRow feature="Complexity" Head_Based="Simple (Best)" Tail_Based="Requires OTel Collector" />
+  <ComparisonRow feature="Best for" Head_Based="Low traffic, early stage" Tail_Based="Production with 50+ req/s" />
+</ComparisonTable>
+
+Start with head-based sampling at 100% while your traffic is low. Switch to tail-based when you cross 50 requests per second or when your SigNoz storage costs become noticeable.
+
+---
+
+## Metrics from Traces: Span Metrics
+
+Traces are detailed but expensive to query at scale. Metrics are cheap and fast. The OTel Collector can generate metrics from your traces automatically, giving you the best of both worlds: detailed traces when you need to investigate, and fast metric queries for dashboards.
+
+### Span Metrics Processor
+
+The `spanmetrics` processor in the OpenTelemetry Collector creates latency histograms and call count metrics from every span:
+
+```yaml title="otel-collector-config.yaml"
+processors:
+  spanmetrics:
+    metrics_exporter: otlp/signoz
+    dimensions:
+      - name: http.method
+      - name: http.status_code
+      - name: http.route
+      - name: tenant.id
+      - name: tenant.plan
+    dimensions_cache_size: 1000
+    aggregation_temporality: "AGGREGATION_TEMPORALITY_CUMULATIVE"
+    metrics_flush_interval: 30s
+```
+
+This generates two metric families for every unique combination of dimensions:
+
+- `traces_spanmetrics_latency`: a histogram of span durations
+- `traces_spanmetrics_calls_total`: a counter of span executions
+
+With the `tenant.id` dimension, you get per-tenant latency histograms. In SigNoz, you can build a dashboard that shows p50, p95, and p99 latency broken down by tenant, without querying individual traces.
+
+### Adding Span Metrics to the Pipeline
+
+Update the collector service section to include the span metrics processor:
+
+```yaml title="otel-collector-config.yaml"
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [tail_sampling, spanmetrics, batch]
+      exporters: [otlp/signoz]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/signoz]
+```
+
+The `spanmetrics` processor sits in the traces pipeline but emits to the metrics exporter. It reads every trace, extracts the dimensions you configured, and writes aggregated metrics. Your dashboards in [Part 61](/blog/aws-for-startups/61-signoz-dashboards-alerts) will query these metrics instead of scanning raw traces.
+
+---
+
+## Putting It All Together: The Instrumentation File Structure
+
+<FileTree>
+src/
+  tracing/
+    tracer.ts
+    attributes.ts
+    sampler.ts
+    setup.ts
+  middleware/
+    tracing.middleware.ts
+    baggage.middleware.ts
+    read-baggage.middleware.ts
+  services/
+    order.service.ts
+    payment.service.ts
+otel-collector-config.yaml
+</FileTree>
+
+The `tracing/` directory contains your OTel setup. The middleware directory handles request-level context injection. Business services use the tracers from `tracing/tracer.ts` to create manual spans.
+
+This structure keeps instrumentation code separate from business logic. Your services import a tracer and call `startActiveSpan`. They do not configure exporters, set up processors, or manage the SDK lifecycle. That separation matters when you upgrade OTel SDK versions or change your collector configuration.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Auto-instrumentation only. Traces show HTTP and database spans but no business context. When a customer reports slowness, you cannot filter traces by their tenant ID. Debugging takes hours of manual correlation. |
+| ✅ **Right** | Manual spans on critical business paths (order processing, payment, user provisioning). Custom attributes for user ID, tenant ID, and plan tier. Baggage for cross-service context. Tail-based sampling that keeps errors and slow traces at 100%, samples routine traces at 10%. |
+| ❌ **Over** | Manual span on every function. 100% sampling with no collector. Custom exporters to three different backends. Spending more on observability infrastructure than on the application itself. |
+| 🤖 **Agent Trap** | Agent adds `tracer.startActiveSpan()` to every function in the codebase when asked to "add OpenTelemetry instrumentation." A single API request generates 200+ spans. SigNoz UI becomes unusable because every trace is a wall of noise, and storage costs triple within a week. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 61: SigNoz Dashboards & Alerts**, we take the traces and metrics from this part and build production dashboards. Golden Signals panels for latency, traffic, errors, and saturation. Alerting rules that wake you up for real problems, not false alarms. And SLOs with error budgets that tell you exactly how much reliability margin you have left.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Instrumentation",
+    tasks: [
+      { text: "Manual spans created for at least one business-critical operation", syncKey: "part-60-manual-spans" },
+      { text: "Span naming follows {domain}.{operation} convention", syncKey: "part-60-span-naming" },
+      { text: "Custom attributes (user.id, tenant.id) set on business spans", syncKey: "part-60-custom-attributes" },
+      { text: "Middleware injects request context into active span", syncKey: "part-60-middleware-context" }
+    ]
+  },
+  {
+    category: "Context Propagation",
+    tasks: [
+      { text: "Baggage middleware sets tenant.id and request.id", syncKey: "part-60-baggage-set" },
+      { text: "Downstream services read baggage and copy to span attributes", syncKey: "part-60-baggage-read" },
+      { text: "No PII in baggage entries (only opaque identifiers)", syncKey: "part-60-baggage-pii" }
+    ]
+  },
+  {
+    category: "Sampling",
+    tasks: [
+      { text: "OTel Collector configured with tail-based sampling", syncKey: "part-60-tail-sampling" },
+      { text: "Error traces sampled at 100%", syncKey: "part-60-error-sampling" },
+      { text: "Slow traces (>2s) sampled at 100%", syncKey: "part-60-latency-sampling" },
+      { text: "Routine traces sampled at 10%", syncKey: "part-60-probabilistic-sampling" }
+    ]
+  },
+  {
+    category: "Metrics",
+    tasks: [
+      { text: "Span metrics processor configured in collector", syncKey: "part-60-span-metrics" },
+      { text: "tenant.id included as a span metrics dimension", syncKey: "part-60-metrics-dimensions" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Auto-instrumentation gives you HTTP and database spans; manual spans give you business operation spans that map to what your customers actually experience.
+2. Custom attributes (user.id, tenant.id, plan.tier) transform traces from "what happened" into "who was affected and how badly," which is the difference between monitoring and observability.
+3. Tail-based sampling keeps every error and slow trace while dropping routine successful requests, giving you complete visibility into problems without the storage cost of 100% sampling.
+4. Baggage propagates context across service boundaries so that a tenant ID set in the API gateway appears on spans in the payment service, the notification service, and everywhere else in the chain.
+5. Span metrics convert your detailed traces into fast, queryable latency histograms, which become the foundation for the Golden Signals dashboards in Part 61.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

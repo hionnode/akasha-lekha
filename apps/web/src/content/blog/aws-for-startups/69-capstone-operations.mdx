@@ -1,0 +1,517 @@
+---
+title: "Capstone Operations: Running What You Built"
+description: "Agent-assisted operations: runbooks, multi-agent debugging, continuous model evaluation, and full Scorecard monitoring for the capstone application."
+excerpt: "Running what you built. Agent-assisted operations runbooks, multi-agent debugging workflows, and the Scorecard that tells you everything is working."
+date: "2026-10-10"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "observability", "ai-agents"]
+series: "aws-for-startups"
+seriesPart: 69
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+It is 6:47 PM on a Wednesday. Your phone buzzes. CloudWatch alarm: "ShipMetrics API 5xx rate > 1% for 5 minutes." You open your laptop, and you have two choices. Option A: SSH into the ECS task, grep the logs, check the database, check Redis, check the SQS queues, check the Lambda error rates, and piece together what happened from six different consoles. Option B: ask your observability MCP server what happened in the last 10 minutes, read a structured incident summary, and follow the runbook your agent drafted last month.
+
+**Time:** About 60 minutes to set up the operational framework. Then ongoing.
+
+**Outcome:** Agent-generated operations runbooks for the five most common incidents. A multi-agent debugging workflow using the observability MCP server. Continuous model evaluation running monthly in CI. All 29 Scorecard panels monitoring both your application and your agent workflow. A daily operations routine that takes 10 minutes.
+
+---
+
+## Why This Matters
+
+Deployment is a single day. Operations is every day after that.
+
+Most startups treat operations as "check the dashboard when something breaks." This works until the dashboard does not show the thing that broke. CloudWatch tells you the ECS task restarted. It does not tell you that the restart happened because Redis hit its memory limit, which happened because the cache invalidation Lambda had a bug that caused stale keys to accumulate, which happened because the agent generated a handler without the TTL logic from AGENT-INSTRUCTIONS.md.
+
+Incident investigation is a chain of "why" questions. Your observability stack answers each one, but only if you know which questions to ask and in which order. Runbooks encode that order. The observability MCP server lets agents ask the questions for you, returning structured answers instead of raw log lines.
+
+The goal is not to eliminate human involvement. It is to make the first 10 minutes of every incident productive instead of panicked.
+
+---
+
+## What We're Building
+
+- Operations runbooks for the five most common ShipMetrics incidents
+- A multi-agent debugging workflow using the observability MCP server
+- Continuous model evaluation running monthly via GitHub Actions
+- The full 29-panel Scorecard configured for ShipMetrics
+- A daily operations routine checklist
+
+---
+
+## Operations Runbooks
+
+Runbooks are not documentation. Documentation describes how something works. Runbooks describe what to do when something stops working.
+
+The agent generates the first draft from your infrastructure documentation and Terraform state. You review and refine. The result is a runbook that any engineer (or future you at 3 AM) can follow without thinking.
+
+### Runbook 1: API High Error Rate
+
+**Trigger:** CloudWatch alarm: 5xx rate > 1% for 5 minutes.
+
+```markdown title="runbooks/api-high-error-rate.md"
+# API High Error Rate
+
+## Severity: P1
+## SLA: Acknowledge in 15 minutes, mitigate in 60 minutes
+
+## Step 1: Confirm the Alert
+- Check CloudWatch alarm: `shipmetrics-prod-api-5xx-rate`
+- Confirm error rate in SigNoz: Traces > Service: api > Error Rate
+- If error rate < 1% now, alarm may have auto-resolved. Monitor for 10 minutes.
+
+## Step 2: Identify Error Pattern
+Use the observability MCP server:
+
+  query-traces --service api --status error --since 10m --limit 20
+
+Look for:
+- Single endpoint or all endpoints?
+- Single error type or multiple?
+- Started suddenly or gradual increase?
+
+## Step 3: Check Dependencies
+- RDS: `aws cloudwatch get-metric-statistics --namespace AWS/RDS --metric-name DatabaseConnections`
+- Redis: `aws cloudwatch get-metric-statistics --namespace AWS/ElastiCache --metric-name CurrConnections`
+- SQS: `aws sqs get-queue-attributes --queue-url <url> --attribute-names ApproximateNumberOfMessages`
+
+## Step 4: Common Causes
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| All endpoints 500 | Database connection exhaustion | Scale RDS or increase max connections |
+| Single endpoint 500 | Code bug in recent deploy | Rollback ECS service to previous task definition |
+| Gradual increase | Memory leak in ECS task | Force new deployment to restart tasks |
+| Sudden spike | Upstream webhook flood | Check SQS queue depth, enable rate limiting |
+
+## Step 5: Mitigation
+- Code bug: `aws ecs update-service --service shipmetrics-prod-api --force-new-deployment`
+- Connection exhaustion: Scale RDS vertically (modify instance class)
+- Memory leak: Force new ECS deployment (restarts tasks)
+
+## Step 6: Post-Incident
+- Record in incident log with timeline
+- Update runbook if new cause discovered
+- Create ticket for root cause fix
+```
+
+### Runbook 2: SQS Queue Depth Growing
+
+**Trigger:** CloudWatch alarm: `ApproximateNumberOfMessages` > 1,000 for 10 minutes.
+
+```markdown title="runbooks/sqs-queue-depth.md"
+# SQS Queue Depth Growing
+
+## Severity: P2
+## SLA: Acknowledge in 30 minutes, mitigate in 2 hours
+
+## Step 1: Confirm Queue State
+- Check queue: `aws sqs get-queue-attributes --queue-url <url> --attribute-names All`
+- Note: ApproximateNumberOfMessages, ApproximateNumberOfMessagesNotVisible
+- Check DLQ: same command on DLQ URL
+
+## Step 2: Check Worker Lambda
+- CloudWatch: Lambda function errors (shipmetrics-prod-metric-worker)
+- Recent invocations: are they failing or just slow?
+- Throttling: is reserved concurrency limiting throughput?
+
+## Step 3: Common Causes
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Messages in DLQ | Worker function errors | Check Lambda logs for error details |
+| High NotVisible count | Long processing time | Increase visibility timeout |
+| Zero invocations | Event source mapping disabled | Re-enable mapping |
+| Normal invocations, growing queue | Traffic spike beyond Lambda scale | Increase reserved concurrency |
+
+## Step 4: Mitigation
+- Worker errors: Fix and redeploy Lambda, then redrive DLQ messages
+- Slow processing: Increase visibility timeout and Lambda timeout
+- Traffic spike: Increase Lambda reserved concurrency temporarily
+
+## Step 5: Post-Incident
+- Redrive DLQ messages after fix: `aws sqs start-message-move-task`
+- Record in incident log
+- Adjust alarm threshold if spike was expected (deployment wave)
+```
+
+### Runbooks 3-5: Additional Scenarios
+
+Generate runbooks for these three additional scenarios using the same pattern:
+
+- **Runbook 3: RDS High CPU / Connection Exhaustion** (trigger: CPU > 80% or connections > 80% of max for 5 minutes)
+- **Runbook 4: CloudFront 4xx Spike** (trigger: 4xx rate > 5%, likely misconfigured origin or expired SSL)
+- **Runbook 5: Lambda Cold Start Degradation** (trigger: p95 duration > 2x baseline, likely bundle size increase or VPC ENI delays)
+
+Each follows the same structure: Severity, SLA, Confirm, Identify, Check Dependencies, Common Causes table, Mitigation steps, Post-Incident.
+
+<Alert type="caution" title="Agent Trap">
+
+Agent-generated runbooks assume infrastructure state that matches the Terraform configuration at generation time. If your infrastructure has drifted (manual console changes, failed deployments, auto-scaling changes), the runbook references resources that no longer exist or have different names. A runbook that says "check the `shipmetrics-prod-api` ECS service" fails when someone renamed it to `shipmetrics-prod-api-v2` during a migration.
+
+**What catches it:** Re-generate runbooks monthly from current Terraform state, not from the original generation. The pipeline's explain step diffs the new runbook against the previous version and highlights changes.
+
+</Alert>
+
+---
+
+## Multi-Agent Debugging
+
+The observability MCP server ([Part 59](/blog/aws-for-startups/59-debugging-production)) gives agents structured access to traces, metrics, and deployment history. Instead of copying and pasting log lines into a chat window, you query the MCP server and get structured data back.
+
+### The Debugging Workflow
+
+When an incident triggers, the workflow uses three MCP tools in sequence:
+
+**Tool 1: `query-traces`**
+
+```bash terminal
+# Via MCP tool call
+query-traces \
+  --service api \
+  --status error \
+  --since 15m \
+  --group-by endpoint \
+  --limit 50
+```
+
+Returns: error counts per endpoint, common error messages, trace IDs for investigation.
+
+**Tool 2: `deployment-history`**
+
+```bash terminal
+# Via MCP tool call
+deployment-history \
+  --service api \
+  --since 2h
+```
+
+Returns: recent deployments with timestamps, commit SHAs, and deployer. Correlates incidents with deploys.
+
+**Tool 3: `correlate-error`**
+
+```bash terminal
+# Via MCP tool call
+correlate-error \
+  --trace-id "abc123def456" \
+  --include-dependencies
+```
+
+Returns: full trace spanning API, SQS, Lambda, RDS, and Redis. Shows where the error originated and how it propagated.
+
+### The Agent's Role vs. Your Role
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Agent Does", "Human Does"]} />
+  <ComparisonRow feature="Data gathering" Agent_Does="Query traces, metrics, logs via MCP (Best)" Human_Does="Review agent summary" />
+  <ComparisonRow feature="Pattern matching" Agent_Does="Identify common error patterns" Human_Does="Confirm pattern matches reality" />
+  <ComparisonRow feature="Root cause analysis" Agent_Does="Suggest possible causes" Human_Does="Decide actual root cause (Best)" />
+  <ComparisonRow feature="Mitigation decision" Agent_Does="Present options with tradeoffs" Human_Does="Choose mitigation strategy (Best)" />
+  <ComparisonRow feature="Execution" Agent_Does="Generate commands" Human_Does="Review and execute commands (Best)" />
+  <ComparisonRow feature="Post-incident" Agent_Does="Draft incident report" Human_Does="Review and add context (Best)" />
+</ComparisonTable>
+
+The agent accelerates data gathering and pattern matching. It does not make decisions. This is the Human Judgment Boundaries section of AGENT-INSTRUCTIONS.md in action: agents surface options, tradeoffs, and data, not recommendations.
+
+### Example Debugging Session
+
+Scenario: API 5xx rate spikes to 3% at 14:22.
+
+```markdown title="Agent debugging session"
+> Agent: Querying traces for api service, error status, last 15 minutes.
+
+Results:
+- POST /api/webhooks/github: 47 errors (502 Bad Gateway)
+- GET /api/health: 0 errors
+- All other endpoints: 0 errors
+
+> Agent: Querying deployment history for api service, last 2 hours.
+
+Results:
+- 14:18: ECS deployment completed (commit: a1b2c3d, deployer: ci-pipeline)
+- No other deployments in window.
+
+> Agent: Correlating trace ID from first error.
+
+Trace: POST /api/webhooks/github
+  → ECS API (14:22:03) → SQS SendMessage (14:22:03) → ERROR
+  Error: "Access Denied" on sqs:SendMessage
+  Resource: arn:aws:sqs:us-east-1:123456789012:shipmetrics-prod-events
+
+> Agent: The ECS task role lost SQS SendMessage permission.
+  The 14:18 deployment likely changed the task role.
+  Options:
+  1. Rollback to previous task definition (immediate fix, ~2 min)
+  2. Fix IAM policy and redeploy (root cause fix, ~10 min)
+  Recommend checking the commit diff for IAM changes.
+```
+
+The agent found the issue in under a minute. A human investigating manually would have started with generic ECS logs, taken 5-10 minutes to isolate the error, another 5 minutes to correlate with the deployment, and another 5 minutes to check IAM. The MCP server cut that to structured queries with immediate answers.
+
+---
+
+## Continuous Model Evaluation
+
+Models change. Providers release new versions quarterly. Fine-tuning produces different behavior. Your agent workflow degrades silently if you do not measure it.
+
+### Monthly Eval in CI
+
+The model evaluation framework from [Part 9](/blog/aws-for-startups/09-monorepo-context-evals) runs monthly via GitHub Actions ([Part 27](/blog/aws-for-startups/27-testing-in-ci)):
+
+```yaml title=".github/workflows/model-eval.yml"
+name: Monthly Model Evaluation
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'  # First of every month at 6 AM UTC
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run model evaluation
+        run: ./scripts/eval/production-eval.sh
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Compare with baseline
+        run: |
+          ./scripts/eval/compare-results.sh \
+            --current results/eval-$(date +%Y-%m).json \
+            --baseline results/eval-baseline.json \
+            --threshold 10
+
+      - name: Alert on regression
+        if: failure()
+        run: |
+          echo "Model evaluation regression detected. Review results."
+          # Notify via SNS or Slack webhook
+```
+
+The `--threshold 10` flag triggers a failure if any model's score drops more than 10% from baseline. This matches the AGENT-INSTRUCTIONS.md rule: "Monthly model evaluation required, scores must not regress >10%."
+
+### What Gets Evaluated
+
+The production eval suite ([Part 62](/blog/aws-for-startups/62-feature-flags-guardrails)) tests:
+
+| Category | Test Count | What It Measures |
+|----------|-----------|-----------------|
+| Terraform generation | 11 prompts | Format, validate, tflint, checkov, tag compliance |
+| Security compliance | 8 prompts | IAM least privilege, encryption, no public access |
+| Cost awareness | 5 prompts | Instance sizing, lifecycle policies, right-sizing |
+| Instruction compliance | 6 prompts | Follows AGENT-INSTRUCTIONS.md rules |
+| Multi-file projects | 4 prompts | Module structure, cross-file references |
+| **Total** | **34 prompts** | |
+
+Each prompt runs against every model in your configuration. Results are scored, compared against the baseline, and logged to the Scorecard.
+
+### Recalibration Procedure
+
+When eval results arrive, run through the five-step recalibration from [Part 19](/blog/aws-for-startups/19-preview-environments):
+
+:::steps
+1. **Compare scores:** Run `eval-models.sh`, compare to last month. Models improving? Trust more. Regressing? Investigate. New model available? Add to rotation.
+2. **Check Scorecard panels:** Agent quality >90%? Reduce manual review scope on low-risk modules. Below 70%? Add Verify checks or tighten AGENT-INSTRUCTIONS.md rules.
+3. **Review AGENT-INSTRUCTIONS.md:** Rules consistently followed? Working. Consistently violated? Rephrase or add a pre-commit hook. Unnecessary? Remove.
+4. **Adjust pipeline intensity:** Iterations-to-clean consistently 1? The agent got it right on the first try. Skip the retry loop for that category. Consistently 3+? Improve prompts or switch models.
+5. **Update cost budget:** API spend >5% of infrastructure spend? Optimize the pipeline (batch smaller prompts, use cheaper models for explain step). Below 1%? Room to add more verification.
+:::
+
+This is the fourth and final recalibration in the series. The first three happened at Parts 19, 34, and 47. Each one tightened the feedback loop between your eval data and your pipeline configuration.
+
+---
+
+## Full Scorecard Monitoring
+
+The Grafana Scorecard has 29 panels, accumulated across the series. For ShipMetrics, every panel maps to a real data source.
+
+### Application Health Panels (Panels 1-7)
+
+From [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality) and [Part 9](/blog/aws-for-startups/09-monorepo-context-evals):
+- Pre-commit pass/fail rate (agent vs. human)
+- Top blocked violations by category
+- Model eval scores by model
+- Terraform validate pass rate per model
+- Checkov findings per model
+- Instruction compliance by model
+- Prompt sensitivity by model
+
+### Pipeline Panels (Panels 8-14)
+
+From [Part 19](/blog/aws-for-startups/19-preview-environments) and [Part 27](/blog/aws-for-startups/27-testing-in-ci):
+- Terraform plan diff summary
+- Infracost estimate per PR
+- Cost trend
+- Verification Overhead Ratio
+- CI pass rate (agent vs. human PRs)
+- Agent triage accuracy
+- Model eval trend
+
+### Performance Panels (Panels 15-21)
+
+From [Part 34](/blog/aws-for-startups/34-k6-human-judgment) and [Part 43](/blog/aws-for-startups/43-full-stack-preview):
+- p95 latency over time (with deploy markers)
+- Cost-per-request trend
+- Load test pass/fail history
+- Pipeline completion time
+- Iterations-to-clean metric
+- Merge conflict rate
+- Model combination effectiveness
+
+### Deployment Panels (Panels 22-26)
+
+From [Part 47](/blog/aws-for-startups/47-production-deployment) and [Part 59](/blog/aws-for-startups/59-debugging-production):
+- PR-to-production lead time
+- Rollback rate
+- Deployment frequency
+- Post-deploy error rate
+- Incidents within 2h of deploy (agent vs. human)
+
+### Trust Score (Panels 27-29)
+
+From [Part 62](/blog/aws-for-startups/62-feature-flags-guardrails):
+- Trust Score gauge (composite 0-100)
+- Trust Score trend over time
+- Model drift detection
+
+The Trust Score is the single number that answers the question: "How much should I trust my agent workflow right now?" It aggregates eval scores, Scorecard panel data, incident correlation, and cost accuracy into a weighted composite. A score above 85 means your pipeline is healthy. Below 70, investigate.
+
+---
+
+## Day-to-Day Operations
+
+Here is what your daily operations routine looks like with ShipMetrics running and the full agent workflow active.
+
+### Morning Check (5 minutes)
+
+```markdown title="daily-ops-checklist.md"
+## Morning Check
+- [ ] Grafana Scorecard: Trust Score gauge (is it above 85?)
+- [ ] CloudWatch alarms: any active alarms?
+- [ ] SQS DLQ: any messages in dead letter queues?
+- [ ] Cost Explorer: yesterday's spend (any anomalies?)
+```
+
+Four checks. If everything is green, move on to building features.
+
+### Weekly Review (30 minutes)
+
+```markdown title="weekly-ops-checklist.md"
+## Weekly Review
+- [ ] Scorecard trends: any panels declining over the week?
+- [ ] Deployment frequency: how many deploys this week?
+- [ ] Post-deploy error rate: any correlation between deploys and errors?
+- [ ] SQS metrics: average processing time trending up?
+- [ ] RDS metrics: connection count, query latency, storage usage
+- [ ] Cost review: week-over-week comparison
+- [ ] Runbook updates: any incidents that exposed gaps?
+```
+
+### Monthly Cycle (2 hours)
+
+```markdown title="monthly-ops-checklist.md"
+## Monthly Cycle
+- [ ] Model evaluation: run production-eval.sh
+- [ ] Recalibration: follow 5-step procedure
+- [ ] AGENT-INSTRUCTIONS.md review: any rules to add, modify, or remove?
+- [ ] Security Hub: review findings, triage, remediate critical/high
+- [ ] Cost optimization: review Infracost trends, right-size any resources
+- [ ] Backup verification: restore a snapshot to verify backup integrity
+- [ ] Runbook refresh: re-generate from current Terraform state
+```
+
+This is not a large operational burden. The infrastructure runs itself most of the time. The operational framework ensures you catch problems early, before they become incidents, and that your agent workflow stays healthy as models evolve.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No runbooks, no monitoring routine, no eval schedule. You find out about problems when customers report them. You find out about model regressions when your next deployment generates broken Terraform. You debug by opening six AWS console tabs and scrolling through logs. |
+| ✅ **Right** | Agent-generated runbooks reviewed by humans. Structured debugging via observability MCP. Monthly model evaluation with 10% regression threshold. 29-panel Scorecard with Trust Score. Daily 5-minute check, weekly 30-minute review, monthly 2-hour cycle. |
+| ❌ **Over** | Full SRE team with on-call rotation, PagerDuty escalation policies, 50-page incident response plans, weekly game days, and chaos engineering for a startup application serving 100 tenants. These processes are valuable at scale. At startup scale, they create more overhead than incidents. |
+| 🤖 **Agent Trap** | Agent generates runbooks from its training data, including runbook steps for services you do not use (EKS pod restart, CloudFormation stack rollback, Beanstalk environment swap). The agent does not check your actual infrastructure state before writing the runbook. It also generates overly optimistic "expected results" that do not match real failure modes, making the runbook misleading during an actual incident. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 70: Review and Graduation, Trust Is a Number**, you look back across the full 70-part journey. From an empty AGENT-INSTRUCTIONS.md to 96 lines of earned wisdom. From zero Scorecard panels to 29. From blind trust to measured confidence. The final review, the final recalibration, and the send-off.
+
+---
+
+:::tip
+**Free Download: Production Readiness Checklist**
+
+A comprehensive PDF covering everything you need to verify before and after going live: monitoring, runbooks, eval schedule, backup verification, security review cadence, and cost budgeting. Get it at [works-on-my.cloud/resources/production-readiness-checklist](/resources/production-readiness-checklist).
+:::
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Runbooks",
+    tasks: [
+      { text: "API high error rate runbook created and reviewed", syncKey: "part-69-runbook-api" },
+      { text: "SQS queue depth runbook created and reviewed", syncKey: "part-69-runbook-sqs" },
+      { text: "RDS high CPU runbook created and reviewed", syncKey: "part-69-runbook-rds" },
+      { text: "All runbooks reference correct resource names from Terraform state", syncKey: "part-69-runbook-accuracy" }
+    ]
+  },
+  {
+    category: "Debugging Workflow",
+    tasks: [
+      { text: "Observability MCP server configured for ShipMetrics", syncKey: "part-69-mcp" },
+      { text: "query-traces returns structured results for API service", syncKey: "part-69-traces" },
+      { text: "deployment-history correlates deploys with incidents", syncKey: "part-69-deploy-history" }
+    ]
+  },
+  {
+    category: "Model Evaluation",
+    tasks: [
+      { text: "Monthly eval workflow running in GitHub Actions", syncKey: "part-69-eval-ci" },
+      { text: "Baseline results saved for comparison", syncKey: "part-69-eval-baseline" },
+      { text: "10% regression threshold configured", syncKey: "part-69-eval-threshold" }
+    ]
+  },
+  {
+    category: "Scorecard",
+    tasks: [
+      { text: "All 29 Scorecard panels connected to ShipMetrics data sources", syncKey: "part-69-scorecard" },
+      { text: "Trust Score gauge showing current composite score", syncKey: "part-69-trust-score" },
+      { text: "Daily, weekly, and monthly operations checklists documented", syncKey: "part-69-ops-routine" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Operations runbooks should be generated from your actual infrastructure state, not from the agent's training data. Re-generate monthly to prevent drift between runbooks and reality.
+2. The observability MCP server turns incident investigation from "grep logs for 20 minutes" into "ask three structured queries and get answers in 60 seconds."
+3. Continuous model evaluation catches regressions before they hit your workflow. Models change quarterly. Your eval should run monthly.
+4. The Trust Score trend over time is the single most important metric for your agent workflow. A declining trend means something changed, and you should investigate before it affects production.
+5. Deploying the application was one day of work. Operating it well is a 5-minute daily habit, a 30-minute weekly review, and a 2-hour monthly cycle. Sustainable, not heroic.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

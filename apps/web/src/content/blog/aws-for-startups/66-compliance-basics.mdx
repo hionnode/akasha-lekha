@@ -1,0 +1,603 @@
+---
+title: "Compliance Basics: The Minimum Viable Compliance"
+description: "GDPR basics, data retention policies, audit logging, and how your agent audit trail feeds compliance requirements. Compliance as a byproduct of good engineering."
+excerpt: "The minimum viable compliance. GDPR, data retention, audit logs, and how your agent audit trail is already doing half the work."
+date: "2026-09-28"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "security"]
+series: "aws-for-startups"
+seriesPart: 66
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+
+A potential enterprise customer sends you a security questionnaire. Question 14: "Describe your data retention and deletion policies." You stare at the form. You know your database has data in it. You do not know what data, how long it stays, or whether you can delete a specific user's data on request. You check your S3 buckets. Test data from six months ago. Logs from a year ago. User uploads with no lifecycle policy. You spend the next three days building what you should have set up months ago, while the sales deal sits in limbo.
+
+**Time:** About 40 minutes.
+
+**Outcome:** A data inventory documenting what you store and where, GDPR-aware data handling procedures, automated data retention policies using S3 lifecycle rules and database TTLs, a compliance audit trail built on CloudTrail and the agent audit system from [Part 62](/blog/aws-for-startups/62-feature-flags-guardrails), and compliance reports generated from Security Hub.
+
+---
+
+## Why This Matters
+
+Compliance is not a separate workstream. Compliance is a side effect of good engineering. If you have been following this series, you already have most of what compliance requires:
+
+- **Encryption at rest:** S3 SSE-S3 or SSE-KMS (configured in [Part 13](/blog/aws-for-startups/13-s3-static-hosting)), RDS encryption (configured in [Part 35](/blog/aws-for-startups/35-rds-postgres)), EBS encryption
+- **Encryption in transit:** TLS via ACM certificates ([Part 14](/blog/aws-for-startups/14-route53-acm-dns))
+- **Access control:** IAM least privilege ([Part 2](/blog/aws-for-startups/02-iam-intro-for-starters)), security groups ([Part 21](/blog/aws-for-startups/21-security-groups))
+- **Audit logging:** CloudTrail (enabled since [Part 1](/blog/aws-for-startups/01-your-first-60-minutes-in-aws)), agent audit trail ([Part 62](/blog/aws-for-startups/62-feature-flags-guardrails))
+- **Security scanning:** Security Hub, GuardDuty, Prowler ([Part 65](/blog/aws-for-startups/65-security-posture))
+- **Change management:** Git history, PR reviews, CODEOWNERS ([Part 7](/blog/aws-for-startups/07-branch-protection-pr))
+
+What you are missing: data inventory, retention policies, and deletion procedures. This part fills those gaps.
+
+The timing matters. You do not need SOC 2 certification before you have revenue. You do not need a compliance officer before you have 10 employees. But you do need a data inventory, retention policies, and the ability to answer "where is this user's data and can you delete it?" before your first enterprise customer asks.
+
+---
+
+## What We're Building
+
+- Data inventory documenting storage locations, data types, and sensitivity
+- GDPR basics: consent awareness, right to deletion implementation
+- Automated data retention with S3 lifecycle rules and database TTLs
+- Compliance audit trail from existing CloudTrail and agent audit logs
+- Compliance reports from Security Hub standards
+
+---
+
+## Data Inventory
+
+You cannot protect what you do not know you have. A data inventory is a document listing every place your application stores data, what kind of data it stores, and how long it stays.
+
+```markdown title="docs/compliance/data-inventory.md"
+# Data Inventory
+
+Last updated: 2026-09-28
+Owner: [Your name]
+
+## Storage Locations
+
+### RDS PostgreSQL (production)
+- **Instance:** prod-db.xxxxxxx.us-east-1.rds.amazonaws.com
+- **Data types:**
+  - User accounts (email, name, hashed password, created_at)
+  - Application data (orders, settings, preferences)
+  - Audit events (user_id, action, timestamp, ip_address)
+- **Sensitivity:** HIGH (contains PII)
+- **Encryption:** At rest (AES-256 via RDS encryption), in transit (TLS)
+- **Retention:** Active data retained while account exists.
+  Deleted accounts: data removed within 30 days.
+- **Backup retention:** 7 days (automated RDS snapshots)
+
+### S3: User Uploads
+- **Bucket:** shipfast-production-uploads
+- **Data types:** User-uploaded files (images, documents)
+- **Sensitivity:** HIGH (user content, potentially PII)
+- **Encryption:** SSE-S3
+- **Retention:** Retained while user account exists.
+  Orphaned files cleaned up after 90 days.
+- **Lifecycle:** Move to Glacier after 180 days, delete after 365 days.
+
+### S3: Application Logs
+- **Bucket:** shipfast-production-logs
+- **Data types:** Application logs, access logs, error logs
+- **Sensitivity:** MEDIUM (may contain request metadata, IP addresses)
+- **Encryption:** SSE-S3
+- **Retention:** 90 days in Standard, then deleted.
+- **Lifecycle:** Transition to Infrequent Access at 30 days,
+  delete at 90 days.
+
+### S3: Audit Logs
+- **Bucket:** shipfast-audit-logs
+- **Data types:** CloudTrail events, agent audit trail, MCP audit logs
+- **Sensitivity:** HIGH (contains API call metadata, session info)
+- **Encryption:** SSE-KMS
+- **Retention:** 1 year (compliance requirement)
+- **Lifecycle:** Transition to Glacier at 90 days, delete at 365 days.
+
+### ElastiCache Redis
+- **Cluster:** shipfast-production-cache
+- **Data types:** Session tokens, cached query results, rate limiting counters
+- **Sensitivity:** MEDIUM (session tokens are sensitive, cached data is derived)
+- **Encryption:** In transit and at rest
+- **Retention:** TTL-based. Sessions: 24 hours. Cache: 1 hour.
+  Rate limits: 5 minutes.
+
+### CloudWatch Logs
+- **Log groups:** /ecs/shipfast-*, /lambda/shipfast-*, /mcp/audit
+- **Data types:** Application stdout/stderr, request logs, error traces
+- **Sensitivity:** MEDIUM
+- **Encryption:** Default CloudWatch encryption
+- **Retention:** 30 days (set via log group retention policy)
+```
+
+### Keeping It Updated
+
+The data inventory is only useful if it is current. Add a reminder to review it quarterly. Better yet, add it to your post-mortem template from [Part 63](/blog/aws-for-startups/63-incident-response): after any incident involving data, update the inventory.
+
+---
+
+## GDPR Basics
+
+GDPR applies if you have any users in the European Union. Even if you are a US-based startup, if a single EU citizen signs up, GDPR applies. The penalties for non-compliance are real (up to 4% of annual revenue), but the practical requirements for a small startup are manageable.
+
+### What GDPR Requires (Simplified)
+
+| Requirement | What It Means for You | Already Done? |
+|---|---|---|
+| Lawful basis for processing | Know why you collect each piece of data | Partially (need to document) |
+| Consent | Users opt in, not opt out | Depends on your signup flow |
+| Right to access | User can request all their data | Need to build |
+| Right to deletion | User can request data deletion | Need to build |
+| Data minimization | Collect only what you need | Review your schema |
+| Breach notification | Report breaches within 72 hours | Incident process covers this |
+| Data protection by design | Encryption, access control | Done (Parts 1-65) |
+
+### Right to Deletion Implementation
+
+The right to deletion ("right to be forgotten") is the most operationally demanding GDPR requirement. A user requests deletion, and you have 30 days to remove their personal data from every storage location.
+
+```sql title="scripts/gdpr/delete-user.sql"
+-- GDPR User Deletion Script
+-- Run this for each deletion request after verification
+-- Log the deletion in the audit table BEFORE deleting
+
+BEGIN;
+
+-- 1. Log the deletion request (audit trail)
+INSERT INTO audit_events (event_type, user_id, details, created_at)
+VALUES (
+  'gdpr_deletion',
+  :user_id,
+  jsonb_build_object(
+    'request_date', :request_date,
+    'executor', :executor,
+    'reason', 'GDPR Article 17 deletion request'
+  ),
+  NOW()
+);
+
+-- 2. Delete user-specific data
+DELETE FROM user_preferences WHERE user_id = :user_id;
+DELETE FROM user_sessions WHERE user_id = :user_id;
+DELETE FROM orders WHERE user_id = :user_id;
+DELETE FROM notifications WHERE user_id = :user_id;
+
+-- 3. Anonymize data that must be retained for legal reasons
+-- (e.g., financial records may need to be kept for tax purposes)
+UPDATE invoices
+SET customer_name = 'DELETED',
+    customer_email = 'deleted@anonymized.local',
+    customer_address = NULL
+WHERE user_id = :user_id;
+
+-- 4. Delete the user account
+DELETE FROM users WHERE id = :user_id;
+
+COMMIT;
+```
+
+```bash title="scripts/gdpr/delete-user-s3.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+USER_ID="${1:?Usage: delete-user-s3.sh <user_id>}"
+BUCKET="shipfast-production-uploads"
+
+echo "Deleting S3 objects for user: $USER_ID"
+
+# List all objects with the user's prefix
+aws s3 rm "s3://${BUCKET}/users/${USER_ID}/" --recursive
+
+echo "S3 deletion complete for user: $USER_ID"
+```
+
+:::warning
+GDPR deletion must cover ALL storage locations. Check your data inventory. The database is the obvious one. S3 uploads, CloudWatch logs containing user identifiers, ElastiCache sessions, and third-party services (Clerk, Stripe, analytics) also need to be addressed. A partial deletion does not satisfy GDPR.
+:::
+
+### Deletion Checklist
+
+For each deletion request, work through this checklist:
+
+```markdown title="docs/compliance/deletion-checklist.md"
+# GDPR Deletion Checklist
+
+User ID: _______________
+Request Date: _______________
+Deadline (30 days): _______________
+Executor: _______________
+
+## Storage Locations
+- [ ] PostgreSQL: user record and related tables
+- [ ] PostgreSQL: anonymize legally-required records (invoices)
+- [ ] S3: user uploads (users/{user_id}/ prefix)
+- [ ] ElastiCache: invalidate user sessions
+- [ ] CloudWatch: no action needed (logs expire via retention policy)
+- [ ] Third-party: Clerk (delete user via API)
+- [ ] Third-party: Stripe (delete customer via API)
+- [ ] Third-party: Analytics (anonymize or delete)
+
+## Verification
+- [ ] Query all storage locations to confirm no data remains
+- [ ] Audit log entry created for the deletion
+- [ ] User notified of completion
+```
+
+---
+
+## Automated Data Retention
+
+Data retention policies prevent the slow accumulation of data that no one needs but everyone is afraid to delete. Automate retention with S3 lifecycle rules and database TTLs.
+
+### S3 Lifecycle Rules
+
+```hcl title="infra/modules/s3-lifecycle/main.tf"
+resource "aws_s3_bucket_lifecycle_configuration" "logs" {
+  bucket = var.logs_bucket_id
+
+  rule {
+    id     = "transition-to-ia"
+    status = "Enabled"
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    expiration {
+      days = 90
+    }
+
+    filter {
+      prefix = "logs/"
+    }
+  }
+
+  rule {
+    id     = "audit-retention"
+    status = "Enabled"
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER"
+    }
+
+    expiration {
+      days = 365
+    }
+
+    filter {
+      prefix = "audit/"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "uploads" {
+  bucket = var.uploads_bucket_id
+
+  rule {
+    id     = "orphan-cleanup"
+    status = "Enabled"
+
+    expiration {
+      days = 365
+    }
+
+    filter {
+      prefix = "orphaned/"
+    }
+  }
+
+  rule {
+    id     = "archive-old-uploads"
+    status = "Enabled"
+
+    transition {
+      days          = 180
+      storage_class = "GLACIER"
+    }
+
+    filter {
+      prefix = "users/"
+    }
+  }
+}
+```
+
+Three retention tiers:
+- **Application logs:** 30 days in Standard, deleted at 90 days
+- **Audit logs:** 90 days in Standard, Glacier for archive, deleted at 365 days
+- **User uploads:** Glacier after 180 days, orphaned files deleted after 365 days
+
+### Database TTLs
+
+For data that should not live forever in your database, use scheduled cleanup:
+
+```sql title="scripts/gdpr/retention-cleanup.sql"
+-- Run daily via scheduled Lambda or cron
+
+-- Delete expired sessions (older than 30 days)
+DELETE FROM user_sessions
+WHERE created_at < NOW() - INTERVAL '30 days';
+
+-- Delete old audit events (keep 1 year, rest archived to S3)
+-- First: export to S3 via pg_dump or COPY
+-- Then: delete
+DELETE FROM audit_events
+WHERE created_at < NOW() - INTERVAL '365 days';
+
+-- Delete soft-deleted users after grace period (90 days)
+DELETE FROM users
+WHERE deleted_at IS NOT NULL
+  AND deleted_at < NOW() - INTERVAL '90 days';
+
+-- Clean up orphaned data
+DELETE FROM user_preferences
+WHERE user_id NOT IN (SELECT id FROM users);
+```
+
+```hcl title="infra/modules/retention-lambda/main.tf"
+resource "aws_lambda_function" "retention_cleanup" {
+  function_name = "${var.project}-retention-cleanup"
+  handler       = "index.handler"
+  runtime       = "nodejs20.x"
+  timeout       = 300
+
+  environment {
+    variables = {
+      DATABASE_URL = var.database_url_secret_arn
+    }
+  }
+
+  tags = merge(var.common_tags, {
+    Purpose = "data-retention-automation"
+  })
+}
+
+resource "aws_cloudwatch_event_rule" "daily_cleanup" {
+  name                = "${var.project}-daily-retention-cleanup"
+  schedule_expression = "rate(1 day)"
+  tags                = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "cleanup_lambda" {
+  rule      = aws_cloudwatch_event_rule.daily_cleanup.name
+  target_id = "retention-cleanup"
+  arn       = aws_lambda_function.retention_cleanup.arn
+}
+```
+
+<Alert type="caution" title="Agent Trap">
+
+Agent generates data handling code that ignores retention policies. When building a new feature that stores user data, the agent creates a table with no TTL, no soft delete, and no consideration for GDPR deletion. The data accumulates forever. Six months later, a deletion request takes hours instead of minutes because the data is scattered across tables the agent created without documenting in the data inventory.
+
+**What catches it:** Add a pre-merge check: any PR that creates a new database table or S3 prefix must update the data inventory. Add this to your PR template from [Part 7](/blog/aws-for-startups/07-branch-protection-pr).
+
+</Alert>
+
+---
+
+## Audit Logging: What You Already Have
+
+Here is the good news: you already have a comprehensive audit trail. Let's map what you have to what compliance needs.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Compliance Need", "What You Have", "Where It Lives"]} />
+  <ComparisonRow feature="Who accessed what" Compliance_Need="Access logging" What_You_Have="CloudTrail API logging" Where_It_Lives="S3 + CloudWatch" />
+  <ComparisonRow feature="Who changed what" Compliance_Need="Change management" What_You_Have="Git history + PR reviews" Where_It_Lives="GitHub" />
+  <ComparisonRow feature="Agent actions" Compliance_Need="AI governance audit" What_You_Have="MCP audit log from Part 62" Where_It_Lives="CloudWatch + S3" />
+  <ComparisonRow feature="Security events" Compliance_Need="Incident detection" What_You_Have="GuardDuty + Security Hub" Where_It_Lives="Security Hub console" />
+  <ComparisonRow feature="Infrastructure changes" Compliance_Need="Config management" What_You_Have="Terraform state + plan history" Where_It_Lives="S3 backend" />
+</ComparisonTable>
+
+### CloudTrail as Compliance Evidence
+
+CloudTrail has been logging every API call since [Part 1](/blog/aws-for-startups/01-your-first-60-minutes-in-aws). Every resource creation, modification, and deletion. Every login. Every permission change. This is your compliance backbone.
+
+Ensure your CloudTrail configuration is complete:
+
+```hcl title="infra/modules/compliance/cloudtrail.tf"
+resource "aws_cloudtrail" "compliance" {
+  name                          = "${var.project}-compliance-trail"
+  s3_bucket_name                = var.audit_bucket_name
+  include_global_service_events = true
+  is_multi_region_trail         = true
+  enable_log_file_validation    = true
+  kms_key_id                    = var.kms_key_arn
+
+  event_selector {
+    read_write_type           = "All"
+    include_management_events = true
+
+    data_resource {
+      type   = "AWS::S3::Object"
+      values = ["arn:aws:s3"]
+    }
+  }
+
+  tags = var.common_tags
+}
+```
+
+Key settings for compliance:
+- **Log file validation:** Proves logs have not been tampered with. Important for audits.
+- **Multi-region:** Catches API calls in any region, not just your primary.
+- **KMS encryption:** Audit logs encrypted with a key you control.
+- **S3 data events:** Logs access to S3 objects, not just bucket-level operations.
+
+### Agent Audit Trail as Compliance Evidence
+
+The MCP audit log from [Part 62](/blog/aws-for-startups/62-feature-flags-guardrails) is compliance evidence for AI governance. Every agent session, every tool invocation, every permission check, logged with timestamps, session IDs, and model identifiers.
+
+This is ahead of where most compliance frameworks are today. GDPR does not explicitly require AI audit trails (yet). But the EU AI Act does, and any enterprise security questionnaire in 2026 asks about AI governance. Having a structured audit trail of agent actions answers the question before it is asked.
+
+---
+
+## Compliance Reports
+
+Security Hub generates compliance reports against the standards you enabled in [Part 65](/blog/aws-for-startups/65-security-posture). These reports are the starting point for answering enterprise security questionnaires.
+
+```bash terminal
+# Get compliance summary
+aws securityhub get-insight-results \
+  --insight-arn "arn:aws:securityhub:::insight/securityhub/default/10" \
+  --query 'InsightResults.ResultValues[].{Label:GroupByAttributeValue, Count:Count}' \
+  --output table
+```
+
+### Generating a Compliance Report
+
+```bash title="scripts/compliance/generate-report.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPORT_DATE=$(date -u +%Y-%m-%d)
+REPORT_DIR="docs/compliance/reports"
+mkdir -p "$REPORT_DIR"
+
+echo "=== Compliance Report: $REPORT_DATE ===" > "$REPORT_DIR/$REPORT_DATE.md"
+echo "" >> "$REPORT_DIR/$REPORT_DATE.md"
+
+# Security Hub findings summary
+echo "## Security Hub Findings" >> "$REPORT_DIR/$REPORT_DATE.md"
+aws securityhub get-findings \
+  --filters '{"WorkflowStatus":[{"Value":"NEW","Comparison":"EQUALS"}]}' \
+  --query 'Findings[].{Severity:Severity.Label, Title:Title}' \
+  --output table >> "$REPORT_DIR/$REPORT_DATE.md" 2>/dev/null || echo "No findings." >> "$REPORT_DIR/$REPORT_DATE.md"
+
+echo "" >> "$REPORT_DIR/$REPORT_DATE.md"
+
+# CIS Benchmark compliance
+echo "## CIS Benchmark Compliance" >> "$REPORT_DIR/$REPORT_DATE.md"
+PASSED=$(aws securityhub get-findings \
+  --filters '{"ComplianceStatus":[{"Value":"PASSED","Comparison":"EQUALS"}], "GeneratorId":[{"Value":"cis-aws-foundations-benchmark","Comparison":"PREFIX"}]}' \
+  --query 'length(Findings)' --output text 2>/dev/null || echo "0")
+FAILED=$(aws securityhub get-findings \
+  --filters '{"ComplianceStatus":[{"Value":"FAILED","Comparison":"EQUALS"}], "GeneratorId":[{"Value":"cis-aws-foundations-benchmark","Comparison":"PREFIX"}]}' \
+  --query 'length(Findings)' --output text 2>/dev/null || echo "0")
+echo "- Passed: $PASSED" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- Failed: $FAILED" >> "$REPORT_DIR/$REPORT_DATE.md"
+
+echo "" >> "$REPORT_DIR/$REPORT_DATE.md"
+
+# Data retention status
+echo "## Data Retention" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- S3 lifecycle policies: Active" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- CloudWatch log retention: 30 days" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- CloudTrail retention: 365 days (Glacier after 90)" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- Database cleanup Lambda: Running daily" >> "$REPORT_DIR/$REPORT_DATE.md"
+
+echo "" >> "$REPORT_DIR/$REPORT_DATE.md"
+
+# Agent governance
+echo "## Agent Governance" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- MCP audit logging: Active" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- OPA policy enforcement: Active" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- Agent production access: Read-only" >> "$REPORT_DIR/$REPORT_DATE.md"
+echo "- AGENT-INSTRUCTIONS.md: 96 lines" >> "$REPORT_DIR/$REPORT_DATE.md"
+
+echo ""
+echo "Report generated: $REPORT_DIR/$REPORT_DATE.md"
+```
+
+Run this monthly. When the enterprise security questionnaire arrives, you have a documented compliance posture ready to share.
+
+### File Structure
+
+<FileTree>
+docs/
+  compliance/
+    data-inventory.md
+    deletion-checklist.md
+    reports/
+      2026-09-28.md
+scripts/
+  compliance/
+    generate-report.sh
+  gdpr/
+    delete-user.sql
+    delete-user-s3.sh
+    retention-cleanup.sql
+</FileTree>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No data inventory. No retention policies. No audit trail. Hope nobody asks. Scramble for three days when the enterprise security questionnaire arrives. |
+| ✅ **Right** | Data inventory documenting every storage location. GDPR deletion capability. S3 lifecycle rules and database TTLs for automated retention. CloudTrail + agent audit trail for compliance evidence. Monthly compliance reports from Security Hub. |
+| ❌ **Over** | SOC 2 Type II certification, dedicated compliance officer, external auditors, automated compliance scanning across 50 controls, for a pre-revenue startup with 3 employees. |
+| 🤖 **Agent Trap** | Agent generates data handling code that does not respect retention policies or deletion requests. A new feature stores user data in a table with no TTL, no soft delete column, and no entry in the data inventory. GDPR deletion misses this table entirely. The pre-merge PR check ("Does this PR update the data inventory?") catches missing documentation. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 67: Capstone Architecture**, we bring together everything from 66 parts into a complete production architecture. Every service, every connection, every security boundary, every monitoring integration, laid out in one comprehensive diagram. The capstone phase is not new concepts. It is proving that everything works together.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Data Inventory",
+    tasks: [
+      { text: "Data inventory document created listing all storage locations", syncKey: "part-66-inventory" },
+      { text: "Sensitivity levels assigned to each storage location", syncKey: "part-66-sensitivity" },
+      { text: "Retention periods defined for each data type", syncKey: "part-66-retention-defined" }
+    ]
+  },
+  {
+    category: "GDPR",
+    tasks: [
+      { text: "User deletion SQL script created and tested", syncKey: "part-66-deletion-sql" },
+      { text: "User deletion S3 script created and tested", syncKey: "part-66-deletion-s3" },
+      { text: "Deletion checklist covers all storage locations including third parties", syncKey: "part-66-deletion-checklist" }
+    ]
+  },
+  {
+    category: "Retention Automation",
+    tasks: [
+      { text: "S3 lifecycle rules configured for logs, audit, and uploads buckets", syncKey: "part-66-s3-lifecycle" },
+      { text: "Database cleanup Lambda scheduled daily", syncKey: "part-66-db-cleanup" },
+      { text: "CloudWatch log group retention set to 30 days", syncKey: "part-66-cw-retention" }
+    ]
+  },
+  {
+    category: "Compliance Evidence",
+    tasks: [
+      { text: "CloudTrail configured with log file validation and KMS encryption", syncKey: "part-66-cloudtrail" },
+      { text: "Compliance report generation script created and run once", syncKey: "part-66-report" },
+      { text: "Agent audit trail mapped to compliance requirements", syncKey: "part-66-agent-audit" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Most compliance requirements are byproducts of good engineering: CloudTrail, encryption, access control, and change management via Git cover the majority of what auditors ask for.
+2. Your agent audit trail from [Part 62](/blog/aws-for-startups/62-feature-flags-guardrails) already covers AI governance requirements that most companies cannot answer, which puts you ahead of the compliance curve.
+3. Data retention policies are simple but easy to forget: automate with S3 lifecycle rules and database cleanup Lambdas, and you never think about it again.
+4. A data inventory is only useful if it is current: add "update data inventory" to your PR checklist for any feature that creates new storage.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

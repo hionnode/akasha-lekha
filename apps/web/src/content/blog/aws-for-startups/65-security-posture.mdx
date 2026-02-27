@@ -1,0 +1,557 @@
+---
+title: "Security Posture: Finding What's Wrong Before Attackers Do"
+description: "AWS Security Hub, GuardDuty, WAF, and Prowler for continuous security assessment. Agent-assisted scanning with human-reviewed remediation."
+excerpt: "Finding what's wrong before attackers do. Security Hub, GuardDuty, WAF, and Prowler for continuous security assessment of your AWS infrastructure."
+date: "2026-09-24"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "security", "security-hub", "guardduty", "waf"]
+series: "aws-for-startups"
+seriesPart: 65
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+You scan your infrastructure with Prowler on a Tuesday afternoon. It finds 47 findings. Seventeen are critical. Three of them are S3 buckets with public read access that your agent created in [Part 16](/blog/aws-for-startups/16-user-uploads-s3) as "temporary test buckets." They have been public for four months. Nobody noticed because nobody was looking. The difference between "secure" and "not yet breached" is whether you are actively checking.
+
+**Time:** About 50 minutes.
+
+**Outcome:** AWS Security Hub aggregating findings from multiple sources, GuardDuty detecting threats you did not think to look for, WAF rules protecting your ALB and CloudFront distributions, Prowler running automated security assessments, and a workflow where agents generate fix PRs for findings while humans review every remediation.
+
+---
+
+## Why This Matters
+
+You have built security into every part of this series. IAM least privilege in [Part 2](/blog/aws-for-startups/02-iam-intro-for-starters). Encryption in transit and at rest. Security groups scoped to specific ports. OPA policies enforcing your rules. That is reactive security: preventing known bad patterns.
+
+Proactive security is finding what you missed. The S3 bucket that was supposed to be private but is not. The security group rule that someone added "temporarily" six months ago. The IAM role with permissions it no longer needs. The Lambda function running a Node.js version that reached end of life last month.
+
+Reactive security catches mistakes at creation time. Proactive security catches the drift that happens after creation: the config changes, the temporary exceptions that become permanent, the resources that outlive their purpose.
+
+You need both. This part adds the proactive layer.
+
+---
+
+## What We're Building
+
+- Security Hub with AWS Foundational Security Best Practices standard enabled
+- GuardDuty for threat detection across the account
+- WAF rules for ALB and CloudFront with rate limiting and common attack protection
+- Prowler for open-source security assessment
+- Agent-assisted remediation workflow (agent generates fix, human reviews)
+
+---
+
+## Security Hub
+
+Security Hub is the single pane of glass for security findings. It aggregates findings from GuardDuty, IAM Access Analyzer, Prowler, and its own compliance checks into one dashboard.
+
+### Enabling Security Hub
+
+```hcl title="infra/modules/security/security-hub.tf"
+resource "aws_securityhub_account" "main" {}
+
+resource "aws_securityhub_standards_subscription" "aws_foundational" {
+  depends_on    = [aws_securityhub_account.main]
+  standards_arn = "arn:aws:securityhub:${var.aws_region}::standards/aws-foundational-security-best-practices/v/1.0.0"
+}
+
+resource "aws_securityhub_standards_subscription" "cis" {
+  depends_on    = [aws_securityhub_account.main]
+  standards_arn = "arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.4.0"
+}
+```
+
+Two standards: AWS Foundational Security Best Practices (AWS's own recommendations) and CIS AWS Foundations Benchmark (industry standard). Both are free. Both run continuously. Both generate findings that show up in the Security Hub dashboard.
+
+### Understanding Findings
+
+Security Hub findings have a severity: CRITICAL, HIGH, MEDIUM, LOW, INFORMATIONAL. Focus your attention accordingly:
+
+| Severity | Action | Timeline |
+|---|---|---|
+| CRITICAL | Fix immediately. These are actively exploitable. | Same day |
+| HIGH | Fix this week. These are real risks. | 7 days |
+| MEDIUM | Plan to fix. These are hardening items. | 30 days |
+| LOW | Backlog. Fix when convenient. | 90 days |
+| INFORMATIONAL | Read and dismiss if not applicable. | No deadline |
+
+```bash terminal
+aws securityhub get-findings \
+  --filters '{"SeverityLabel":[{"Value":"CRITICAL","Comparison":"EQUALS"}]}' \
+  --query 'Findings[].{Title:Title, Resource:Resources[0].Id, Status:Workflow.Status}' \
+  --output table
+```
+
+<TerminalOutput title="aws securityhub get-findings (critical)">
+
+```
+-------------------------------------------------------------------
+|                          GetFindings                             |
++--------------------+------------------------+-------------------+
+|       Title        |       Resource         |      Status       |
++--------------------+------------------------+-------------------+
+| S3 bucket public   | arn:aws:s3:::test-data | NEW               |
+| Root MFA disabled  | arn:aws:iam::123456... | NEW               |
+| RDS public access  | arn:aws:rds:us-east-1  | NOTIFIED          |
++--------------------+------------------------+-------------------+
+```
+
+</TerminalOutput>
+
+### Suppressing False Positives
+
+Not every finding is actionable. If you intentionally have a public S3 bucket for static website hosting (from [Part 13](/blog/aws-for-startups/13-s3-static-hosting)), Security Hub will flag it. Suppress findings that are intentional, but document why:
+
+```bash terminal
+aws securityhub batch-update-findings \
+  --finding-identifiers '[{"Id":"arn:aws:securityhub:us-east-1:123456789012:finding/abc123","ProductArn":"arn:aws:securityhub:us-east-1::product/aws/securityhub"}]' \
+  --note '{"Text":"Intentional: public S3 bucket for static site hosting. See Part 13.","UpdatedBy":"security-review"}' \
+  --workflow '{"Status":"SUPPRESSED"}'
+```
+
+Always include a note explaining why the finding is suppressed. Future you (or your teammate) will not remember the context in 6 months.
+
+---
+
+## GuardDuty
+
+GuardDuty is threat detection. Security Hub checks configuration. GuardDuty watches behavior. It analyzes CloudTrail logs, VPC Flow Logs, and DNS query logs for patterns that indicate compromise: unusual API calls, suspicious network traffic, known malicious IP addresses.
+
+### Enabling GuardDuty
+
+```hcl title="infra/modules/security/guardduty.tf"
+resource "aws_guardduty_detector" "main" {
+  enable = true
+
+  datasources {
+    s3_logs {
+      enable = true
+    }
+    kubernetes {
+      audit_logs {
+        enable = false  # Not using EKS
+      }
+    }
+    malware_protection {
+      scan_ec2_instance_with_findings {
+        ebs_volumes {
+          enable = true
+        }
+      }
+    }
+  }
+
+  tags = var.common_tags
+}
+
+# Send findings to SNS for alerting
+resource "aws_guardduty_publishing_destination" "s3" {
+  detector_id     = aws_guardduty_detector.main.id
+  destination_arn = var.guardduty_findings_bucket_arn
+  destination_type = "S3"
+  kms_key_arn     = var.kms_key_arn
+}
+```
+
+GuardDuty costs $4.00 per million CloudTrail events and $1.00 per GB of VPC Flow Logs analyzed. For a startup, expect $5-15/month. That is the cost of one bad coffee per month for threat detection you cannot build yourself.
+
+### What GuardDuty Catches
+
+GuardDuty detects threats you did not think to look for. That is its value. You cannot write rules for attacks you have not imagined.
+
+| Finding Type | What It Means | Urgency |
+|---|---|---|
+| `UnauthorizedAccess:IAMUser/ConsoleLoginSuccess.B` | Successful login from unusual location | High |
+| `Recon:EC2/PortProbeUnprotectedPort` | External actor probing open ports | Medium |
+| `CryptoCurrency:EC2/BitcoinTool.B` | EC2 instance mining cryptocurrency | Critical |
+| `Trojan:EC2/BlackholeTraffic` | Instance sending traffic to known malicious IPs | Critical |
+| `Policy:S3/BucketPublicAccessGranted` | S3 bucket made public | High |
+
+If you see `CryptoCurrency:EC2/BitcoinTool.B`, someone compromised your instance. Isolate it immediately, do not terminate it (you need it for forensics), and follow your P1 incident response from [Part 63](/blog/aws-for-startups/63-incident-response).
+
+### GuardDuty Alert Integration
+
+```hcl title="infra/modules/security/guardduty-alerts.tf"
+resource "aws_cloudwatch_event_rule" "guardduty_high" {
+  name        = "${var.project}-guardduty-high-severity"
+  description = "GuardDuty high and critical findings"
+
+  event_pattern = jsonencode({
+    source      = ["aws.guardduty"]
+    detail-type = ["GuardDuty Finding"]
+    detail = {
+      severity = [{ numeric = [">=" , 7] }]
+    }
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "guardduty_sns" {
+  rule      = aws_cloudwatch_event_rule.guardduty_high.name
+  target_id = "send-to-oncall"
+  arn       = var.oncall_sns_topic_arn
+}
+```
+
+High and critical findings (severity >= 7) go to your on-call SNS topic from [Part 63](/blog/aws-for-startups/63-incident-response). Medium and low findings go to Security Hub for weekly review.
+
+---
+
+## WAF
+
+WAF (Web Application Firewall) sits in front of your ALB and CloudFront distributions. It inspects every incoming request and blocks malicious traffic before it reaches your application.
+
+### WAF Configuration
+
+```hcl title="infra/modules/security/waf.tf"
+resource "aws_wafv2_web_acl" "main" {
+  name        = "${var.project}-${var.environment}-waf"
+  description = "WAF for ${var.project} ${var.environment}"
+  scope       = "REGIONAL"  # Use CLOUDFRONT for CloudFront distributions
+
+  default_action {
+    allow {}
+  }
+
+  # Rate limiting: 2000 requests per 5 minutes per IP
+  rule {
+    name     = "rate-limit"
+    priority = 1
+
+    action {
+      block {}
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 2000
+        aggregate_key_type = "IP"
+      }
+    }
+
+    visibility_config {
+      sampled_requests_enabled   = true
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.project}-rate-limit"
+    }
+  }
+
+  # AWS Managed Rules: Common Rule Set
+  rule {
+    name     = "aws-common-rules"
+    priority = 2
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      sampled_requests_enabled   = true
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.project}-common-rules"
+    }
+  }
+
+  # AWS Managed Rules: Known Bad Inputs
+  rule {
+    name     = "aws-bad-inputs"
+    priority = 3
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      sampled_requests_enabled   = true
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.project}-bad-inputs"
+    }
+  }
+
+  # AWS Managed Rules: SQL Injection
+  rule {
+    name     = "aws-sqli"
+    priority = 4
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesSQLiRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      sampled_requests_enabled   = true
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.project}-sqli"
+    }
+  }
+
+  visibility_config {
+    sampled_requests_enabled   = true
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${var.project}-waf"
+  }
+
+  tags = var.common_tags
+}
+
+# Associate WAF with ALB
+resource "aws_wafv2_web_acl_association" "alb" {
+  resource_arn = var.alb_arn
+  web_acl_arn  = aws_wafv2_web_acl.main.arn
+}
+```
+
+Four rules in priority order:
+
+1. **Rate limiting** at 2000 requests per 5 minutes per IP. This stops brute force and simple DDoS. Adjust the threshold based on your traffic. 2000/5min is ~7 requests/second, reasonable for most APIs.
+2. **Common Rule Set** catches XSS, path traversal, and other common web attacks.
+3. **Known Bad Inputs** blocks requests with patterns known to be malicious (Log4Shell, etc.).
+4. **SQL Injection** catches SQLi attempts in query parameters and request bodies.
+
+### WAF Cost
+
+WAF costs $5/month per web ACL + $1/month per rule + $0.60 per million requests inspected. For a startup with moderate traffic, expect $8-15/month.
+
+<Alert type="caution" title="Agent Trap">
+
+Agent generates WAF rules that block legitimate traffic. When asked to "add WAF protection," agents create overly aggressive custom rules that match on common patterns in legitimate requests. A rule blocking requests containing "select" (to prevent SQL injection) also blocks any API request with a "select" query parameter for dropdown menus. Always deploy WAF rules in COUNT mode first, review the sampled requests for false positives for 48 hours, then switch to BLOCK.
+
+**What catches it:** Deploy new rules with `action { count {} }` instead of `action { block {} }`. Check CloudWatch metrics for `CountedRequests`. If the count is high, review sampled requests before switching to BLOCK.
+
+</Alert>
+
+### Testing WAF Rules
+
+Before switching from COUNT to BLOCK, test your rules:
+
+```bash terminal
+# Test rate limiting
+for i in $(seq 1 50); do
+  curl -s -o /dev/null -w "%{http_code}\n" https://api.your-domain.com/health
+done
+
+# Test SQL injection detection
+curl -v "https://api.your-domain.com/search?q=1%27%20OR%201%3D1"
+
+# Check WAF metrics
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/WAFV2 \
+  --metric-name BlockedRequests \
+  --dimensions Name=WebACL,Value=shipfast-production-waf Name=Region,Value=us-east-1 \
+  --start-time "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --period 300 \
+  --statistics Sum
+```
+
+---
+
+## Prowler
+
+Prowler is an open-source security assessment tool that checks your AWS account against CIS benchmarks, GDPR, HIPAA, and other compliance frameworks. It finds things Security Hub misses because it checks deeper and more aggressively.
+
+### Running Prowler
+
+```bash terminal
+# Install Prowler
+pip install prowler
+
+# Run full assessment
+prowler aws --region us-east-1 --output-formats json,html
+
+# Run specific checks only
+prowler aws --checks iam_root_mfa_enabled \
+  s3_bucket_public_access \
+  ec2_security_group_open_to_world \
+  rds_instance_publicly_accessible
+```
+
+### Integrating with CI
+
+Run Prowler weekly in CI. Not on every commit (it takes 10-15 minutes), but as a scheduled workflow:
+
+```yaml title=".github/workflows/security-scan.yml"
+name: Weekly Security Scan
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Every Monday at 9 AM UTC
+  workflow_dispatch:
+
+jobs:
+  prowler:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-arn: ${{ secrets.SECURITY_SCAN_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Run Prowler
+        run: |
+          pip install prowler
+          prowler aws --region us-east-1 \
+            --output-formats json \
+            --output-directory ./prowler-results \
+            --severity critical high
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: prowler-results
+          path: ./prowler-results/
+
+      - name: Check for critical findings
+        run: |
+          CRITICAL=$(jq '[.[] | select(.Severity == "critical")] | length' \
+            prowler-results/*.json)
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::error::$CRITICAL critical security findings detected!"
+            exit 1
+          fi
+```
+
+The scan uses a dedicated IAM role (`SECURITY_SCAN_ROLE_ARN`) with read-only access. The workflow fails if critical findings exist, which blocks the security scan badge on your repository.
+
+---
+
+## Agent-Assisted Remediation
+
+When Prowler or Security Hub finds issues, agents can help fix them. The workflow:
+
+:::steps
+1. Security scan runs (Prowler or Security Hub)
+2. Findings exported as structured JSON
+3. Agent receives findings and generates fix PRs
+4. Each fix PR includes the finding ID, severity, and remediation
+5. Human reviews every fix PR before merge
+6. Never auto-merge security remediations
+:::
+
+### Agent Remediation Prompt Template
+
+```markdown title="docs/agent-prompts/security-remediation.md"
+You are fixing a security finding.
+
+**Finding ID:** {finding_id}
+**Severity:** {severity}
+**Title:** {title}
+**Resource:** {resource_arn}
+**Description:** {description}
+**Remediation recommendation:** {recommendation}
+
+Generate a Terraform change that fixes this finding.
+Follow AGENT-INSTRUCTIONS.md rules.
+Do NOT change any resource besides the one identified in the finding.
+Do NOT modify IAM policies, security groups, or encryption settings
+beyond what the finding requires.
+
+Explain what the change does and why it fixes the finding.
+```
+
+The constraints are critical. Without them, the agent "helpfully" fixes adjacent issues it notices, expanding the blast radius of a security remediation PR from one resource to ten. Scope the agent to the specific finding. One finding, one PR, one review.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No security scanning. Reactive only. You find out about vulnerabilities when an attacker exploits them or when a customer reports strange behavior. |
+| ✅ **Right** | Security Hub + GuardDuty + WAF + Prowler. Continuous assessment. Agent-assisted remediation with human review. Critical findings fixed same day. Weekly security scan in CI. |
+| ❌ **Over** | Custom SIEM with advanced threat hunting, machine learning anomaly detection, a dedicated SOC team, and a $50K/year third-party penetration testing contract for a pre-launch startup. |
+| 🤖 **Agent Trap** | Agent generates WAF rules that block legitimate traffic. A rule intended to prevent SQL injection blocks any request containing SQL keywords in form fields or search queries. The agent's reasoning: "Block anything that looks like SQL." The fix: deploy rules in COUNT mode first, review sampled requests, then switch to BLOCK. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 66: Compliance Basics**, we take everything built in this phase and frame it through a compliance lens. GDPR data inventory, data retention policies with automated cleanup, and the discovery that your CloudTrail logs and agent audit trail from [Part 62](/blog/aws-for-startups/62-feature-flags-guardrails) already cover half of compliance requirements. Compliance as a byproduct of good engineering, not a separate workstream.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Security Hub",
+    tasks: [
+      { text: "Security Hub enabled with AWS Foundational Security Best Practices", syncKey: "part-65-securityhub" },
+      { text: "CIS AWS Foundations Benchmark enabled", syncKey: "part-65-cis" },
+      { text: "Critical findings reviewed and actioned", syncKey: "part-65-critical" },
+      { text: "False positives suppressed with documented notes", syncKey: "part-65-suppressed" }
+    ]
+  },
+  {
+    category: "Threat Detection",
+    tasks: [
+      { text: "GuardDuty enabled with S3 and malware protection", syncKey: "part-65-guardduty" },
+      { text: "High-severity GuardDuty findings routed to on-call SNS topic", syncKey: "part-65-guardduty-alerts" }
+    ]
+  },
+  {
+    category: "WAF",
+    tasks: [
+      { text: "WAF web ACL created with rate limiting and managed rules", syncKey: "part-65-waf" },
+      { text: "WAF associated with ALB", syncKey: "part-65-waf-alb" },
+      { text: "New rules deployed in COUNT mode and reviewed before BLOCK", syncKey: "part-65-waf-testing" }
+    ]
+  },
+  {
+    category: "Automated Scanning",
+    tasks: [
+      { text: "Prowler installed and run at least once", syncKey: "part-65-prowler" },
+      { text: "Weekly security scan GitHub Actions workflow created", syncKey: "part-65-ci-scan" },
+      { text: "Agent remediation prompt template documented", syncKey: "part-65-remediation" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Security Hub aggregates findings from multiple sources into a single dashboard: one place to check, not five.
+2. GuardDuty detects threats you did not think to look for, because anomaly-based detection catches what rule-based checks miss.
+3. WAF rules need testing in COUNT mode before BLOCK: agent-generated rules frequently cause false positives on legitimate traffic patterns.
+4. Proactive security finds the drift that reactive security misses: the "temporary" public bucket, the unused IAM role, the expired TLS certificate.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

@@ -1,0 +1,555 @@
+---
+title: "Cost Management: Know Where Every Dollar Goes"
+description: "AWS Cost Explorer, budgets, right-sizing, Reserved Instances, and agent cost tracking. Because 'we'll optimize later' never happens."
+excerpt: "Know where every dollar goes. Cost Explorer, budgets, right-sizing, and tracking what your agents are costing you separately."
+date: "2026-09-20"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "cost"]
+series: "aws-for-startups"
+seriesPart: 64
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your AWS bill for August was $847. Your AWS bill for September is $2,340. You open Cost Explorer, see a wall of line items, and cannot figure out which service tripled. Turns out your agent created three NAT Gateways in staging (one per AZ "for high availability"), an RDS db.r6g.xlarge "for performance headroom," and a dozen S3 buckets for "test data" that are now storing 400 GB of forgotten uploads. None of it is tagged. You cannot tell what is production, what is staging, and what the agent created.
+
+**Time:** About 40 minutes.
+
+**Outcome:** Cost Explorer configured with tag-based cost allocation, monthly budgets with alerts at 80% and 100%, a right-sizing procedure based on actual CloudWatch metrics, a decision framework for Reserved Instances and Savings Plans, and a separate cost view for agent-created resources using `CreatedBy=agent` tags.
+
+---
+
+## Why This Matters
+
+"We'll optimize later" is the most expensive sentence in a startup's vocabulary. Later never comes. The $847 bill becomes $2,340 becomes $4,100 becomes a line item on the board deck that nobody can explain.
+
+Cost management is not about spending less. It is about knowing what you spend and why. A $2,340 bill where you can account for every dollar is fine. A $847 bill where you cannot is a problem.
+
+Three things make AWS cost management harder than it should be:
+
+1. **Delayed billing data.** Cost Explorer data lags 12-24 hours. The resource you created this morning does not show up until tomorrow. By then, you have moved on.
+2. **Tagging gaps.** If resources are not tagged, they show up as a blob under "EC2" or "RDS" with no way to attribute them to a team, environment, or purpose.
+3. **Agent cost blindness.** Agents have no concept of cost. They optimize for "working code," not "cost-effective working code." A `db.t3.micro` and a `db.r6g.xlarge` both pass `terraform validate`.
+
+---
+
+## What We're Building
+
+- Cost Explorer with tag-based cost allocation enabled
+- Monthly budgets with threshold alerts (80%, 100%)
+- Right-sizing procedure using CloudWatch metrics
+- Reserved Instances / Savings Plans decision framework
+- Agent cost tracking via `CreatedBy=agent` tag allocation
+
+---
+
+## Cost Explorer Setup
+
+Cost Explorer is free but not enabled by default. Enable it and set up tag-based cost allocation so you can filter costs by environment, project, and creator.
+
+### Enabling Cost Allocation Tags
+
+```bash terminal
+aws ce update-cost-allocation-tags-status \
+  --cost-allocation-tags-status \
+    TagKey=Environment,Status=Active \
+    TagKey=Project,Status=Active \
+    TagKey=Owner,Status=Active \
+    TagKey=ManagedBy,Status=Active \
+    TagKey=CreatedBy,Status=Active
+```
+
+These are the tags you have been requiring since [Part 4](/blog/aws-for-startups/04-terraform-fundamentals). The `CreatedBy` tag, enforced by the SCP from [Part 62](/blog/aws-for-startups/62-feature-flags-guardrails), separates agent-created resources from human-created ones.
+
+:::warning
+Cost allocation tags take 24 hours to activate. They only apply to costs incurred after activation. Historical costs cannot be retroactively tagged. Enable these tags now, even if you are not ready to analyze costs yet.
+:::
+
+### Key Cost Explorer Views
+
+Create these saved views in Cost Explorer:
+
+**View 1: Cost by Environment**
+- Group by: Tag (Environment)
+- Filter: exclude tax
+- Granularity: Monthly
+- Timeframe: Last 6 months
+
+This view answers: "How much does production cost vs staging vs development?" If staging costs more than 30% of production, something is wrong. Staging should be a fraction of production, using smaller instances, fewer replicas, and no multi-AZ.
+
+**View 2: Cost by Service**
+- Group by: Service
+- Filter: Tag Environment = production
+- Granularity: Monthly
+- Timeframe: Last 3 months
+
+This view answers: "Which AWS services cost the most in production?" The usual suspects: EC2 (including NAT Gateways), RDS, data transfer, and S3. If a service you do not expect is in the top 5, investigate.
+
+**View 3: Agent Cost Attribution**
+- Group by: Tag (CreatedBy)
+- Filter: Tag CreatedBy = agent
+- Granularity: Monthly
+- Timeframe: Last 3 months
+
+This view answers: "How much are agent-created resources costing me?" If agent costs are climbing faster than your feature output, agents are creating resources they should not be.
+
+---
+
+## Budgets
+
+AWS Budgets sends alerts when spending approaches or exceeds a threshold. Set budgets per environment.
+
+```hcl title="infra/modules/budgets/main.tf"
+resource "aws_budgets_budget" "production" {
+  name         = "${var.project}-production-monthly"
+  budget_type  = "COST"
+  limit_amount = var.production_budget
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  cost_filter {
+    name   = "TagKeyValue"
+    values = ["user:Environment$production"]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = var.alert_emails
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = var.alert_emails
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = var.alert_emails
+  }
+
+  tags = var.common_tags
+}
+
+resource "aws_budgets_budget" "staging" {
+  name         = "${var.project}-staging-monthly"
+  budget_type  = "COST"
+  limit_amount = var.staging_budget
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  cost_filter {
+    name   = "TagKeyValue"
+    values = ["user:Environment$staging"]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = var.alert_emails
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = var.alert_emails
+  }
+
+  tags = var.common_tags
+}
+
+resource "aws_budgets_budget" "agent_resources" {
+  name         = "${var.project}-agent-resources-monthly"
+  budget_type  = "COST"
+  limit_amount = var.agent_budget
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  cost_filter {
+    name   = "TagKeyValue"
+    values = ["user:CreatedBy$agent"]
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
+    subscriber_email_addresses = var.alert_emails
+  }
+
+  tags = var.common_tags
+}
+```
+
+Three budgets: production, staging, and agent resources. The agent resource budget is separate because agent cost growth should be tracked independently. If your agent budget keeps hitting 100%, agents are over-provisioning or creating unnecessary resources.
+
+### Setting Budget Amounts
+
+How do you know what to set? Use your last 3 months of data:
+
+```bash terminal
+aws ce get-cost-and-usage \
+  --time-period Start=2026-07-01,End=2026-10-01 \
+  --granularity MONTHLY \
+  --filter '{"Tags":{"Key":"Environment","Values":["production"]}}' \
+  --metrics "UnblendedCost" \
+  --query 'ResultsByTime[].{Month:TimePeriod.Start, Cost:Total.UnblendedCost.Amount}'
+```
+
+<TerminalOutput title="aws ce get-cost-and-usage">
+
+```json
+[
+  { "Month": "2026-07-01", "Cost": "723.41" },
+  { "Month": "2026-08-01", "Cost": "847.22" },
+  { "Month": "2026-09-01", "Cost": "891.05" }
+]
+```
+
+</TerminalOutput>
+
+Take the highest month, add 20% buffer, and round up. $891 * 1.2 = $1,069. Set the production budget at $1,100. This gives you room for organic growth without triggering false alarms.
+
+---
+
+## Right-Sizing
+
+Right-sizing means matching resource capacity to actual usage. The number one cost optimization for startups is not Reserved Instances or Savings Plans. It is stopping the practice of running db.r6g.xlarge instances that use 8% of their CPU.
+
+### The Right-Sizing Procedure
+
+```bash title="scripts/cost/right-sizing-report.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== Right-Sizing Report ==="
+echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo ""
+
+# EC2 instances: CPU and memory utilization
+echo "--- EC2 Instances ---"
+for instance_id in $(aws ec2 describe-instances \
+  --filters "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text); do
+
+  instance_type=$(aws ec2 describe-instances \
+    --instance-ids "$instance_id" \
+    --query 'Reservations[0].Instances[0].InstanceType' --output text)
+
+  avg_cpu=$(aws cloudwatch get-metric-statistics \
+    --namespace AWS/EC2 \
+    --metric-name CPUUtilization \
+    --dimensions Name=InstanceId,Value="$instance_id" \
+    --start-time "$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)" \
+    --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --period 3600 \
+    --statistics Average \
+    --query 'sort_by(Datapoints, &Timestamp)[-1].Average' --output text)
+
+  max_cpu=$(aws cloudwatch get-metric-statistics \
+    --namespace AWS/EC2 \
+    --metric-name CPUUtilization \
+    --dimensions Name=InstanceId,Value="$instance_id" \
+    --start-time "$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)" \
+    --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --period 3600 \
+    --statistics Maximum \
+    --query 'sort_by(Datapoints, &Timestamp)[-1].Maximum' --output text)
+
+  echo "$instance_id ($instance_type): avg CPU ${avg_cpu}%, max CPU ${max_cpu}%"
+
+  if (( $(echo "$max_cpu < 20" | bc -l) )); then
+    echo "  RECOMMENDATION: Downsize. Max CPU under 20% for 7 days."
+  fi
+done
+
+echo ""
+
+# RDS instances
+echo "--- RDS Instances ---"
+for db_id in $(aws rds describe-db-instances \
+  --query 'DBInstances[].DBInstanceIdentifier' --output text); do
+
+  db_class=$(aws rds describe-db-instances \
+    --db-instance-identifier "$db_id" \
+    --query 'DBInstances[0].DBInstanceClass' --output text)
+
+  avg_cpu=$(aws cloudwatch get-metric-statistics \
+    --namespace AWS/RDS \
+    --metric-name CPUUtilization \
+    --dimensions Name=DBInstanceIdentifier,Value="$db_id" \
+    --start-time "$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)" \
+    --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --period 3600 \
+    --statistics Average \
+    --query 'sort_by(Datapoints, &Timestamp)[-1].Average' --output text)
+
+  connections=$(aws cloudwatch get-metric-statistics \
+    --namespace AWS/RDS \
+    --metric-name DatabaseConnections \
+    --dimensions Name=DBInstanceIdentifier,Value="$db_id" \
+    --start-time "$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)" \
+    --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --period 3600 \
+    --statistics Average \
+    --query 'sort_by(Datapoints, &Timestamp)[-1].Average' --output text)
+
+  echo "$db_id ($db_class): avg CPU ${avg_cpu}%, avg connections ${connections}"
+
+  if (( $(echo "$avg_cpu < 15" | bc -l) )); then
+    echo "  RECOMMENDATION: Downsize. Average CPU under 15% for 7 days."
+  fi
+done
+```
+
+Run this weekly. Automate it as a scheduled Lambda or a cron job in CI. The output tells you exactly which resources are over-provisioned and by how much.
+
+<Alert type="caution" title="Agent Trap">
+
+Agent provisions oversized resources across all environments. When asked to "create a staging database," the agent generates a `db.r6g.xlarge` with Multi-AZ because its training data is biased toward production configurations. Staging gets the same $400/month database that production uses, except staging serves 10 requests per day. The right-sizing script catches this: "avg CPU 2%, avg connections 3. RECOMMENDATION: Downsize."
+
+**What catches it:** The right-sizing report, run weekly, flags resources with utilization below the threshold. The OPA policy from [Part 62](/blog/aws-for-startups/62-feature-flags-guardrails) can also enforce instance type limits per environment.
+
+</Alert>
+
+### Common Right-Sizing Moves
+
+| Resource | Over-Provisioned | Right-Sized | Monthly Savings |
+|---|---|---|---|
+| EC2 (staging) | t3.xlarge | t3.small | ~$95 |
+| RDS (staging) | db.r6g.xlarge | db.t3.small | ~$370 |
+| ElastiCache (staging) | cache.r6g.large | cache.t3.micro | ~$85 |
+| NAT Gateway (staging) | 3 (one per AZ) | 1 | ~$64 |
+| NAT Gateway (dev) | 1 | VPC endpoints only | ~$32 |
+
+A single right-sizing pass on a typical startup staging environment saves $300-600/month. That is $3,600-7,200/year for 30 minutes of work.
+
+---
+
+## Reserved Instances and Savings Plans
+
+Reserved Instances (RIs) and Savings Plans (SPs) offer 30-72% discounts in exchange for a 1-year or 3-year commitment. The decision is simple in theory, complicated in practice.
+
+### The 65% Rule
+
+Commit to a Reserved Instance or Savings Plan only when utilization exceeds 65% consistently for 30+ days. Below 65%, the flexibility of on-demand pricing is worth more than the discount.
+
+| Utilization | Recommendation |
+|---|---|
+| Under 40% | Right-size first. Do not commit. |
+| 40-65% | Right-size, then re-evaluate in 30 days. |
+| 65-85% | Consider 1-year No Upfront RI or Compute SP. |
+| >85% | 1-year Partial Upfront RI for the specific instance type. |
+
+### Savings Plans vs Reserved Instances
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Savings Plans", "Reserved Instances"]} />
+  <ComparisonRow feature="Flexibility" Savings_Plans="Applies across instance families (Best)" Reserved_Instances="Locked to specific instance type" />
+  <ComparisonRow feature="Discount" Savings_Plans="Up to 66%" Reserved_Instances="Up to 72% (Best)" />
+  <ComparisonRow feature="Applies to" Savings_Plans="EC2, Fargate, Lambda" Reserved_Instances="EC2, RDS, ElastiCache" />
+  <ComparisonRow feature="Best for" Savings_Plans="Variable workloads" Reserved_Instances="Stable, predictable workloads" />
+</ComparisonTable>
+
+For most startups: start with a Compute Savings Plan. It gives you flexibility to change instance types, regions, and even compute services (EC2 to Fargate to Lambda) while still saving 20-30%. Lock in RIs only for databases that you know will run the same instance type for 12+ months.
+
+### Checking RI Coverage
+
+```bash terminal
+aws ce get-reservation-coverage \
+  --time-period Start=2026-09-01,End=2026-09-30 \
+  --granularity MONTHLY \
+  --group-by Type=DIMENSION,Key=SERVICE
+```
+
+---
+
+## Agent Cost Tracking
+
+The `CreatedBy=agent` tag is not just for attribution. It is the foundation of a separate cost management workflow for agent-created resources.
+
+### Monthly Agent Cost Report
+
+```bash title="scripts/cost/agent-cost-report.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+MONTH_START=$(date -u -v-1m +%Y-%m-01)
+MONTH_END=$(date -u +%Y-%m-01)
+
+echo "=== Agent Cost Report ==="
+echo "Period: $MONTH_START to $MONTH_END"
+echo ""
+
+# Total agent-created resource cost
+AGENT_COST=$(aws ce get-cost-and-usage \
+  --time-period Start="$MONTH_START",End="$MONTH_END" \
+  --granularity MONTHLY \
+  --filter '{"Tags":{"Key":"CreatedBy","Values":["agent"]}}' \
+  --metrics "UnblendedCost" \
+  --query 'ResultsByTime[0].Total.UnblendedCost.Amount' --output text)
+
+# Total infrastructure cost
+TOTAL_COST=$(aws ce get-cost-and-usage \
+  --time-period Start="$MONTH_START",End="$MONTH_END" \
+  --granularity MONTHLY \
+  --metrics "UnblendedCost" \
+  --query 'ResultsByTime[0].Total.UnblendedCost.Amount' --output text)
+
+AGENT_PCT=$(echo "scale=1; $AGENT_COST / $TOTAL_COST * 100" | bc)
+
+echo "Total infrastructure cost: \$$TOTAL_COST"
+echo "Agent-created resource cost: \$$AGENT_COST"
+echo "Agent cost percentage: ${AGENT_PCT}%"
+echo ""
+
+# Agent cost by service
+echo "--- Agent Cost by Service ---"
+aws ce get-cost-and-usage \
+  --time-period Start="$MONTH_START",End="$MONTH_END" \
+  --granularity MONTHLY \
+  --filter '{"Tags":{"Key":"CreatedBy","Values":["agent"]}}' \
+  --group-by Type=DIMENSION,Key=SERVICE \
+  --metrics "UnblendedCost" \
+  --query 'ResultsByTime[0].Groups[].{Service:Keys[0], Cost:Metrics.UnblendedCost.Amount}' \
+  --output table
+
+# Agent cost by environment
+echo ""
+echo "--- Agent Cost by Environment ---"
+aws ce get-cost-and-usage \
+  --time-period Start="$MONTH_START",End="$MONTH_END" \
+  --granularity MONTHLY \
+  --filter '{"And":[{"Tags":{"Key":"CreatedBy","Values":["agent"]}},{"Not":{"Tags":{"Key":"Environment","Values":["production"]}}}]}' \
+  --metrics "UnblendedCost" \
+  --query 'ResultsByTime[0].Total.UnblendedCost.Amount' --output text
+```
+
+### What to Watch For
+
+| Metric | Healthy | Investigate |
+|---|---|---|
+| Agent cost as % of total | Under 15% | Over 25% |
+| Agent staging cost vs production | Under 20% of production | Over 50% of production |
+| Agent resource count growth | Stable or declining | Growing month over month |
+| Untagged resources | 0 | Any |
+
+If agent-created resources account for more than 25% of your total bill, agents are creating infrastructure you are not using. Review the agent cost report, identify unused resources, and add tighter constraints to your OPA policies.
+
+---
+
+## Quick Wins
+
+Three things you can do in 5 minutes that immediately reduce waste:
+
+1. **Delete unattached EBS volumes.** Terminated EC2 instances leave their EBS volumes behind. Each costs $0.10/GB/month.
+   ```bash terminal
+   aws ec2 describe-volumes \
+     --filters Name=status,Values=available \
+     --query 'Volumes[].{ID:VolumeId, Size:Size, Created:CreateTime}' \
+     --output table
+   ```
+
+2. **Release unattached Elastic IPs.** Each costs $0.005/hour ($3.60/month) when not attached to a running instance.
+   ```bash terminal
+   aws ec2 describe-addresses \
+     --query 'Addresses[?AssociationId==null].{IP:PublicIp, AllocID:AllocationId}' \
+     --output table
+   ```
+
+3. **Check for idle NAT Gateways.** If a NAT Gateway processes 0 bytes for 7 days, it is wasting $32/month.
+   ```bash terminal
+   aws cloudwatch get-metric-statistics \
+     --namespace AWS/NATGateway \
+     --metric-name BytesOutToDestination \
+     --start-time "$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)" \
+     --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+     --period 604800 \
+     --statistics Sum \
+     --dimensions Name=NatGatewayId,Value=nat-0abc123def456
+   ```
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No cost monitoring. No tagging. Surprise $3,000 bill. Cannot tell what is production vs staging. Agent-created resources invisible in billing. "We'll optimize later" for 18 months. |
+| ✅ **Right** | Cost Explorer with tag-based allocation. Monthly budgets per environment with 80% and 100% alerts. Weekly right-sizing checks. Agent costs tracked separately via `CreatedBy=agent`. Reserved Instances only above 65% utilization. |
+| ❌ **Over** | Real-time cost anomaly detection with automated resource shutdown. Custom cost optimization Lambda that runs every hour. Detailed per-request cost attribution for a pre-launch app serving 50 requests per day. |
+| 🤖 **Agent Trap** | Agent provisions oversized resources across all environments. Staging gets the same `db.r6g.xlarge` as production because the agent copies production patterns. Dev gets a NAT Gateway per AZ "for consistency." The right-sizing script and per-environment OPA policies catch the overspend, but only after the first month's bill. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 65: Security Posture**, we move from reactive security (fixing what is broken) to proactive security (finding what is wrong before attackers do). Security Hub, GuardDuty, WAF, and Prowler give you continuous security assessment. Agents help by generating fix PRs for findings, but a human reviews every remediation before it touches production.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Cost Visibility",
+    tasks: [
+      { text: "Cost allocation tags activated (Environment, Project, Owner, ManagedBy, CreatedBy)", syncKey: "part-64-tags" },
+      { text: "Cost Explorer views saved: by environment, by service, by CreatedBy", syncKey: "part-64-explorer" },
+      { text: "24-hour activation period acknowledged", syncKey: "part-64-activation" }
+    ]
+  },
+  {
+    category: "Budgets",
+    tasks: [
+      { text: "Production monthly budget created with 80% and 100% alerts", syncKey: "part-64-budget-prod" },
+      { text: "Staging monthly budget created", syncKey: "part-64-budget-staging" },
+      { text: "Agent resources budget created (CreatedBy=agent filter)", syncKey: "part-64-budget-agent" }
+    ]
+  },
+  {
+    category: "Cost Optimization",
+    tasks: [
+      { text: "Right-sizing report script created and run once", syncKey: "part-64-rightsizing" },
+      { text: "Agent cost report script created and run once", syncKey: "part-64-agent-report" },
+      { text: "Unattached EBS volumes and Elastic IPs cleaned up", syncKey: "part-64-cleanup" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Tags (especially `CreatedBy=agent`) are the foundation of cost attribution: without them, your bill is a black box you cannot debug.
+2. Right-sizing based on CloudWatch data, not intuition: agents consistently over-provision by 2-4x, and a single right-sizing pass saves $300-600/month.
+3. Reserved Instances only make sense above 65% utilization: measure for 30 days before committing to a 1-year contract.
+4. A separate agent cost budget catches the slow creep of unused resources that agents create and forget.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

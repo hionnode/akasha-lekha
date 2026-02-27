@@ -1,0 +1,882 @@
+---
+title: "Capstone Deployment: From Zero to Production"
+description: "Deploy the complete multi-tenant SaaS application using the full Generate, Verify, Explain pipeline. Terraform from zero to production in one part."
+excerpt: "From zero to production. The full pipeline deploys the capstone application: Terraform, containers, serverless, databases, all in one coordinated deployment."
+date: "2026-10-06"
+author: "Chinmay"
+tags: ["aws", "devops", "startup", "terraform", "ai-agents"]
+series: "aws-for-startups"
+seriesPart: 68
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+You have spent 67 parts building the machine. The VPC module from [Part 20](/blog/aws-for-startups/20-vpc-fundamentals). The ECS module from [Part 41](/blog/aws-for-startups/41-ecs-fargate-bun). The Lambda module from [Part 48](/blog/aws-for-startups/48-lambda-fundamentals). The full pipeline from [Part 43](/blog/aws-for-startups/43-full-stack-preview). The architecture from [Part 67](/blog/aws-for-startups/67-capstone-architecture). Today, the machine runs. One command triggers a five-phase deployment that creates an entire SaaS application from an empty AWS environment.
+
+**Time:** About 2-3 hours for the full deployment, most of it waiting for RDS and CloudFront to provision. Your active review time is about 45 minutes spread across five phases.
+
+**Outcome:** A fully deployed ShipMetrics application with VPC networking, RDS PostgreSQL, ElastiCache Redis, ECS Fargate API service, Lambda workers, S3 + CloudFront frontend, API Gateway WebSocket endpoint, SQS queues, EventBridge schedules, and end-to-end smoke tests passing. All created through the Generate, Verify, Explain pipeline. All reviewed by you.
+
+---
+
+## Why This Matters
+
+Deploying infrastructure by hand, one `terraform apply` at a time, is how most startups start. It works until it does not. The first time you need to recreate your environment (new region, disaster recovery, staging for a new hire), you realize you cannot. The deployment is a sequence of manual steps in someone's head, with state files as the only record.
+
+The pipeline changes this. `full-pipeline.sh` takes your architecture document, generates Terraform for each module, verifies the output against your AGENT-INSTRUCTIONS.md rules, produces explain summaries, and waits for your approval before applying. If you need to recreate the environment in six months, you run the same pipeline.
+
+This is the payoff for 62 parts of pipeline building. Not the ability to generate code faster, but the ability to deploy an entire application with confidence that every resource has been verified, every security rule checked, and every cost estimated before a single API call hits AWS.
+
+---
+
+## What We're Building
+
+- A five-phase deployment strategy: Network, Data, Compute, Frontend, DNS
+- Pipeline-driven Terraform generation for all modules
+- Explain summaries at each phase boundary for human review
+- Smoke tests validating the complete deployment
+- Cost estimation for the full stack
+
+---
+
+## Deployment Strategy
+
+Order matters. You cannot create an ECS service before the VPC exists. You cannot connect Lambda to RDS before the database is running. You cannot point CloudFront to the ALB before the ALB has a target group.
+
+The five phases execute in strict order. Each phase completes and passes smoke tests before the next phase begins.
+
+:::steps
+1. **Network** (VPC, subnets, NAT Gateways, security groups, VPC endpoints)
+2. **Data** (RDS PostgreSQL, ElastiCache Redis, S3 buckets)
+3. **Compute** (ECS Fargate service, Lambda functions, SQS queues, EventBridge rules)
+4. **Frontend** (S3 static site, CloudFront distribution, WAF)
+5. **DNS + SSL** (Route 53 records, ACM certificates, final connectivity)
+:::
+
+This is not arbitrary. Dependencies flow downward. Network is a dependency for everything. Data depends on network. Compute depends on network and data. Frontend depends on nothing inside the VPC (it is edge-only) but deploys after compute so smoke tests can validate the full stack. DNS is last because it makes the application publicly reachable, and you want everything working before that happens.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents attempt to deploy all resources simultaneously because Terraform's dependency graph handles ordering automatically. This works for small projects. For a full-stack deployment with 40+ resources across 10+ modules, simultaneous deployment creates three problems: (1) Terraform plan output is unreadable (200+ lines of changes), (2) a single failure cascades to dependent resources, and (3) the explain summary is too large to review meaningfully.
+
+**What catches it:** The pipeline's phased execution mode. `full-pipeline.sh --phased` generates, verifies, and explains one phase at a time. You review each explain summary before the next phase starts.
+
+</Alert>
+
+---
+
+## Phase 1: Network
+
+The foundation. Everything else depends on this.
+
+### Pipeline Execution
+
+```bash terminal
+./scripts/pipeline/full-pipeline.sh \
+  --phase network \
+  --env prod \
+  --config infra/environments/prod/terraform.tfvars \
+  --instructions AGENT-INSTRUCTIONS.md
+```
+
+The pipeline reads the architecture document, generates the VPC module Terraform, runs verification (terraform validate, tflint, checkov, OPA policies), and produces an explain summary.
+
+### What Gets Created
+
+```hcl title="infra/modules/vpc/main.tf"
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-vpc"
+  })
+}
+
+resource "aws_subnet" "public" {
+  count             = length(var.availability_zones)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index)
+  availability_zone = var.availability_zones[count.index]
+
+  map_public_ip_on_launch = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-public-${var.availability_zones[count.index]}"
+    Tier = "public"
+  })
+}
+
+resource "aws_subnet" "private" {
+  count             = length(var.availability_zones)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + length(var.availability_zones))
+  availability_zone = var.availability_zones[count.index]
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-private-${var.availability_zones[count.index]}"
+    Tier = "private"
+  })
+}
+
+resource "aws_subnet" "data" {
+  count             = length(var.availability_zones)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 2 * length(var.availability_zones))
+  availability_zone = var.availability_zones[count.index]
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-data-${var.availability_zones[count.index]}"
+    Tier = "data"
+  })
+}
+```
+
+The pipeline also generates NAT Gateways, route tables, security groups, and VPC endpoints for S3 and DynamoDB. The explain summary highlights the key decisions.
+
+### Verify Output
+
+<TerminalOutput title="Pipeline Verify: Network Phase">
+
+```
+✓ terraform validate: passed
+✓ tflint: 0 issues
+✓ checkov: 14/14 checks passed
+✓ OPA policies: 6/6 passed
+  - vpc_cidr_documented: PASS
+  - no_public_subnet_databases: PASS
+  - security_group_no_open_ingress: PASS
+  - nat_gateway_per_az: PASS
+  - vpc_endpoint_s3: PASS
+  - required_tags: PASS
+✓ Infracost estimate: $67.14/month
+  - NAT Gateways (2x): $64.80
+  - VPC endpoints: $2.34
+
+Network phase: READY TO APPLY
+```
+
+</TerminalOutput>
+
+The $67/month is almost entirely NAT Gateways. This is expected. For a dev environment, the pipeline would generate a single NAT Gateway and cut the cost to $34/month.
+
+### Apply and Verify
+
+After reviewing the explain summary and cost estimate, approve the apply:
+
+```bash terminal
+./scripts/pipeline/full-pipeline.sh --phase network --env prod --apply
+```
+
+Smoke test: confirm VPC exists and subnets are in the correct AZs.
+
+```bash terminal
+aws ec2 describe-vpcs \
+  --filters "Name=tag:Project,Values=shipmetrics" "Name=tag:Environment,Values=prod" \
+  --query "Vpcs[0].{VpcId:VpcId,CidrBlock:CidrBlock,State:State}" \
+  --output table
+```
+
+---
+
+## Phase 2: Data
+
+With the VPC in place, the data layer goes into the data subnets.
+
+### Pipeline Execution
+
+```bash terminal
+./scripts/pipeline/full-pipeline.sh \
+  --phase data \
+  --env prod \
+  --config infra/environments/prod/terraform.tfvars \
+  --instructions AGENT-INSTRUCTIONS.md
+```
+
+### What Gets Created
+
+**RDS PostgreSQL** in a Multi-AZ subnet group, `db.t4g.medium`, automated backups enabled:
+
+```hcl title="infra/modules/rds/main.tf"
+resource "aws_db_instance" "main" {
+  identifier     = "${var.project}-${var.environment}-postgres"
+  engine         = "postgres"
+  engine_version = "16.4"
+  instance_class = var.instance_class
+
+  allocated_storage     = 20
+  max_allocated_storage = 100
+  storage_encrypted     = true
+
+  db_name  = var.database_name
+  username = var.master_username
+  password = data.aws_secretsmanager_secret_version.db_password.secret_string
+
+  multi_az               = var.environment == "prod" ? true : false
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [var.db_security_group_id]
+
+  backup_retention_period = 7
+  backup_window           = "03:00-04:00"
+  maintenance_window      = "sun:04:00-sun:05:00"
+
+  deletion_protection = var.environment == "prod" ? true : false
+  skip_final_snapshot = var.environment == "prod" ? false : true
+
+  performance_insights_enabled = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-postgres"
+  })
+}
+```
+
+**ElastiCache Redis** in the same data subnets:
+
+```hcl title="infra/modules/elasticache/main.tf"
+resource "aws_elasticache_replication_group" "main" {
+  replication_group_id = "${var.project}-${var.environment}-redis"
+  description          = "Redis cache for ${var.project} ${var.environment}"
+
+  engine               = "redis"
+  engine_version       = "7.1"
+  node_type            = var.node_type
+  num_cache_clusters   = var.environment == "prod" ? 2 : 1
+
+  subnet_group_name    = aws_elasticache_subnet_group.main.name
+  security_group_ids   = [var.redis_security_group_id]
+
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = true
+
+  automatic_failover_enabled = var.environment == "prod" ? true : false
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-redis"
+  })
+}
+```
+
+**S3 Buckets** with versioning, encryption, and lifecycle policies:
+
+```hcl title="infra/modules/s3/main.tf"
+resource "aws_s3_bucket" "frontend" {
+  bucket = "${var.project}-${var.environment}-frontend"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-frontend"
+  })
+}
+
+resource "aws_s3_bucket_versioning" "frontend" {
+  bucket = aws_s3_bucket.frontend.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "frontend" {
+  bucket = aws_s3_bucket.frontend.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "aws:kms"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "frontend" {
+  bucket = aws_s3_bucket.frontend.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+```
+
+### Verify Output
+
+<TerminalOutput title="Pipeline Verify: Data Phase">
+
+```
+✓ terraform validate: passed
+✓ tflint: 0 issues
+✓ checkov: 22/22 checks passed
+  - CKV_AWS_16: RDS encryption at rest: PASSED
+  - CKV_AWS_17: RDS not publicly accessible: PASSED
+  - CKV_AWS_118: RDS enhanced monitoring: PASSED
+  - CKV_AWS_226: RDS auto minor version upgrade: PASSED
+  - CKV_AWS_19: S3 encryption: PASSED
+  - CKV_AWS_145: S3 KMS encryption: PASSED
+  - CKV_AWS_21: S3 versioning: PASSED
+✓ OPA policies: 4/4 passed
+  - rds_in_data_subnet: PASS
+  - rds_encryption_enabled: PASS
+  - s3_no_public_access: PASS
+  - elasticache_encryption: PASS
+✓ Infracost estimate: $124.58/month
+  - RDS db.t4g.medium (Multi-AZ): $97.92
+  - ElastiCache cache.t4g.micro (2 nodes): $18.06
+  - S3 storage: $0.60
+  - KMS keys: $8.00
+
+Data phase: READY TO APPLY
+```
+
+</TerminalOutput>
+
+RDS is the biggest line item. Multi-AZ doubles the cost but gives you automatic failover. For staging, the pipeline generates single-AZ and drops to ~$49/month.
+
+:::warning
+RDS provisioning takes 10-15 minutes. ElastiCache takes 5-8 minutes. Do not cancel and retry. Check provisioning status in the console or with `aws rds describe-db-instances`.
+:::
+
+---
+
+## Phase 3: Compute
+
+The application layer. ECS Fargate for the API, Lambda for everything else.
+
+### Pipeline Execution
+
+```bash terminal
+./scripts/pipeline/full-pipeline.sh \
+  --phase compute \
+  --env prod \
+  --config infra/environments/prod/terraform.tfvars \
+  --instructions AGENT-INSTRUCTIONS.md
+```
+
+### What Gets Created
+
+This is the largest phase. The pipeline generates:
+
+- **ECS cluster and service** for the API (Fargate tasks, ALB target group, auto-scaling policy)
+- **ECR repository** for API container images
+- **Lambda functions** for workers, WebSocket handlers, and cron jobs
+- **SQS queues** with dead letter queues for event processing
+- **EventBridge rules** for scheduled jobs
+- **API Gateway** WebSocket API with Lambda integrations
+- **DynamoDB table** for WebSocket connection management
+
+```hcl title="infra/modules/ecs/main.tf"
+resource "aws_ecs_service" "api" {
+  name            = "${var.project}-${var.environment}-api"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.api.arn
+  desired_count   = var.api_min_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = var.private_subnet_ids
+    security_groups  = [var.ecs_security_group_id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = var.api_target_group_arn
+    container_name   = "api"
+    container_port   = 3000
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-api"
+  })
+}
+```
+
+```hcl title="infra/modules/lambda/workers.tf"
+resource "aws_lambda_function" "metric_worker" {
+  function_name = "${var.project}-${var.environment}-metric-worker"
+  role          = var.worker_role_arn
+  handler       = "handler.processEvent"
+  runtime       = "provided.al2023"
+  timeout       = 60
+  memory_size   = 256
+
+  environment {
+    variables = {
+      DATABASE_SECRET_ARN = var.db_secret_arn
+      REDIS_ENDPOINT      = var.redis_endpoint
+      SNS_TOPIC_ARN       = var.notification_topic_arn
+      ENVIRONMENT         = var.environment
+    }
+  }
+
+  dead_letter_config {
+    target_arn = var.worker_dlq_arn
+  }
+
+  vpc_config {
+    subnet_ids         = var.private_subnet_ids
+    security_group_ids = [var.lambda_security_group_id]
+  }
+
+  tracing_config {
+    mode = "Active"
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-metric-worker"
+  })
+}
+
+resource "aws_lambda_event_source_mapping" "worker_sqs" {
+  event_source_arn = var.events_queue_arn
+  function_name    = aws_lambda_function.metric_worker.arn
+  batch_size       = 10
+
+  function_response_types = ["ReportBatchItemFailures"]
+}
+```
+
+### Verify Output
+
+<TerminalOutput title="Pipeline Verify: Compute Phase">
+
+```
+✓ terraform validate: passed
+✓ tflint: 0 issues
+✓ checkov: 31/31 checks passed
+  - CKV_AWS_336: Lambda DLQ configured: PASSED
+  - CKV_AWS_173: Lambda environment not encrypted: PASSED (using Secrets Manager)
+  - CKV_AWS_116: Lambda DLQ configured: PASSED
+  - CKV_AWS_272: ECS task definition non-root: PASSED
+  - CKV_AWS_249: ECS service deployment circuit breaker: PASSED
+✓ OPA policies: 8/8 passed
+  - lambda_dlq_required: PASS
+  - lambda_timeout_set: PASS
+  - lambda_vpc_attached: PASS
+  - ecs_private_subnet: PASS
+  - sqs_dlq_configured: PASS
+  - sqs_visibility_timeout: PASS
+  - eventbridge_target_dlq: PASS
+  - iam_no_wildcard_actions: PASS
+✓ Infracost estimate: $52.34/month
+  - ECS Fargate (2 tasks, 0.5 vCPU, 1GB): $29.52
+  - Lambda (estimated 500K invocations): $4.82
+  - ALB: $16.20
+  - SQS: $0.40
+  - API Gateway WebSocket: $1.00
+  - DynamoDB (on-demand): $0.40
+
+Compute phase: READY TO APPLY
+```
+
+</TerminalOutput>
+
+Notice the Lambda cost: $4.82/month for 500,000 invocations. Compare that to the $29.52 for two always-on Fargate tasks. The compute strategy from [Part 67](/blog/aws-for-startups/67-capstone-architecture) pays off here. Workers on Lambda cost 6x less than the equivalent Fargate tasks would.
+
+---
+
+## Phase 4: Frontend
+
+The static frontend deploys outside the VPC. S3 for storage, CloudFront for distribution, WAF for protection.
+
+### Pipeline Execution
+
+```bash terminal
+./scripts/pipeline/full-pipeline.sh \
+  --phase frontend \
+  --env prod \
+  --config infra/environments/prod/terraform.tfvars \
+  --instructions AGENT-INSTRUCTIONS.md
+```
+
+### What Gets Created
+
+```hcl title="infra/modules/cloudfront/main.tf"
+resource "aws_cloudfront_distribution" "main" {
+  enabled             = true
+  is_ipv6_enabled     = true
+  default_root_object = "index.html"
+  price_class         = "PriceClass_100"
+  web_acl_id          = var.waf_web_acl_arn
+
+  aliases = [var.domain_name]
+
+  origin {
+    domain_name              = var.frontend_bucket_regional_domain
+    origin_access_control_id = aws_cloudfront_origin_access_control.s3.id
+    origin_id                = "s3-frontend"
+  }
+
+  origin {
+    domain_name = var.alb_dns_name
+    origin_id   = "alb-api"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  default_cache_behavior {
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "s3-frontend"
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+
+    forwarded_values {
+      query_string = false
+      cookies {
+        forward = "none"
+      }
+    }
+
+    min_ttl     = 0
+    default_ttl = 3600
+    max_ttl     = 86400
+  }
+
+  ordered_cache_behavior {
+    path_pattern           = "/api/*"
+    allowed_methods        = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "alb-api"
+    viewer_protocol_policy = "https-only"
+    compress               = true
+
+    forwarded_values {
+      query_string = true
+      headers      = ["Authorization", "Host", "Origin"]
+      cookies {
+        forward = "all"
+      }
+    }
+
+    min_ttl     = 0
+    default_ttl = 0
+    max_ttl     = 0
+  }
+
+  custom_error_response {
+    error_code         = 404
+    response_code      = 200
+    response_page_path = "/index.html"
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn      = var.certificate_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-cdn"
+  })
+}
+```
+
+The `/api/*` path routes to the ALB origin with no caching (TTL 0). Everything else serves from S3. The custom error response handles client-side routing for the React SPA.
+
+### Verify Output
+
+<TerminalOutput title="Pipeline Verify: Frontend Phase">
+
+```
+✓ terraform validate: passed
+✓ tflint: 0 issues
+✓ checkov: 12/12 checks passed
+  - CKV_AWS_174: CloudFront uses HTTPS: PASSED
+  - CKV_AWS_86: CloudFront access logging: PASSED
+  - CKV_AWS_310: CloudFront OAC for S3: PASSED
+  - CKV_AWS_68: WAF attached to CloudFront: PASSED
+✓ OPA policies: 3/3 passed
+  - cloudfront_tls_1_2: PASS
+  - cloudfront_waf_attached: PASS
+  - s3_oac_only: PASS
+✓ Infracost estimate: $7.50/month
+  - CloudFront (10GB transfer): $1.00
+  - WAF (1M requests): $6.00
+  - S3 storage: $0.50
+
+Frontend phase: READY TO APPLY
+```
+
+</TerminalOutput>
+
+:::warning
+CloudFront distribution creation takes 15-25 minutes. The pipeline waits for the distribution to reach "Deployed" status before marking the phase complete.
+:::
+
+---
+
+## Phase 5: DNS + SSL
+
+The final phase makes ShipMetrics publicly accessible.
+
+### Pipeline Execution
+
+```bash terminal
+./scripts/pipeline/full-pipeline.sh \
+  --phase dns \
+  --env prod \
+  --config infra/environments/prod/terraform.tfvars \
+  --instructions AGENT-INSTRUCTIONS.md
+```
+
+### What Gets Created
+
+```hcl title="infra/modules/dns/main.tf"
+resource "aws_route53_record" "app" {
+  zone_id = var.hosted_zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  alias {
+    name                   = var.cloudfront_domain_name
+    zone_id                = var.cloudfront_hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+resource "aws_route53_record" "api" {
+  zone_id = var.hosted_zone_id
+  name    = "api.${var.domain_name}"
+  type    = "A"
+
+  alias {
+    name                   = var.alb_dns_name
+    zone_id                = var.alb_hosted_zone_id
+    evaluate_target_health = true
+  }
+}
+
+resource "aws_route53_record" "ws" {
+  zone_id = var.hosted_zone_id
+  name    = "ws.${var.domain_name}"
+  type    = "A"
+
+  alias {
+    name                   = var.api_gateway_domain_name
+    zone_id                = var.api_gateway_hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+```
+
+Three DNS records:
+- `shipmetrics.example.com` points to CloudFront (frontend + API proxy)
+- `api.shipmetrics.example.com` points directly to ALB (for internal/webhook use)
+- `ws.shipmetrics.example.com` points to API Gateway (WebSocket connections)
+
+---
+
+## Smoke Tests
+
+After all five phases complete, the pipeline runs end-to-end smoke tests to verify the deployment.
+
+```bash title="scripts/smoke-tests.sh"
+#!/bin/bash
+set -euo pipefail
+
+DOMAIN="${1:?Usage: smoke-tests.sh <domain>}"
+
+echo "=== ShipMetrics Smoke Tests ==="
+
+# Test 1: Frontend loads
+echo -n "Frontend (${DOMAIN})... "
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${DOMAIN}")
+[ "$STATUS" -eq 200 ] && echo "PASS (${STATUS})" || echo "FAIL (${STATUS})"
+
+# Test 2: API health check
+echo -n "API health (/api/health)... "
+HEALTH=$(curl -s "https://${DOMAIN}/api/health" | jq -r '.status')
+[ "$HEALTH" = "healthy" ] && echo "PASS" || echo "FAIL (${HEALTH})"
+
+# Test 3: Database connectivity (via API)
+echo -n "Database connectivity... "
+DB=$(curl -s "https://${DOMAIN}/api/health" | jq -r '.dependencies.database')
+[ "$DB" = "connected" ] && echo "PASS" || echo "FAIL (${DB})"
+
+# Test 4: Redis connectivity (via API)
+echo -n "Redis connectivity... "
+REDIS=$(curl -s "https://${DOMAIN}/api/health" | jq -r '.dependencies.cache')
+[ "$REDIS" = "connected" ] && echo "PASS" || echo "FAIL (${REDIS})"
+
+# Test 5: WebSocket endpoint
+echo -n "WebSocket endpoint (ws.${DOMAIN})... "
+WS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://ws.${DOMAIN}")
+# WebSocket upgrade returns 101 or 426 without proper headers
+[ "$WS_STATUS" -eq 426 ] || [ "$WS_STATUS" -eq 101 ] && echo "PASS (${WS_STATUS})" || echo "FAIL (${WS_STATUS})"
+
+# Test 6: SSL certificate validity
+echo -n "SSL certificate... "
+EXPIRY=$(echo | openssl s_client -servername "${DOMAIN}" -connect "${DOMAIN}:443" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+echo "PASS (expires: ${EXPIRY})"
+
+echo ""
+echo "=== Smoke tests complete ==="
+```
+
+<TerminalOutput title="./scripts/smoke-tests.sh shipmetrics.example.com">
+
+```
+=== ShipMetrics Smoke Tests ===
+Frontend (shipmetrics.example.com)... PASS (200)
+API health (/api/health)... PASS
+Database connectivity... PASS
+Redis connectivity... PASS
+WebSocket endpoint (ws.shipmetrics.example.com)... PASS (426)
+SSL certificate... PASS (expires: Jan 01 00:00:00 2027 GMT)
+
+=== Smoke tests complete ===
+```
+
+</TerminalOutput>
+
+Six passing smoke tests. The application is live.
+
+---
+
+## Full Cost Summary
+
+Here is what ShipMetrics costs in production:
+
+| Phase | Resources | Monthly Cost |
+|-------|-----------|-------------|
+| Network | VPC, NAT Gateways (2), VPC endpoints | $67.14 |
+| Data | RDS db.t4g.medium (Multi-AZ), ElastiCache (2 nodes), S3, KMS | $124.58 |
+| Compute | ECS Fargate (2 tasks), Lambda, ALB, SQS, API Gateway, DynamoDB | $52.34 |
+| Frontend | CloudFront, WAF, S3 | $7.50 |
+| DNS | Route 53 hosted zone + records | $0.50 |
+| **Total** | | **$252.06** |
+
+$252/month for a production-grade multi-tenant SaaS application with high availability, encryption at rest and in transit, automated backups, auto-scaling, CDN, WAF protection, and full observability. That is less than the monthly salary of a single junior engineer for one day.
+
+For comparison, the same architecture in dev/staging:
+
+| Optimization | Savings |
+|-------------|---------|
+| Single NAT Gateway | -$32.40 |
+| RDS single-AZ, t4g.micro | -$82.94 |
+| ElastiCache single node | -$9.03 |
+| ECS single task | -$14.76 |
+| **Dev total** | **~$113/month** |
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate production-grade resources for every environment because they optimize for "correctness" not cost. Your dev environment gets Multi-AZ RDS, two NAT Gateways, and two ECS tasks, doubling the cost for an environment that one developer uses. The pipeline's Infracost step catches this, but only if your environment-specific `.tfvars` files include the right variable overrides for dev vs. prod.
+
+**What catches it:** `infra/environments/dev/terraform.tfvars` should set `multi_az = false`, `nat_gateway_count = 1`, `ecs_min_count = 1`, and `rds_instance_class = "db.t4g.micro"`. The pipeline validates that dev configs differ from prod configs on cost-sensitive variables.
+
+</Alert>
+
+---
+
+## The Pipeline Delivered
+
+Let's take stock of what just happened. You ran five commands. The pipeline:
+
+1. **Generated** Terraform for 10+ modules covering 40+ AWS resources
+2. **Verified** every module against terraform validate, tflint, checkov, and OPA policies
+3. **Estimated** costs for each phase and the full stack
+4. **Explained** each phase's changes in a human-readable summary
+5. **Applied** changes only after your approval
+6. **Tested** the full deployment with end-to-end smoke tests
+
+The total active review time was about 45 minutes, reading explain summaries and approving applies. The pipeline handled the rest. This is what 62 parts of pipeline building produce: not faster typing, but confident deployment.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Manual deployment, one `terraform apply` at a time, with no verification between modules. You deploy the VPC, then the ECS service, then realize the security group references a subnet that does not exist because you forgot the data subnet module. Debugging takes longer than deploying. |
+| ✅ **Right** | Pipeline-driven phased deployment. Each phase generates, verifies, explains, and applies independently. Cost estimates reviewed before apply. Smoke tests validate the full stack. Total deployment takes 2-3 hours, but your confidence in the result is high. |
+| ❌ **Over** | Blue-green full-stack deployment for your first deploy. Canary analysis on a service with zero traffic. Automated rollback triggers on an application that nobody is using yet. These are production-day-100 concerns, not production-day-1 concerns. |
+| 🤖 **Agent Trap** | Agent generates a single `main.tf` with all 40+ resources in one file, one module, one apply. The pipeline cannot phase the deployment because there are no module boundaries. The explain summary is 500 lines long and unreadable. The agent's reasoning: "fewer files means simpler." The reality: monolithic Terraform is the infrastructure equivalent of a 5,000-line function. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 69: Capstone Operations, Running What You Built**, you set up the operational layer for ShipMetrics. Agent-generated runbooks for common incidents, multi-agent debugging workflows using the observability MCP server, continuous model evaluation, and the full 29-panel Scorecard monitoring your application and your agent workflow simultaneously. Deploying the application was the milestone. Operating it is the ongoing practice.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Network Phase",
+    tasks: [
+      { text: "VPC created with public, private, and data subnets in 2 AZs", syncKey: "part-68-vpc" },
+      { text: "NAT Gateways provisioned (2 for prod, 1 for dev)", syncKey: "part-68-nat" },
+      { text: "Security groups enforce least-privilege ingress", syncKey: "part-68-sg" },
+      { text: "VPC endpoints for S3 and DynamoDB created", syncKey: "part-68-endpoints" }
+    ]
+  },
+  {
+    category: "Data Phase",
+    tasks: [
+      { text: "RDS PostgreSQL running in data subnets with encryption", syncKey: "part-68-rds" },
+      { text: "ElastiCache Redis running with transit encryption", syncKey: "part-68-redis" },
+      { text: "S3 buckets created with versioning and no public access", syncKey: "part-68-s3" }
+    ]
+  },
+  {
+    category: "Compute Phase",
+    tasks: [
+      { text: "ECS Fargate API service running with ALB health checks", syncKey: "part-68-ecs" },
+      { text: "Lambda workers connected to SQS with DLQ", syncKey: "part-68-lambda" },
+      { text: "WebSocket API Gateway operational", syncKey: "part-68-ws" },
+      { text: "EventBridge cron rules configured", syncKey: "part-68-cron" }
+    ]
+  },
+  {
+    category: "Frontend + DNS",
+    tasks: [
+      { text: "CloudFront distribution deployed with WAF", syncKey: "part-68-cdn" },
+      { text: "Route 53 records pointing to correct targets", syncKey: "part-68-dns" },
+      { text: "SSL certificate valid and attached", syncKey: "part-68-ssl" }
+    ]
+  },
+  {
+    category: "Deployment Verification",
+    tasks: [
+      { text: "All 6 smoke tests passing", syncKey: "part-68-smoke" },
+      { text: "Pipeline verify passed with 0 findings across all phases", syncKey: "part-68-verify" },
+      { text: "Full stack cost estimate reviewed and under budget", syncKey: "part-68-cost" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. The pipeline that took 62 parts to build now deploys an entire SaaS application across 40+ resources in 5 phases. That is the payoff for investing in tooling before you need it.
+2. Phased deployment (network, data, compute, frontend, DNS) prevents dependency cascades and makes each phase's explain summary small enough to actually read.
+3. The explain summary at each phase boundary is your deployment briefing. Reading it takes 5 minutes. Debugging a failed deployment without it takes 5 hours.
+4. Cost estimation before apply is not optional. ShipMetrics production costs $252/month. Without Infracost checks, an agent would have generated a $500+/month architecture with Multi-AZ everything in every environment.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
