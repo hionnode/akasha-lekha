@@ -1,0 +1,884 @@
+---
+title: "Pre-Commit Hooks & Code Quality: Your Agents' First Guardrail"
+description: "Set up pre-commit hooks that catch agent mistakes automatically. Linting, secrets detection, Terraform validation, and your Scorecard's first live data."
+excerpt: "Your agents' first guardrail, and your Scorecard's first data source. Pre-commit hooks that catch what human review misses, especially from AI-generated code."
+date: "2026-02-04"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ci-cd", "terraform"]
+series: "AWS From Zero to Production"
+seriesPart: 8
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import Command from '../../../components/blog/code/Command.astro';
+
+Your agent generates a Terraform module for an S3 bucket. Looks clean. Proper naming, tags, encryption enabled. You commit it, push, and move on to the next task.
+
+The next morning, your Slack lights up: gitleaks detected an AWS access key pattern in the committed code. The agent embedded `AKIAIOSFODNN7EXAMPLE` as a placeholder in a comment block, pulled straight from its training data. That string matches the AWS key format. It is in your git history forever.
+
+You spend the afternoon rotating credentials (just in case), scrubbing git history with `git filter-repo`, and force-pushing to every branch. Pre-commit hooks would have caught this in 3 seconds, before it ever touched a commit.
+
+**Time:** About 40 minutes.
+
+**Outcome:** Pre-commit hooks that catch IAM wildcards, leaked secrets, wrong Docker tags, and missing tags. Results flow to your Agent Scorecard (2 panels live after this part). Plus 4 new lines in your AGENT-INSTRUCTIONS.md.
+
+---
+
+## Why This Matters
+
+In [Part 6](/blog/aws-for-startups/06-git-github-agents), you established git conventions: conventional commits, agent attribution, branch naming. In [Part 7](/blog/aws-for-startups/07-branch-protection-pr), you added enforcement: branch protection, required reviews, CODEOWNERS. Those are excellent guardrails for the review and merge phase. But they have a gap: they only catch problems after you push.
+
+Pre-commit hooks close that gap. They run before the commit is created, which means bad code never enters your git history. This matters more than it sounds. Once a secret hits a commit, it is in the SHA chain. Even if you amend or rebase, the original commit object exists in reflog, in clones, and potentially in CI caches. Prevention is orders of magnitude cheaper than remediation.
+
+Think of pre-commit hooks as **the first automated verifier** in your workflow. In the DGVE pipeline (Design, Generate, Verify, Explain), you have been doing the Verify step manually: reading agent output, checking IAM policies, eyeballing resource configs. Pre-commit hooks automate the mechanical parts of verification. They are "Agent 2 in automated form," a tireless reviewer that checks every commit against a fixed set of rules, at any hour, with zero fatigue.
+
+The critical difference between pre-commit and CI is timing. CI runs after you push. Pre-commit runs before you commit. That timing difference changes the economics of fixing mistakes. A CI failure means the bad code is already in a branch, visible to collaborators, potentially triggering downstream builds. A pre-commit failure means the bad code never existed outside your working directory. You fix it, re-stage, and commit. Nobody else knows it happened.
+
+Three categories of problems that hooks catch better than humans:
+
+1. **Secrets in code.** Agents pull credential patterns from training data and embed them as "examples." Humans skim past comments. gitleaks does not skim. A human reviewer will miss an AWS key buried on line 247 of a Terraform module eventually. gitleaks pattern-matches every line of every staged file, every time.
+2. **Terraform misconfigurations.** An agent generates a security group with `0.0.0.0/0` ingress on all ports. A human reviewer catches it on a good day, after their morning coffee, when they are reading carefully. On a bad day, it ships. tflint and checkov catch it at midnight on a Friday.
+3. **Convention violations.** Missing tags, `:latest` Docker tags, hardcoded regions. These are easy to miss in a 200-line diff. They are the kind of issue a reviewer flags on the third PR but waves through on the fifteenth. A 10-line shell script catches them every time, on every commit, without developing review fatigue.
+
+---
+
+## What We're Building
+
+- The pre-commit framework installed and configured in your repository
+- Language-specific linting: Biome (JS/TS), Ruff (Python), golangci-lint (Go)
+- Secrets detection with gitleaks (catches agent-embedded credentials)
+- Terraform validation with tflint and checkov (catches IAM wildcards, missing encryption)
+- Custom agent-specific hooks (wildcard IAM, missing tags, `:latest` Docker tags, hardcoded regions)
+- Scorecard integration: hook results logged to Loki, 2 Grafana panels live
+- AGENT-INSTRUCTIONS.md Code Quality section (4 new lines, cumulative: 25)
+
+---
+
+## Pre-commit Framework Setup
+
+The [pre-commit](https://pre-commit.com) framework manages git hooks as versioned, shareable configuration. Instead of writing raw shell scripts in `.git/hooks/` (which are not tracked in git and differ per machine), you define hooks in a YAML file that is committed to the repository.
+
+Install pre-commit:
+
+```bash terminal
+pip install pre-commit
+```
+
+Or with Homebrew on macOS:
+
+```bash terminal
+brew install pre-commit
+```
+
+Verify the installation:
+
+<Command cmd="pre-commit --version" description="Confirm pre-commit is installed" />
+
+Now create the configuration file at the root of your repository:
+
+```yaml title=".pre-commit-config.yaml"
+# Pre-commit hooks for agent-assisted infrastructure development
+# See https://pre-commit.com for more information
+repos:
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ['--unsafe']  # Allow custom YAML tags (CloudFormation, etc.)
+      - id: check-json
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: no-commit-to-branch
+        args: ['--branch', 'main']
+
+  # Secrets detection
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # Terraform
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.96.1
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+      - id: terraform_tflint
+        args:
+          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+      - id: terraform_checkov
+        args:
+          - --args=--quiet
+          - --args=--compact-json
+```
+
+Install the hooks into your local `.git/hooks/` directory:
+
+<Command cmd="pre-commit install" description="Register pre-commit hooks with git" />
+
+From now on, every `git commit` runs these hooks automatically. No opt-in required. No configuration per developer machine beyond the initial `pre-commit install`.
+
+Here is where the hook configuration lives in your project:
+
+<FileTree>
+your-project/
+  .pre-commit-config.yaml
+  .gitleaks.toml
+  .tflint.hcl
+  scripts/
+    hooks/
+      check-iam-wildcards.sh
+      check-required-tags.sh
+      check-docker-latest.sh
+      check-hardcoded-regions.sh
+      log-hook-results.sh
+  terraform/
+    modules/
+    environments/
+</FileTree>
+
+:::tip
+Run `pre-commit run --all-files` after initial setup to validate every existing file in your repository. This catches issues that were committed before hooks were in place. Expect failures on your first run. Fix them now rather than discovering them during a real commit.
+:::
+
+---
+
+## Language-Specific Linting
+
+Your infrastructure repository is not just Terraform. You have shell scripts, possibly a small API, helper utilities, and CI workflow files. Each language needs its own linter, and the linter needs to run before commit, not in CI where it is too late to prevent bad code from entering history.
+
+Add language-specific hooks to your `.pre-commit-config.yaml`:
+
+:::code-switcher
+```yaml title=".pre-commit-config.yaml (JavaScript/TypeScript, Biome)"
+  # JavaScript/TypeScript linting with Biome
+  - repo: https://github.com/biomejs/pre-commit
+    rev: v0.5.0
+    hooks:
+      - id: biome-check
+        additional_dependencies: ["@biomejs/biome@1.9.4"]
+        args: ['--write']
+```
+
+```yaml title=".pre-commit-config.yaml (Python, Ruff)"
+  # Python linting with Ruff
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff
+        args: ['--fix']
+      - id: ruff-format
+```
+
+```yaml title=".pre-commit-config.yaml (Go, golangci-lint)"
+  # Go linting with golangci-lint
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v1.62.2
+    hooks:
+      - id: golangci-lint
+```
+:::
+
+Add whichever languages your project uses. If you are following this series with a JavaScript/TypeScript stack, Biome is the right choice: it is a single tool that handles linting and formatting, it is fast (written in Rust), and it produces zero-configuration useful output.
+
+The key principle: linting runs locally before commit, not as a CI gate after push. CI is backup. Pre-commit is primary.
+
+---
+
+## Secrets Detection with gitleaks
+
+This is the most important hook in your entire configuration. Not because secrets leaks are the most common mistake, but because they are the most expensive to fix.
+
+**Why agents leak secrets:** Large language models are trained on public code. That public code is full of example credentials, API keys with real-looking formats, and configuration files with placeholder secrets that match real patterns. When an agent generates code, it draws on these patterns. It does not know that `AKIAIOSFODNN7EXAMPLE` is a well-known example key. It sees a string that fits the pattern for an AWS access key and uses it as a placeholder. The agent is not being malicious. It is being statistically consistent with its training data.
+
+gitleaks scans staged files for patterns that match known secret formats: AWS keys, GitHub tokens, Stripe keys, private keys, and hundreds of other patterns.
+
+Create a gitleaks configuration to customize behavior for your project:
+
+```toml title=".gitleaks.toml"
+[extend]
+# Use the default gitleaks rules as a base
+useDefault = true
+
+[allowlist]
+description = "Project-specific allowlist"
+
+# Allow example files that intentionally contain placeholder patterns
+paths = [
+  '''docs/examples/.*''',
+  '''\.env\.example''',
+]
+
+# Allow specific test strings that look like secrets but are not
+regexes = [
+  '''EXAMPLE_KEY_FOR_TESTING''',
+]
+
+# Custom rules for AWS-specific patterns agents commonly embed
+[[rules]]
+id = "aws-account-id-in-code"
+description = "Hardcoded AWS account ID"
+regex = '''\b\d{12}\b'''
+entropy = 0
+tags = ["aws", "account-id"]
+paths = [
+  '''\.tf$''',
+  '''\.py$''',
+  '''\.ts$''',
+  '''\.js$''',
+]
+
+[rules.allowlist]
+regexes = [
+  '''000000000000''',  # Common placeholder
+  '''123456789012''',  # AWS documentation example
+]
+```
+
+Here is what it looks like when gitleaks catches an agent-embedded secret:
+
+<TerminalOutput title="gitleaks pre-commit output">
+
+```
+Finding:     AKIAIOSFODNN7EXAMPLE
+Secret:      AKIAIOSFODNN7EXAMPLE
+RuleID:      aws-access-key-id
+Entropy:     3.52
+File:        terraform/modules/s3/main.tf
+Line:        14
+Commit:      (staged)
+Author:      (you)
+Date:        2026-02-04
+
+Finding:     wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+Secret:      wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+RuleID:      aws-secret-access-key
+Entropy:     4.71
+File:        terraform/modules/s3/main.tf
+Line:        15
+Commit:      (staged)
+Author:      (you)
+Date:        2026-02-04
+
+2 finding(s) detected. Commit blocked.
+```
+
+</TerminalOutput>
+
+The commit is blocked. The secrets never enter git history. You fix the file, re-stage, and commit again. Total time lost: 30 seconds. Compare that to the alternative: secret in history, credential rotation, `git filter-repo`, force push, notify every collaborator to re-clone. GitHub also indexes repository content for search. Even if you scrub git history, the secret may persist in GitHub's search cache for hours. AWS GuardDuty scans public repositories for exposed keys and will flag yours, which means you get a security finding on your AWS account alongside the cleanup overhead.
+
+The math is simple. gitleaks adds 1-3 seconds to every commit. A single leaked secret costs 2-4 hours of remediation, plus the risk window between push and discovery. Even if gitleaks only catches one secret per year, the time savings justify the 3-second overhead on every commit you will ever make.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents will sometimes generate `.gitleaks.toml` allowlist entries that are too broad. An agent asked to "fix the gitleaks error" will add a regex allowlist that matches the entire AWS key pattern, effectively disabling the check. Always review allowlist changes manually. An allowlist entry should be as narrow as possible: a specific string, a specific file, never a broad regex that matches all keys.
+
+**What catches it:** Code review on `.gitleaks.toml` changes. Add `.gitleaks.toml` to your CODEOWNERS file from [Part 7](/blog/aws-for-startups/07-branch-protection-pr) so modifications require your explicit approval.
+
+</Alert>
+
+---
+
+## Terraform Validation
+
+gitleaks catches secrets. Now you need hooks that catch Terraform-specific problems: syntax errors, provider misconfigurations, and security issues. Two tools handle this: tflint for linting and provider-specific validation, and checkov for security policy checks. Together, they cover a wide surface area that manual review struggles to match consistently.
+
+### tflint
+
+tflint is a pluggable linter for Terraform. It catches errors that `terraform validate` misses: deprecated syntax, invalid instance types, missing required attributes for specific providers. Where `terraform validate` only checks whether your HCL is syntactically correct, tflint checks whether the values you provided are actually valid in AWS. An instance type of `t3.gigantic` passes `terraform validate` (valid HCL syntax) but fails tflint (not a real instance type).
+
+Create a tflint configuration:
+
+```hcl title=".tflint.hcl"
+config {
+  # Enable module inspection
+  module = true
+}
+
+plugin "terraform" {
+  enabled = true
+  preset  = "recommended"
+}
+
+plugin "aws" {
+  enabled = true
+  version = "0.33.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-aws"
+}
+
+# Require all resources to have specific tags
+rule "terraform_naming_convention" {
+  enabled = true
+  format  = "snake_case"
+}
+
+rule "terraform_documented_variables" {
+  enabled = true
+}
+
+rule "terraform_documented_outputs" {
+  enabled = true
+}
+```
+
+Install the tflint AWS plugin:
+
+<Command cmd="tflint --init" description="Install tflint plugins defined in .tflint.hcl" />
+
+### checkov
+
+checkov is a static analysis tool for infrastructure-as-code. It checks Terraform files against hundreds of security policies: encrypted volumes, private S3 buckets, least-privilege IAM, and more. This is where you catch IAM wildcards.
+
+checkov does not need a separate config file for basic use. The pre-commit hook configuration you already added handles it. But you can skip specific checks if they do not apply to your setup:
+
+```yaml title=".checkov.yml"
+compact: true
+quiet: true
+framework:
+  - terraform
+skip-check:
+  - CKV_AWS_144  # S3 cross-region replication (overkill for single-region startup)
+  - CKV_AWS_145  # S3 default encryption with KMS (SSE-S3 is fine for now)
+```
+
+Here is what it looks like when checkov catches an IAM wildcard that your agent generated:
+
+<TerminalOutput title="checkov pre-commit output">
+
+```
+terraform scan results:
+
+Passed checks: 14, Failed checks: 2, Skipped checks: 2
+
+Check: CKV_AWS_1: "Ensure IAM policies that allow full '*' administrative privileges are not created"
+	FAILED for resource: aws_iam_policy.agent_deploy
+	File: /terraform/modules/iam/main.tf:23-35
+
+		23 | resource "aws_iam_policy" "agent_deploy" {
+		24 |   name        = "agent-deploy-policy"
+		25 |   description = "Policy for deployment agent"
+		26 |
+		27 |   policy = jsonencode({
+		28 |     Version = "2012-10-17"
+		29 |     Statement = [
+		30 |       {
+		31 |         Effect   = "Allow"
+		32 |         Action   = "*"
+		33 |         Resource = "*"
+		34 |       }
+		35 |     ]
+		36 |   })
+		37 | }
+
+Check: CKV_AWS_290: "Ensure IAM policies does not allow write access without constraints"
+	FAILED for resource: aws_iam_policy.agent_deploy
+	File: /terraform/modules/iam/main.tf:23-35
+```
+
+</TerminalOutput>
+
+That `Action = "*"` on line 32 is the most common agent-generated IAM mistake. The agent's goal is working code. The fastest path to working code is full permissions. The agent does not experience the consequences of broad IAM policies. It does not get paged when someone exploits an overly permissive role. It optimizes for "the code runs without permission errors," which is a perfectly rational goal if you ignore security entirely.
+
+checkov stops this before it enters your commit history, and more importantly, before it ever reaches `terraform apply`. Without checkov, this policy would land in your PR, and a human reviewer would need to catch it during code review. With checkov, the commit is rejected instantly, and the error message tells the agent (or you) exactly what to fix.
+
+:::note
+**Coming in Part 27:** Your CI pipeline will run these same checks as required status checks. Pre-commit catches issues locally. CI catches issues if someone skips pre-commit (with `--no-verify`) or commits from a machine without hooks installed.
+:::
+
+---
+
+## Agent-Specific Hooks (Custom)
+
+The standard hooks cover general code quality and known security patterns. But agents have failure modes specific to infrastructure development that no off-the-shelf tool catches. These are patterns you learn from working with agents daily: the `:latest` tag that creeps into every Dockerfile, the hardcoded region that appears because the agent forgot your AGENT-INSTRUCTIONS.md by the end of a long session, the missing tags that vanish when context gets crowded.
+
+Custom hooks are simple shell scripts. They are not sophisticated. They do not need to be. A 15-line bash script that greps for `Action = "*"` catches the same IAM wildcard that a commercial security scanner catches, but it runs in 200 milliseconds and costs nothing.
+
+### Wildcard IAM Detection
+
+This hook scans Terraform files for `Action = "*"` and `Resource = "*"` patterns. Yes, checkov already catches this. The custom hook exists as defense-in-depth, and it produces a clearer error message that references your AGENT-INSTRUCTIONS.md directly. When you pipe hook output back into agent context, the agent sees the rule it violated and can self-correct.
+
+```bash title="scripts/hooks/check-iam-wildcards.sh"
+#!/usr/bin/env bash
+# Detect wildcard IAM actions and resources in Terraform files
+# Exits non-zero if wildcards found
+
+set -euo pipefail
+
+ERRORS=0
+
+for file in $(git diff --cached --name-only --diff-filter=ACM | grep '\.tf$'); do
+  # Check for Action = "*" or Action = ["*"]
+  if grep -nE '(Action\s*=\s*"\*"|Action\s*=\s*\["\*"\])' "$file" 2>/dev/null; then
+    echo "ERROR: Wildcard IAM Action found in $file"
+    ERRORS=$((ERRORS + 1))
+  fi
+
+  # Check for Resource = "*" or Resource = ["*"]
+  if grep -nE '(Resource\s*=\s*"\*"|Resource\s*=\s*\["\*"\])' "$file" 2>/dev/null; then
+    echo "ERROR: Wildcard IAM Resource found in $file"
+    ERRORS=$((ERRORS + 1))
+  fi
+done
+
+if [ "$ERRORS" -gt 0 ]; then
+  echo ""
+  echo "Found $ERRORS wildcard IAM issue(s)."
+  echo "AGENT-INSTRUCTIONS.md rule: NEVER use wildcard (*) IAM actions or resources."
+  echo "Use specific actions (s3:GetObject, s3:PutObject) and specific resource ARNs."
+  exit 1
+fi
+```
+
+### Missing Required Tags
+
+Your AGENT-INSTRUCTIONS.md from [Part 4](/blog/aws-for-startups/04-terraform-fundamentals) requires four tags on every resource: `Environment`, `Project`, `Owner`, `ManagedBy`. Agents forget tags when context gets long. This hook catches it.
+
+```bash title="scripts/hooks/check-required-tags.sh"
+#!/usr/bin/env bash
+# Verify all Terraform resources have required tags
+# Required: Environment, Project, Owner, ManagedBy
+
+set -euo pipefail
+
+REQUIRED_TAGS=("Environment" "Project" "Owner" "ManagedBy")
+ERRORS=0
+
+for file in $(git diff --cached --name-only --diff-filter=ACM | grep '\.tf$'); do
+  # Find resource blocks that support tags
+  if grep -q 'resource "aws_' "$file" 2>/dev/null; then
+    for tag in "${REQUIRED_TAGS[@]}"; do
+      # Check if the tag exists anywhere in the file
+      # (simplified check, a full AST parser would be better but this catches 90%)
+      if ! grep -q "\"$tag\"" "$file" 2>/dev/null; then
+        # Only flag if the file has resource blocks but no tag reference
+        resource_count=$(grep -c 'resource "aws_' "$file" 2>/dev/null || true)
+        if [ "$resource_count" -gt 0 ]; then
+          echo "WARNING: $file has $resource_count AWS resource(s) but may be missing tag: $tag"
+          ERRORS=$((ERRORS + 1))
+        fi
+      fi
+    done
+  fi
+done
+
+if [ "$ERRORS" -gt 0 ]; then
+  echo ""
+  echo "Found $ERRORS potential missing tag(s)."
+  echo "Required tags: Environment, Project, Owner, ManagedBy=terraform"
+  echo "If tags are inherited via a module variable, this may be a false positive."
+  echo "Review the flagged files and confirm tags are present."
+  exit 1
+fi
+```
+
+### Docker `:latest` Tag Detection
+
+Agents default to `:latest` because it requires the least thought. In production, `:latest` is a moving target that breaks reproducibility. Pinned tags are the only acceptable option.
+
+```bash title="scripts/hooks/check-docker-latest.sh"
+#!/usr/bin/env bash
+# Detect :latest Docker tags in Dockerfiles and compose files
+
+set -euo pipefail
+
+ERRORS=0
+
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+  case "$file" in
+    Dockerfile*|*.dockerfile|docker-compose*.yml|docker-compose*.yaml|compose*.yml|compose*.yaml)
+      if grep -nE '(FROM .+:latest|image:.+:latest)' "$file" 2>/dev/null; then
+        echo "ERROR: :latest Docker tag found in $file"
+        echo "  Pin to a specific version (e.g., node:20.11-slim, python:3.12-slim)"
+        ERRORS=$((ERRORS + 1))
+      fi
+      ;;
+    *.tf)
+      if grep -nE 'image\s*=.*:latest' "$file" 2>/dev/null; then
+        echo "ERROR: :latest Docker tag found in Terraform file $file"
+        ERRORS=$((ERRORS + 1))
+      fi
+      ;;
+  esac
+done
+
+if [ "$ERRORS" -gt 0 ]; then
+  echo ""
+  echo "Found $ERRORS :latest Docker tag(s). Pin all images to specific versions."
+  exit 1
+fi
+```
+
+### Hardcoded Region Detection
+
+Your AGENT-INSTRUCTIONS.md says "NEVER hardcode account IDs or regions." Agents do it anyway when context drops their instructions. This hook catches hardcoded `us-east-1`, `ap-south-1`, or any AWS region string that is not inside a variable reference.
+
+```bash title="scripts/hooks/check-hardcoded-regions.sh"
+#!/usr/bin/env bash
+# Detect hardcoded AWS regions in Terraform files
+# Regions should come from variables, not string literals
+
+set -euo pipefail
+
+ERRORS=0
+# Match quoted AWS region patterns like "us-east-1", "ap-south-1", etc.
+REGION_PATTERN='"(us|eu|ap|sa|ca|me|af)-(north|south|east|west|central|northeast|southeast)-[0-9]"'
+
+for file in $(git diff --cached --name-only --diff-filter=ACM | grep '\.tf$'); do
+  # Skip variable definition files (regions are legitimately defined as defaults there)
+  if [[ "$file" == *"variables.tf" ]] || [[ "$file" == *"terraform.tfvars" ]]; then
+    continue
+  fi
+
+  matches=$(grep -nE "$REGION_PATTERN" "$file" 2>/dev/null || true)
+  if [ -n "$matches" ]; then
+    echo "WARNING: Possible hardcoded AWS region in $file:"
+    echo "$matches"
+    ERRORS=$((ERRORS + 1))
+  fi
+done
+
+if [ "$ERRORS" -gt 0 ]; then
+  echo ""
+  echo "Found $ERRORS file(s) with possible hardcoded regions."
+  echo "Use var.region or data sources instead of hardcoded region strings."
+  echo "If this is in a provider block with a variable, this is a false positive."
+  exit 1
+fi
+```
+
+### Registering Custom Hooks
+
+Add your custom hooks to `.pre-commit-config.yaml`:
+
+```yaml title=".pre-commit-config.yaml (local hooks section)"
+  # Custom agent-specific hooks
+  - repo: local
+    hooks:
+      - id: check-iam-wildcards
+        name: Check for IAM wildcard permissions
+        entry: scripts/hooks/check-iam-wildcards.sh
+        language: script
+        files: '\.tf$'
+        pass_filenames: false
+
+      - id: check-required-tags
+        name: Check for required resource tags
+        entry: scripts/hooks/check-required-tags.sh
+        language: script
+        files: '\.tf$'
+        pass_filenames: false
+
+      - id: check-docker-latest
+        name: Check for :latest Docker tags
+        entry: scripts/hooks/check-docker-latest.sh
+        language: script
+        types_or: [dockerfile, yaml, file]
+        pass_filenames: false
+
+      - id: check-hardcoded-regions
+        name: Check for hardcoded AWS regions
+        entry: scripts/hooks/check-hardcoded-regions.sh
+        language: script
+        files: '\.tf$'
+        pass_filenames: false
+```
+
+Make the hook scripts executable:
+
+```bash terminal
+chmod +x scripts/hooks/*.sh
+```
+
+Run all hooks against your existing files to verify they work:
+
+<Command cmd="pre-commit run --all-files" description="Run all hooks against every file in the repository" />
+
+---
+
+## Scorecard Integration
+
+In [Part 5](/blog/aws-for-startups/05-opentelemetry-setup), you set up Grafana and Loki. The dashboard shell is empty. It has been waiting for data. Pre-commit hooks generate that data. This is where "trust is a number, not a feeling" starts to become real.
+
+The idea is simple: every time pre-commit runs, log the results to Loki. Pass or fail, which hooks triggered, what category of violation, and whether the commit had an agent `Co-Authored-By` trailer (from the attribution system you set up in [Part 6](/blog/aws-for-startups/06-git-github-agents)). Over time, this data answers the question you cannot answer with intuition alone: are agents getting better or worse at following the rules? Is Claude producing fewer IAM wildcards than it did a month ago? Is your custom hook for missing tags catching fewer violations as the agent learns from repeated corrections?
+
+Without data, you are guessing. With data, you are making decisions. That is the difference between hoping your agents are improving and knowing they are.
+
+Create a logging wrapper that runs after pre-commit:
+
+```bash title="scripts/hooks/log-hook-results.sh"
+#!/usr/bin/env bash
+# Log pre-commit results to Loki for Scorecard integration
+# Called as a post-hook wrapper
+
+set -euo pipefail
+
+LOKI_URL="${LOKI_URL:-http://localhost:3100}"
+TIMESTAMP=$(date -u +%s%N)
+
+# Determine if this is an agent commit by checking for Co-Authored-By
+IS_AGENT="false"
+COMMIT_MSG_FILE=".git/COMMIT_EDITMSG"
+if [ -f "$COMMIT_MSG_FILE" ]; then
+  if grep -qi "co-authored-by.*\(claude\|copilot\|cursor\|gpt\|anthropic\)" "$COMMIT_MSG_FILE" 2>/dev/null; then
+    IS_AGENT="true"
+  fi
+fi
+
+# Run pre-commit and capture result
+PRE_COMMIT_OUTPUT=$(pre-commit run --all-files 2>&1) || true
+PRE_COMMIT_EXIT=$?
+
+# Parse which hooks failed
+FAILED_HOOKS=""
+if [ "$PRE_COMMIT_EXIT" -ne 0 ]; then
+  FAILED_HOOKS=$(echo "$PRE_COMMIT_OUTPUT" | grep -E "^(Failed|hookid:)" | head -20)
+fi
+
+# Determine violation categories
+CATEGORIES=""
+echo "$PRE_COMMIT_OUTPUT" | grep -q "gitleaks" && CATEGORIES="${CATEGORIES},secrets"
+echo "$PRE_COMMIT_OUTPUT" | grep -q "iam-wildcards\|CKV_AWS_1" && CATEGORIES="${CATEGORIES},iam-wildcards"
+echo "$PRE_COMMIT_OUTPUT" | grep -q "required-tags" && CATEGORIES="${CATEGORIES},missing-tags"
+echo "$PRE_COMMIT_OUTPUT" | grep -q "docker-latest" && CATEGORIES="${CATEGORIES},docker-latest"
+echo "$PRE_COMMIT_OUTPUT" | grep -q "terraform_fmt\|terraform_validate" && CATEGORIES="${CATEGORIES},terraform-syntax"
+echo "$PRE_COMMIT_OUTPUT" | grep -q "checkov" && CATEGORIES="${CATEGORIES},security-scan"
+# Trim leading comma
+CATEGORIES="${CATEGORIES#,}"
+
+# Build Loki log entry
+STATUS="pass"
+[ "$PRE_COMMIT_EXIT" -ne 0 ] && STATUS="fail"
+
+# Push to Loki
+curl -s -X POST "${LOKI_URL}/loki/api/v1/push" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"streams\": [{
+      \"stream\": {
+        \"job\": \"pre-commit\",
+        \"source\": \"git-hooks\",
+        \"is_agent\": \"${IS_AGENT}\",
+        \"status\": \"${STATUS}\"
+      },
+      \"values\": [
+        [\"${TIMESTAMP}\", \"status=${STATUS} agent=${IS_AGENT} categories=${CATEGORIES:-none} hooks=${FAILED_HOOKS:-all-passed}\"]
+      ]
+    }]
+  }" 2>/dev/null || true  # Don't fail the commit if Loki is unreachable
+```
+
+Make it executable:
+
+```bash terminal
+chmod +x scripts/hooks/log-hook-results.sh
+```
+
+:::tip
+The `|| true` at the end of the curl command is intentional. If Loki is down, you still want the commit to proceed (or fail based on actual hook results, not logging infrastructure). Scorecard data is valuable but not blocking.
+:::
+
+### Grafana Dashboard Panels
+
+Your Agent Scorecard gets its first 2 panels. Open Grafana and add these to the dashboard you created in [Part 5](/blog/aws-for-startups/05-opentelemetry-setup).
+
+**Panel 1: Pre-commit Pass/Fail Rate (Agent vs Human)**
+
+This panel shows a stacked bar chart over time, with agent commits and human commits separated by color and their pass/fail rates.
+
+Loki query for Panel 1:
+
+```text title="Grafana Panel 1: Loki Query"
+sum by (is_agent, status) (
+  count_over_time(
+    {job="pre-commit"} | logfmt | status != ""
+    [$__interval]
+  )
+)
+```
+
+Set the visualization to "Bar chart" with grouping by `is_agent` and `status`. Use green for pass, red for fail. This panel tells you at a glance whether agent commits fail pre-commit more often than human commits. (Spoiler: they will, especially early on.)
+
+**Panel 2: Top Blocked Violations by Category**
+
+This panel shows a horizontal bar chart of violation categories, sorted by count. It answers the question: what types of mistakes are hooks catching most often?
+
+Loki query for Panel 2:
+
+```text title="Grafana Panel 2: Loki Query"
+sum by (categories) (
+  count_over_time(
+    {job="pre-commit", status="fail"} | logfmt | categories != "none"
+    [$__interval]
+  )
+)
+```
+
+Set the visualization to "Bar chart (horizontal)" sorted descending. The most common violation categories will surface immediately. If `iam-wildcards` is at the top week after week, you know your agents need better IAM prompting (addressed in Part 9).
+
+<Alert type="important" title="Scorecard State After Part 8">
+
+Your Agent Scorecard now has 2 live panels:
+
+1. **Pre-commit pass/fail rate** (agent commits vs human commits)
+2. **Top blocked violations by category**
+
+Data source: Loki, fed by `log-hook-results.sh`. 27 more panels will be added across the remaining parts of this series.
+
+</Alert>
+
+---
+
+## AGENT-INSTRUCTIONS.md Addition
+
+Your AGENT-INSTRUCTIONS.md has been growing since [Part 1](/blog/aws-for-startups/01-your-first-60-minutes-in-aws). After the Git Conventions section from Part 6 (21 lines total), add the Code Quality section:
+
+```markdown title="AGENT-INSTRUCTIONS.md (add after Git Conventions)"
+## Code Quality
+- All code must pass pre-commit hooks before committing
+- No secrets in code (gitleaks enforced)
+- No latest Docker tags in any Dockerfile or compose file
+- terraform must pass all checks
+```
+
+That is 4 lines, bringing the cumulative total to 25 lines. These are not suggestions. They are enforceable rules. Every rule in this section maps to a pre-commit hook that will block the commit if violated. The agent cannot "forget" these rules when context gets large because the hooks enforce them regardless of what the agent remembers.
+
+Notice the pattern: AGENT-INSTRUCTIONS.md states the rule in plain language. Pre-commit hooks enforce the rule mechanically. Neither is sufficient alone. The instructions tell the agent what is expected (so it generates better code in the first place). The hooks catch what slips through (because agents are not perfectly reliable). This is the two-layer approach: guidance plus enforcement.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents will add `--no-verify` to their git commit commands to "avoid errors." The agent's training data is full of Stack Overflow answers that suggest `--no-verify` as a fix for hook failures. Your AGENT-INSTRUCTIONS.md bans this implicitly ("All code must pass pre-commit hooks"), but agents drop instructions when context gets large.
+
+**What catches it:** Add a CI check that scans commit history for commits missing hook verification. In your CI pipeline, a simple check confirms that no commits in the PR were made with `--no-verify`:
+
+```bash title="scripts/ci/check-no-verify.sh"
+#!/usr/bin/env bash
+# Detect commits that bypassed pre-commit hooks
+# Run in CI to catch --no-verify usage
+
+BRANCH_BASE="${1:-main}"
+SUSPICIOUS=0
+
+for commit in $(git log "${BRANCH_BASE}..HEAD" --format="%H"); do
+  # Commits made with --no-verify won't have the pre-commit hook trailer
+  # This is a heuristic: check if the commit timestamp suggests rapid-fire commits
+  # (agent pattern) without the expected hook processing delay
+  msg=$(git log -1 --format="%B" "$commit")
+  if echo "$msg" | grep -qi "co-authored-by" && ! echo "$msg" | grep -qi "pre-commit: passed"; then
+    echo "WARNING: Commit $commit may have bypassed pre-commit hooks"
+    SUSPICIOUS=$((SUSPICIOUS + 1))
+  fi
+done
+
+if [ "$SUSPICIOUS" -gt 0 ]; then
+  echo "Found $SUSPICIOUS suspicious commit(s). Review for --no-verify usage."
+  # Exit 0 for now (warning only). Change to exit 1 when you want to enforce.
+  exit 0
+fi
+```
+
+The real enforcement comes in [Part 27](/blog/aws-for-startups/27-testing-in-ci) when this script becomes a required CI status check.
+
+</Alert>
+
+---
+
+## Putting It All Together
+
+After this part, here is what happens every time you (or your agent) run `git commit`:
+
+:::steps
+1. Pre-commit framework intercepts the commit
+2. File hygiene hooks run: trailing whitespace, YAML validity, merge conflict markers (1-2 seconds)
+3. gitleaks scans staged files for secrets and credential patterns (1-3 seconds)
+4. Language linters run: Biome, Ruff, or golangci-lint depending on file types (1-3 seconds)
+5. Terraform hooks run: `terraform fmt`, `terraform validate`, tflint, checkov (2-4 seconds)
+6. Custom hooks run: IAM wildcards, required tags, Docker `:latest`, hardcoded regions (1 second)
+7. Results logged to Loki for Scorecard panels
+8. If all hooks pass, the commit proceeds. If any hook fails, the commit is blocked.
+:::
+
+Total time: 8-12 seconds per commit. That is the cost. The value is that every commit in your repository is guaranteed to be free of leaked secrets, IAM wildcards, missing tags, `:latest` Docker tags, and hardcoded regions. No exceptions. No "I'll fix it later." No "this one is just a draft commit."
+
+This is the workflow upgrade that separates "we have conventions" (Part 6) and "we have enforcement at merge time" (Part 7) from "we have enforcement at commit time" (this part). The guardrails tightened from culture to process to automation. Each layer catches different problems at different stages, and together they form a defense-in-depth system that no single layer could provide on its own.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No pre-commit hooks. Manual code review catches secrets after they are in git history. Your agent commits an example AWS key it pulled from training data, and you spend the afternoon rotating credentials and scrubbing history. |
+| ✅ **Right** | Pre-commit with linting, secrets detection (gitleaks), Terraform validation (tflint + checkov), and Scorecard logging. 8-12 seconds per commit. Catches the top 5 agent mistakes before they enter history. |
+| ❌ **Over** | 30+ hooks that take 5 minutes per commit. Full SAST/DAST scans, license compliance checks, and a custom ML model that scores "code quality" on every save. You spend more time waiting for hooks than writing code. |
+| 🤖 **Agent Trap** | Agent adds `--no-verify` to its git commit commands to "avoid errors." The agent's training data is full of Stack Overflow answers that suggest `--no-verify` as a fix for hook failures. Your AGENT-INSTRUCTIONS.md explicitly bans this, but the agent drops that instruction when context gets large. Pre-commit's `--no-verify` detection in CI catches it. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 9: Agent Context, Prompt Engineering & Model Evals**, we build the framework that makes agents actually follow these rules. AGENT-INSTRUCTIONS.md architecture (how to structure it so agents retain instructions even in long contexts), the eval framework that measures which models deserve your trust, and the MCP concept that changes how agents interact with infrastructure. The Scorecard goes from 2 panels to 7.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Pre-commit Setup",
+    tasks: [
+      { text: "pre-commit framework installed and pre-commit --version returns output", syncKey: "part-08-framework-installed" },
+      { text: ".pre-commit-config.yaml committed to repository root", syncKey: "part-08-config-committed" },
+      { text: "pre-commit install run (hooks registered with git)", syncKey: "part-08-hooks-registered" },
+      { text: "pre-commit run --all-files passes (or known issues triaged)", syncKey: "part-08-all-files-pass" },
+      { text: "gitleaks catches a test secret when you stage a file containing AKIAIOSFODNN7EXAMPLE", syncKey: "part-08-gitleaks-working" }
+    ]
+  },
+  {
+    category: "Terraform Quality",
+    tasks: [
+      { text: "tflint configured with AWS plugin (.tflint.hcl exists)", syncKey: "part-08-tflint-configured" },
+      { text: "checkov configured and running via pre-commit", syncKey: "part-08-checkov-configured" },
+      { text: "IAM wildcard (Action = \"*\") blocked by checkov or custom hook", syncKey: "part-08-iam-wildcards-caught" }
+    ]
+  },
+  {
+    category: "Agent Scorecard",
+    tasks: [
+      { text: "Panel 1 visible in Grafana: pre-commit pass/fail rate (agent vs human)", syncKey: "part-08-panel-1" },
+      { text: "Panel 2 visible in Grafana: top blocked violations by category", syncKey: "part-08-panel-2" },
+      { text: "Data flowing from Loki (log-hook-results.sh executing on commit)", syncKey: "part-08-loki-data" }
+    ]
+  },
+  {
+    category: "AGENT-INSTRUCTIONS.md",
+    tasks: [
+      { text: "Code Quality section added with 4 rules", syncKey: "part-08-instructions-updated" },
+      { text: "Cumulative line count is 25 (Header + IAM + Terraform + Git + Code Quality)", syncKey: "part-08-instructions-count" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Pre-commit hooks are your first automated verifier in the DGVE pipeline, catching secrets, IAM wildcards, and convention violations before they enter git history where they become expensive to fix.
+2. gitleaks is non-negotiable when agents write code, because agents embed credentials from training data patterns without any awareness that the strings are dangerous.
+3. The Agent Scorecard just got its first real data: 2 panels tracking pre-commit pass/fail rates and top violations, with 27 more panels to come across the series.
+4. Never let agents (or yourself) skip pre-commit with `--no-verify`, because the entire point of automated verification is that it runs every time, not just when you remember.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

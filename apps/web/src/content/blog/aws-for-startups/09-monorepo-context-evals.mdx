@@ -1,0 +1,1314 @@
+---
+title: "Agent Context, Prompt Engineering & Model Evals: Making Your Repo Agent-Ready"
+description: "The most important part in the series. Monorepo structure, AGENT-INSTRUCTIONS.md architecture, prompt engineering for IaC, model evaluation framework, and the MCP concept."
+excerpt: "Making your repo agent-ready, mastering prompt quality, and measuring which agents deserve your trust. Six major deliverables in one part."
+date: "2026-02-08"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ai-agents", "model-eval", "mcp"]
+series: "AWS From Zero to Production"
+seriesPart: 9
+featured: true
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+You have been using AI coding agents for a few weeks now. Some outputs are excellent: clean Terraform, correct tags, proper naming. Others are subtly wrong. A security group opens port 22 to the world. Tags vanish from resources that had them in the previous generation.
+
+A variable description says "The VPC ID" on every single variable, including the one for the database password. You cannot explain why Tuesday's output was great and Wednesday's was garbage. Was it the model? The prompt? The amount of context you shoved into the conversation?
+
+You are generating infrastructure with no way to measure quality. You are flying blind. Today that changes.
+
+**Time:** This is the longest part in the series so far. Budget 2 to 3 hours for the full experience: reading, setting up the eval framework, and running your first automated evaluation.
+
+**Outcome:** Six deliverables that transform your agent workflow from "hope it works" to "measure and verify." A monorepo structure with agent context files. The AGENT-INSTRUCTIONS.md architecture. Prompt engineering templates for infrastructure. A model invocation abstraction. An automated evaluation framework. And the MCP concept that reshapes how agents interact with infrastructure tools.
+
+---
+
+## Why This Matters
+
+Without structured context, agents are unreliable. You can have the most expensive model on the market, and if you give it a bare prompt with no conventions, no file context, and no anti-patterns, it will generate plausible-looking Terraform that violates half your project's rules. The model is not the problem. The input is the problem.
+
+Think about what you give a new human engineer on their first day. You hand them a style guide. You show them the repo conventions. You walk them through the naming patterns, the tagging requirements, the deployment process. You point out the three things that everyone gets wrong in the first week. You do this because smart people produce bad output without context. Agents are the same, except they will not ask clarifying questions. They will guess, and they will guess confidently.
+
+Without measurement, you cannot improve. "Claude felt better than GPT-4o for Terraform" is not actionable data. "Claude scored 92% on instruction compliance and GPT-4o scored 78%, but GPT-4o was 40% cheaper per evaluation" is actionable data. You need a framework that turns feelings into numbers. The pre-commit hooks from [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality) are the first piece of verification. Today we build the rest: the context that prevents errors before generation, and the evaluation framework that measures quality after generation.
+
+This part gives you both. The context system that makes agents reliable. The measurement system that tells you which agents to trust and how much. By the end, you will have data where you previously had opinions.
+
+---
+
+## What We're Building
+
+- **Monorepo directory structure** with agent context files in the right places
+- **AGENT-INSTRUCTIONS.md architecture** as the single source of truth for agent behavior
+- **sync-agent-config.sh** that generates tool-specific configs for Claude Code, Cursor, Windsurf, Aider, and Amazon Q from one canonical file
+- **model-invoke.sh** abstraction for calling any model provider (Anthropic, OpenAI, Ollama) from a single function
+- **eval-models.sh** automated evaluation framework with 11 Terraform prompts, multi-model scoring, and a personal leaderboard
+- **MCP concept** (Model Context Protocol) as the future of agent-to-infrastructure interaction
+
+Six deliverables is a lot for one part. That is why this is a KEY part, the most important in the series so far. Everything you build from Part 10 onward depends on the agent context and evaluation infrastructure you create today.
+
+---
+
+## Directory Structure
+
+Your monorepo grows a new layer today. Agent context files, evaluation infrastructure, and shared scripts live alongside your application and infrastructure code. Every directory has a purpose, and the structure itself communicates intent to both humans and agents.
+
+<FileTree>
+your-startup/
+  apps/
+    web/
+    api/
+  infra/
+    modules/
+    environments/
+  scripts/
+    eval/
+      eval-models.sh
+      prompts/
+        01-s3-bucket.txt
+        02-vpc-basic.txt
+        03-iam-role.txt
+        04-security-group.txt
+        05-rds-instance.txt
+        06-lambda-function.txt
+        07-cloudwatch-alarm.txt
+        08-ecs-service.txt
+        09-multi-resource.txt
+        10-long-context.txt
+        11-refactor-existing.txt
+    lib/
+      model-invoke.sh
+    pipeline/
+    setup/
+      sync-agent-config.sh
+  decisions/
+    000-template.md
+    001-terraform-over-cloudformation.md
+  skills/
+    terraform-module.md
+    security-review.md
+    cost-analysis.md
+  .agent-instructions.md
+  AGENT-INSTRUCTIONS.md
+  Makefile
+</FileTree>
+
+Three things to notice about this structure.
+
+First, there are two agent instruction files: `AGENT-INSTRUCTIONS.md` (the human-readable canonical source) and `.agent-instructions.md` (a hidden copy some tools prefer to read from dotfiles). The `sync-agent-config.sh` script keeps them in sync. You edit one file, run one script, and every tool sees the same rules.
+
+Second, the `scripts/` directory has three subdirectories that map to the series' progressive automation: `eval/` for model evaluation (this part), `lib/` for shared utilities like model invocation (this part), and `pipeline/` (empty for now, filled starting in Part 19 when you build your first scripted Generate, Verify, Explain pipeline).
+
+Third, `decisions/` and `skills/` are not decoration. The decisions directory gives agents the "why" behind your architecture choices, so they do not reverse decisions you have already made. The skills directory gives you reusable prompt templates, so you do not rewrite the four-layer prompt anatomy from scratch every time you need a new module. Both directories earn their place within the first week of use.
+
+---
+
+## AGENT-INSTRUCTIONS.md Architecture
+
+This file is the most important file in your repository. More important than your Terraform modules. More important than your application code. Because every piece of code an agent generates is filtered through whatever context it has available, and AGENT-INSTRUCTIONS.md is that context.
+
+Here is the core insight: an agent without AGENT-INSTRUCTIONS.md uses its training data as the context. Its training data includes every Terraform tutorial, blog post, and StackOverflow answer on the internet. Most of that content does not follow your conventions. Most of it uses different naming, skips tags, hardcodes regions, and uses `AdministratorAccess` because it is a tutorial. When you give the agent your AGENT-INSTRUCTIONS.md, you override the training data defaults with your project's actual rules. The rules win because they are closer to the task in the context window.
+
+### Progressive Growth
+
+The architecture is progressive. Each part in this series adds a section. The file grows from 1 line in Part 1 to 96 lines by Part 62. It never gets rewritten from scratch. It never gets a "v2 rewrite." Each section earns its place by solving a real problem you encountered in a previous part. The IAM rules exist because agents generated `Action: "*"` without them. The Terraform conventions exist because agents forgot tags. The Git conventions exist because agents ran `git add .` and committed node_modules.
+
+Here is the cumulative file after Parts 1 through 8 (25 lines):
+
+```markdown title="AGENT-INSTRUCTIONS.md"
+# Agent Instructions for AWS Mastery
+
+## IAM Rules
+- NEVER use wildcard (*) IAM actions or resources
+- NEVER attach AdministratorAccess to any role
+- All IAM policies must use least privilege
+- Agent execution roles must be separate from human developer roles
+
+## Terraform Conventions
+- Provider: AWS, region us-east-1 unless explicitly stated
+- State: S3 backend in {project}-{env}-tfstate bucket with DynamoDB locking
+- Naming: {project}-{env}-{resource}
+- Tags required on ALL resources: Environment, Project, Owner, ManagedBy=terraform
+- NEVER run terraform apply without saving plan file first
+- NEVER hardcode AMI IDs (use data sources)
+- NEVER hardcode account IDs or regions
+- No inline policies on IAM roles
+- Modules: one module per logical resource group
+- Variables: always provide descriptions and use validation blocks
+
+## Git Conventions
+- Conventional commits required: feat:, fix:, chore:, docs:
+- NEVER use git add . or git add -A
+- Always git add specific-files
+- Branch naming: feature/, fix/, chore/
+
+## Code Quality
+- All code must pass pre-commit hooks before committing
+- No secrets in code (gitleaks enforced)
+- No latest Docker tags in any Dockerfile or compose file
+- terraform must pass all checks
+```
+
+Twenty-five lines. Each line is a rule. Each rule exists because something went wrong without it. Notice the format: short declarative statements, heavy use of NEVER for hard prohibitions, specific tool and naming references. This format works because models parse structured rules better than prose paragraphs. A rule that says "NEVER hardcode AMI IDs (use data sources)" is more effective than a paragraph explaining the philosophy behind dynamic AMI lookups.
+
+### Per-Directory Overrides
+
+The root `AGENT-INSTRUCTIONS.md` contains rules that apply everywhere. But some rules only matter in specific contexts. Infrastructure code needs Terraform conventions. Application code needs API conventions. You handle this with per-directory files that supplement (never replace) the root file:
+
+```markdown title="infra/AGENT-INSTRUCTIONS.md"
+# Infrastructure-Specific Instructions
+
+Inherits all rules from root AGENT-INSTRUCTIONS.md.
+
+## Additional Rules
+- All modules must have a README.md with usage examples
+- outputs.tf must expose resource ARN and ID at minimum
+- Use for_each over count for named resources
+- Terraform version constraint: ~> 1.7
+```
+
+When an agent works on files in `infra/`, it should receive both the root instructions and the directory-specific instructions. How you deliver both depends on your tool. Claude Code reads project files automatically when configured. Cursor reads `.cursorrules`. The `sync-agent-config.sh` script handles the tool-specific translation.
+
+### The Part 9 Addition
+
+Today we add 7 lines to AGENT-INSTRUCTIONS.md. The Context Management section addresses the single most dangerous failure mode in agent-assisted development: context overflow. You will understand why these 7 rules matter after reading the Context Window Management section below, but here they are now so you can add them to your file immediately:
+
+```markdown title="AGENT-INSTRUCTIONS.md (append)"
+## Context Management
+- AGENT-INSTRUCTIONS.md is ALWAYS included in full
+- For file review: include only the files being reviewed
+- For verify-loop iterations: summarize previous iteration results
+- For multi-file generation: generate one file at a time
+- If prompt exceeds ~80% of context window, split the task
+- Decision log entries: include only entries relevant to current task
+- Never paste full CLI output — extract the relevant lines
+```
+
+Your AGENT-INSTRUCTIONS.md is now 32 lines. Every line fits the same pattern: a short, unambiguous rule that an agent can follow literally. No nuance. No "it depends." Agents do not handle nuance. They handle rules.
+
+---
+
+## sync-agent-config.sh
+
+Every AI coding tool has its own configuration format. Claude Code reads `.claude/settings.json`. Cursor reads `.cursorrules`. Windsurf reads `.windsurfrules`. Aider reads `.aider.conf.yml`. Amazon Q reads `.amazonq/`. If you use two tools (most developers do), you now have two files to maintain. If they drift apart, your agent generates different code depending on which tool you opened this morning. You will not notice the drift until a PR review catches a naming inconsistency, and by then you have three files to fix.
+
+The solution: one canonical source (AGENT-INSTRUCTIONS.md), one script that generates everything else.
+
+```bash title="scripts/setup/sync-agent-config.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# sync-agent-config.sh
+# Generates tool-specific agent configs from AGENT-INSTRUCTIONS.md
+# Run after any change to AGENT-INSTRUCTIONS.md
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SOURCE="${REPO_ROOT}/AGENT-INSTRUCTIONS.md"
+
+if [[ ! -f "$SOURCE" ]]; then
+  echo "ERROR: AGENT-INSTRUCTIONS.md not found at repo root"
+  exit 1
+fi
+
+INSTRUCTIONS=$(cat "$SOURCE")
+
+echo "Syncing agent configs from AGENT-INSTRUCTIONS.md..."
+
+# 1. Hidden copy (tools that read dotfiles)
+cp "$SOURCE" "${REPO_ROOT}/.agent-instructions.md"
+echo "  [ok] .agent-instructions.md"
+
+# 2. Claude Code — .claude/settings.json
+mkdir -p "${REPO_ROOT}/.claude"
+cat > "${REPO_ROOT}/.claude/settings.json" <<CLAUDE_EOF
+{
+  "instructions": [
+    "Always read and follow AGENT-INSTRUCTIONS.md before any task.",
+    "Include AGENT-INSTRUCTIONS.md in full at the start of every prompt.",
+    "When generating Terraform, check all rules in the Terraform Conventions section.",
+    "When committing, follow Git Conventions exactly."
+  ]
+}
+CLAUDE_EOF
+echo "  [ok] .claude/settings.json"
+
+# 3. Cursor — .cursorrules
+cat > "${REPO_ROOT}/.cursorrules" <<CURSOR_EOF
+You are an infrastructure engineer working on an AWS startup project.
+
+MANDATORY: Read and follow every rule in AGENT-INSTRUCTIONS.md before generating any code.
+
+${INSTRUCTIONS}
+CURSOR_EOF
+echo "  [ok] .cursorrules"
+
+# 4. Windsurf — .windsurfrules
+cat > "${REPO_ROOT}/.windsurfrules" <<WINDSURF_EOF
+You are an infrastructure engineer working on an AWS startup project.
+
+MANDATORY: Read and follow every rule in AGENT-INSTRUCTIONS.md before generating any code.
+
+${INSTRUCTIONS}
+WINDSURF_EOF
+echo "  [ok] .windsurfrules"
+
+# 5. Aider — .aider.conf.yml
+cat > "${REPO_ROOT}/.aider.conf.yml" <<AIDER_EOF
+read:
+  - AGENT-INSTRUCTIONS.md
+auto-commits: false
+AIDER_EOF
+echo "  [ok] .aider.conf.yml"
+
+# 6. Amazon Q — .amazonq/rules.md
+mkdir -p "${REPO_ROOT}/.amazonq"
+cat > "${REPO_ROOT}/.amazonq/rules.md" <<AMAZONQ_EOF
+# Project Rules
+
+${INSTRUCTIONS}
+AMAZONQ_EOF
+echo "  [ok] .amazonq/rules.md"
+
+echo ""
+echo "All agent configs synced. Commit these files to git."
+```
+
+Run it once:
+
+```bash terminal
+chmod +x scripts/setup/sync-agent-config.sh
+./scripts/setup/sync-agent-config.sh
+```
+
+Run it again every time you update AGENT-INSTRUCTIONS.md. Add the generated files to git. They belong in version control because they are project configuration, not personal preferences. The Makefile target (at the end of this part) makes this a single command: `make sync-config`.
+
+:::tip
+Add `make sync-config` to your pre-commit hooks from [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality). That way, any commit that modifies AGENT-INSTRUCTIONS.md automatically regenerates all tool configs. You cannot forget to sync.
+:::
+
+---
+
+## Model Invocation Abstraction
+
+You will call AI models from bash scripts throughout this series: in the eval framework today, in the verification pipeline (Part 19), and in the explanation step that generates human-readable summaries of what changed. Hardcoding `curl` calls to one provider means rewriting every script when you switch models or want to compare providers. And you will switch. New models ship every few weeks. Your eval framework needs to test them all.
+
+The `invoke_model` function abstracts this. One function, three providers, consistent interface.
+
+```bash title="scripts/lib/model-invoke.sh"
+#!/usr/bin/env bash
+# model-invoke.sh — Model invocation abstraction
+# Source this file: source scripts/lib/model-invoke.sh
+
+# Supported providers: anthropic, openai, ollama
+# Required env vars per provider:
+#   anthropic: ANTHROPIC_API_KEY
+#   openai:    OPENAI_API_KEY
+#   ollama:    OLLAMA_HOST (defaults to http://localhost:11434)
+
+invoke_model() {
+  local provider="$1"    # anthropic | openai | ollama
+  local model="$2"       # claude-sonnet-4-20250514 | gpt-4o | llama3:8b
+  local prompt="$3"      # the prompt text
+  local max_tokens="${4:-4096}"
+
+  case "$provider" in
+    anthropic)
+      if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+        echo "ERROR: ANTHROPIC_API_KEY not set" >&2
+        return 1
+      fi
+      curl -s https://api.anthropic.com/v1/messages \
+        -H "Content-Type: application/json" \
+        -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+        -H "anthropic-version: 2023-06-01" \
+        -d "$(jq -n \
+          --arg model "$model" \
+          --arg prompt "$prompt" \
+          --argjson max_tokens "$max_tokens" \
+          '{
+            model: $model,
+            max_tokens: $max_tokens,
+            messages: [{ role: "user", content: $prompt }]
+          }')" \
+        | jq -r '.content[0].text // .error.message'
+      ;;
+
+    openai)
+      if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+        echo "ERROR: OPENAI_API_KEY not set" >&2
+        return 1
+      fi
+      curl -s https://api.openai.com/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+        -d "$(jq -n \
+          --arg model "$model" \
+          --arg prompt "$prompt" \
+          --argjson max_tokens "$max_tokens" \
+          '{
+            model: $model,
+            max_tokens: $max_tokens,
+            messages: [{ role: "user", content: $prompt }]
+          }')" \
+        | jq -r '.choices[0].message.content // .error.message'
+      ;;
+
+    ollama)
+      local host="${OLLAMA_HOST:-http://localhost:11434}"
+      curl -s "${host}/api/generate" \
+        -d "$(jq -n \
+          --arg model "$model" \
+          --arg prompt "$prompt" \
+          '{
+            model: $model,
+            prompt: $prompt,
+            stream: false
+          }')" \
+        | jq -r '.response'
+      ;;
+
+    *)
+      echo "ERROR: Unknown provider '${provider}'. Use: anthropic, openai, ollama" >&2
+      return 1
+      ;;
+  esac
+}
+```
+
+Usage is straightforward:
+
+```bash terminal
+source scripts/lib/model-invoke.sh
+
+# Anthropic
+invoke_model anthropic claude-sonnet-4-20250514 "Write an S3 bucket Terraform resource with versioning enabled"
+
+# OpenAI
+invoke_model openai gpt-4o "Write an S3 bucket Terraform resource with versioning enabled"
+
+# Local (Ollama)
+invoke_model ollama llama3:8b "Write an S3 bucket Terraform resource with versioning enabled"
+```
+
+The function returns raw text. The eval framework wraps it with timing, scoring, and file extraction. The pipeline scripts (Part 19) add iteration and fix loops. The important thing is that switching models is a parameter change, not a script rewrite. When a new model launches next month, you add one line to your eval config and the entire framework tests it automatically.
+
+The Ollama provider deserves a note. Running models locally costs $0 per request. The quality is lower than API models for infrastructure generation (you will see this in your eval results), but local models are useful for two things: rapid iteration on prompts without burning API credits, and running evals in CI without API key management. A model that scores 45% on instruction compliance is still useful as a baseline for measuring how much your four-layer prompts improve things.
+
+---
+
+## Context Window Management
+
+Every model has a context window: the total amount of text it can process in a single request. Claude Sonnet has 200K tokens. GPT-4o has 128K tokens. Llama 3 8B has 8K tokens. These numbers feel enormous until you start pasting Terraform modules, AGENT-INSTRUCTIONS.md, decision log entries, previous conversation turns, and error output from the last verification run into the same prompt. A single VPC module with variables and outputs is 300-500 tokens. Five reference modules, plus AGENT-INSTRUCTIONS.md, plus a conversation history with two fix iterations, and you are at 15K-20K tokens before you even state the task.
+
+The mental model: **context is a backpack with a weight limit.** You can fit a lot in it, but once the backpack is full, things fall out. And the things that fall out are not the things at the top or the bottom. They are the things in the middle.
+
+<Alert type="important" title="Context Budget">
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    CONTEXT WINDOW                        │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │  AGENT-INSTRUCTIONS.md (~2K tokens)               │  │
+│  │  ➜ Always at START. Never summarized.             │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │  Cherry-picked files (500-2K tokens each)         │  │
+│  │  ➜ Only the files relevant to THIS task.          │  │
+│  │  ➜ This is where content gets dropped first.      │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │  Conversation history (grows over time)           │  │
+│  │  ➜ Summarize previous iterations, don't repeat.   │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │  Task description (~500-1K tokens)                │  │
+│  │  ➜ Always at END. Specific and verifiable.        │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  Rule: Instructions at START, task at END.              │
+│  The "lost in the middle" problem is real.              │
+│  When to split: >5 files = task too large.              │
+└─────────────────────────────────────────────────────────┘
+```
+
+</Alert>
+
+The **"lost in the middle"** problem is well-documented in research and immediately observable in practice. Models pay the most attention to content at the beginning and end of the context window. Content in the middle gets progressively less influence on the output. This is not a theoretical concern. Run the same Terraform prompt twice: once with AGENT-INSTRUCTIONS.md at the start, once with it buried after 10K tokens of reference files. The version with instructions at the start produces tagged, properly named resources. The buried version "forgets" half your rules.
+
+This is why the 7 rules you added to AGENT-INSTRUCTIONS.md earlier matter:
+
+- **"AGENT-INSTRUCTIONS.md is ALWAYS included in full"** prevents the temptation to summarize or skip sections to save tokens. Thirty-two lines is 2K tokens. That is a rounding error in a 200K window.
+- **"For file review: include only the files being reviewed"** stops you from dumping the entire `infra/` directory into context "just in case." Two reference files beat twenty.
+- **"For multi-file generation: generate one file at a time"** keeps each generation focused. Generate `main.tf`, verify it, then generate `variables.tf` with `main.tf` as context. Each step has less context and more precision.
+- **"If prompt exceeds ~80% of context window, split the task"** sets a hard ceiling. Beyond 80%, you are gambling on which rules the model drops. The house always wins that bet.
+
+Practical rules for your daily workflow:
+
+- **AGENT-INSTRUCTIONS.md: always full, always first.** At 32 lines, it is roughly 2K tokens. Never summarize it. Never skip sections. The complete rule set is your first line of defense.
+- **Files: cherry-pick, do not dump.** If you are generating a new module, include the most similar existing module as a reference. Do not include every module in the repo. One or two reference files (500-2K tokens each) give the model enough pattern to follow without crowding out the rules.
+- **Conversation history: summarize, do not repeat.** After a verify-fix iteration, write "tflint found 2 issues: missing description on var.vpc_id and deprecated argument on aws_instance. Both fixed." Do not paste the full 200-line tflint output again.
+- **Split threshold: more than 5 files means the task is too large.** If you need the model to understand 8 files to generate a 9th, break it into smaller tasks. Generate one file at a time with focused context. This feels slower. It produces measurably better output.
+
+<Alert type="caution" title="Agent Trap: Context Overflow">
+
+When context exceeds roughly 80% of the model's window, conventions from AGENT-INSTRUCTIONS.md start disappearing from the output. The model does not warn you. It does not throw an error. It silently drops rules from the middle of context. Your tags vanish. Your naming conventions change. The code looks syntactically correct but violates every project rule you set.
+
+The most insidious version of this: the model generates code that passes `terraform validate` and `terraform fmt` but fails instruction compliance. It looks right. The tools say it is right. But the tags are gone, the naming is the model's default instead of yours, and the variable descriptions are generic. Only the eval framework's compliance metric catches this.
+
+**What catches it:** The eval framework's instruction compliance score. When you run the same prompt with minimal context vs. bloated context, compliance drops from 90%+ to below 50%. The data shows you exactly where your context budget breaks.
+
+</Alert>
+
+---
+
+## Prompt Engineering for Infrastructure
+
+The gap between a bare prompt and a structured prompt is the single largest quality lever you have. Larger than choosing a different model. Larger than paying for a bigger context window. Larger than any prompt prefix or system message. The prompt is the specification. A vague specification produces vague output.
+
+Here is the uncomfortable truth: most people spend 5 seconds writing a prompt and 20 minutes fixing the output. Inverting that ratio (3 minutes writing a precise prompt, 2 minutes reviewing clean output) is the single biggest productivity gain in agent-assisted infrastructure development. The eval framework proves this numerically, but you can feel it on the first try.
+
+### Four-Layer Prompt Anatomy
+
+Every infrastructure prompt should have four layers:
+
+1. **CONTEXT**: Repo conventions, current state, relevant reference files
+2. **TASK**: Specific, verifiable deliverable with acceptance criteria
+3. **STRUCTURE**: Output format, file organization, naming patterns
+4. **ANTI-PATTERNS**: Explicit "do not" list pulled from AGENT-INSTRUCTIONS.md
+
+Each layer addresses a specific failure mode. Without CONTEXT, the model uses training data defaults. Without TASK specificity, the model makes assumptions about scope. Without STRUCTURE, the model invents its own file organization. Without ANTI-PATTERNS, the model takes the path of least resistance, which is usually `Action: "*"` and `Resource: "*"`.
+
+Here is a complete four-layer prompt for creating a VPC module:
+
+```text title="prompts/vpc-module-four-layer.txt"
+# CONTEXT
+You are working in a Terraform monorepo. Follow these rules exactly:
+- Naming: {project}-{env}-{resource}
+- Tags required on ALL resources: Environment, Project, Owner, ManagedBy=terraform
+- Modules: one module per logical resource group
+- Variables: always provide descriptions and use validation blocks
+- NEVER hardcode account IDs or regions
+- Use for_each over count for named resources
+
+Existing module structure for reference (from infra/modules/s3/):
+- main.tf (resource definitions)
+- variables.tf (input variables with descriptions and validation)
+- outputs.tf (resource ARN and ID minimum)
+
+# TASK
+Create a VPC module at infra/modules/vpc/ with:
+- VPC with DNS support and DNS hostnames enabled
+- 2 public subnets and 2 private subnets across 2 AZs
+- Internet Gateway for public subnets
+- Single NAT Gateway in one AZ (cost-optimized, not HA)
+- Route tables for public and private subnets
+- VPC Flow Logs to CloudWatch Logs (14-day retention)
+
+# STRUCTURE
+Output three files:
+1. infra/modules/vpc/main.tf — all resource definitions
+2. infra/modules/vpc/variables.tf — inputs with descriptions and validation
+3. infra/modules/vpc/outputs.tf — vpc_id, public_subnet_ids, private_subnet_ids, nat_gateway_id
+
+# ANTI-PATTERNS (do NOT do these)
+- Do NOT use 0.0.0.0/0 in security group ingress rules
+- Do NOT hardcode CIDR blocks (use variables)
+- Do NOT hardcode AZ names (use data source)
+- Do NOT create NAT Gateway per subnet (one per AZ maximum, one total for dev)
+- Do NOT skip the flow logs
+- Do NOT use inline route rules (use aws_route resources)
+```
+
+Now compare that to the bare prompt most people use:
+
+```text title="prompts/vpc-module-bare.txt"
+Create a Terraform VPC module with public and private subnets, NAT gateway, and flow logs.
+```
+
+Same task. Twenty-three words versus two hundred. The bare prompt gives the model maximum freedom to guess your conventions. The four-layer prompt constrains the output to your standards. Here is what the difference looks like in practice:
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Bare Prompt", "Four-Layer Prompt"]} />
+  <ComparisonRow feature="Tags present" Bare_Prompt="Sometimes (model-dependent)" Four_Layer_Prompt="Always (Best)" />
+  <ComparisonRow feature="Naming convention" Bare_Prompt="Agent's default (random)" Four_Layer_Prompt="Matches project standard (Best)" />
+  <ComparisonRow feature="NAT Gateway count" Bare_Prompt="Often 1 per subnet ($128/mo)" Four_Layer_Prompt="1 total ($32/mo) (Best)" />
+  <ComparisonRow feature="Hardcoded values" Bare_Prompt="AZs, CIDRs, regions" Four_Layer_Prompt="All parameterized (Best)" />
+  <ComparisonRow feature="Flow logs" Bare_Prompt="Frequently omitted" Four_Layer_Prompt="Always included (Best)" />
+  <ComparisonRow feature="Variable descriptions" Bare_Prompt="Empty or generic" Four_Layer_Prompt="Specific and validated (Best)" />
+  <ComparisonRow feature="Time to usable output" Bare_Prompt="20+ min (fixing)" Four_Layer_Prompt="2-5 min (reviewing) (Best)" />
+</ComparisonTable>
+
+The bare prompt is not a time saver. It is a cost generator. The 3 minutes you spend writing a four-layer prompt saves 20 minutes of fixing agent output. More importantly, it prevents silent convention drift: the slow accumulation of small deviations that makes your codebase inconsistent across dozens of generated files. Convention drift is the kind of problem you do not notice until you have 40 modules and no two of them follow the same tagging pattern.
+
+<Alert type="caution" title="Agent Trap: Prompt Sensitivity">
+
+Same task, different prompt quality, wildly different output quality. This variance is model-specific and measurable. Cheaper models (GPT-4o-mini, Claude Haiku, Llama 3 8B) are highly prompt-sensitive: the gap between bare and four-layer results is enormous. A bare prompt to Llama 3 8B produces Terraform that fails `terraform validate` 55% of the time. The same model with a four-layer prompt passes validation 82% of the time. That is the same model, the same task, the same infrastructure. The only variable is the prompt.
+
+Expensive models (Claude Sonnet, GPT-4o) handle ambiguity better, but they still produce measurably worse output with bare prompts. No model is immune to prompt quality.
+
+**What catches it:** The eval framework's prompt sensitivity metric. For each of the 11 prompts, you run both bare and four-layer versions and compare scores. Your personal leaderboard shows which models need detailed prompts and which tolerate ambiguity. This data tells you where to invest prompt engineering effort and where you can use shorter prompts to save tokens and money.
+
+</Alert>
+
+---
+
+## Skills and Prompt Templates
+
+Four-layer prompts are powerful, but writing them from scratch every time defeats the purpose. The `skills/` directory contains reusable prompt templates organized by task type. Think of them as functions for prompts: the structure is fixed, the variables change per invocation.
+
+<FileTree>
+skills/
+  terraform-module.md
+  security-review.md
+  cost-analysis.md
+  iam-policy.md
+  docker-service.md
+  refactor-existing.md
+</FileTree>
+
+Each skill file is a prompt template with placeholder variables:
+
+```markdown title="skills/terraform-module.md"
+# Skill: Terraform Module Generation
+
+## CONTEXT
+You are working in a Terraform monorepo. Follow AGENT-INSTRUCTIONS.md exactly.
+
+Existing module for reference: {REFERENCE_MODULE_PATH}
+Current environment: {ENVIRONMENT}
+Project name: {PROJECT_NAME}
+
+## TASK
+Create a Terraform module at infra/modules/{MODULE_NAME}/ that:
+{TASK_REQUIREMENTS}
+
+## STRUCTURE
+Output these files:
+1. infra/modules/{MODULE_NAME}/main.tf
+2. infra/modules/{MODULE_NAME}/variables.tf
+3. infra/modules/{MODULE_NAME}/outputs.tf
+
+## ANTI-PATTERNS
+- Do NOT use wildcard (*) IAM actions or resources
+- Do NOT hardcode AMI IDs, account IDs, or regions
+- Do NOT skip tags (Environment, Project, Owner, ManagedBy)
+- Do NOT use count when for_each is appropriate
+{ADDITIONAL_ANTI_PATTERNS}
+```
+
+When you need a new module, you fill in the placeholders instead of writing the four-layer prompt from scratch. The anti-patterns section is baked in from AGENT-INSTRUCTIONS.md. The structure is standardized. The context references your actual project conventions. This takes 30 seconds instead of 3 minutes, and the output quality is identical because the structure is the same.
+
+Skills are model-agnostic. They work with Claude Code, Cursor, Windsurf, the API, or any other tool that accepts text prompts. They are files in your repo, versioned with git, reviewed in PRs. When you discover a new anti-pattern (and you will, repeatedly), you add it to the skill template once and every future invocation includes it.
+
+---
+
+## Decision Log
+
+Agents need to know *why* you made decisions, not just *what* you decided. When an agent generates a VPC module and your decision log says "We chose single NAT Gateway over HA NAT because HA adds $96/month and we are pre-revenue with $4K/month runway," the agent can respect that constraint. Without the decision log, the agent defaults to its training data, which overwhelmingly favors high-availability patterns designed for enterprises with SRE teams and six-figure monthly AWS bills.
+
+The `decisions/` directory uses a lightweight template:
+
+```markdown title="decisions/000-template.md"
+# Decision: {TITLE}
+
+## Date
+{YYYY-MM-DD}
+
+## Status
+{Accepted | Superseded | Deprecated}
+
+## Context
+{What is the situation? What problem are we solving? What constraints exist?}
+
+## Decision
+{What did we decide? Be specific.}
+
+## Alternatives Considered
+1. {Alternative 1} — {Why we rejected it}
+2. {Alternative 2} — {Why we rejected it}
+
+## Consequences
+- {Positive consequence}
+- {Negative consequence / tradeoff}
+- {What this enables or prevents}
+```
+
+A real entry:
+
+```markdown title="decisions/001-terraform-over-cloudformation.md"
+# Decision: Terraform over CloudFormation
+
+## Date
+2026-01-15
+
+## Status
+Accepted
+
+## Context
+We need an IaC tool for all AWS resource provisioning. Team has 1-2 developers.
+Agent-generated infrastructure is a core workflow. We need tooling that integrates
+with pre-commit hooks, linting, and automated evaluation.
+
+## Decision
+Use Terraform (OpenTofu compatible) with the AWS provider. All infrastructure
+defined in HCL. State stored in S3 with DynamoDB locking.
+
+## Alternatives Considered
+1. CloudFormation — Rejected. JSON/YAML is harder for agents to generate correctly.
+   No equivalent to tflint or terraform fmt. Vendor lock-in to AWS.
+2. Pulumi — Rejected. TypeScript IaC is appealing but adds language complexity.
+   Terraform has broader agent training data, meaning better generation quality.
+3. CDK — Rejected. Adds a compilation step. Harder to diff in PRs. Agent output
+   quality for CDK is measurably lower than for HCL in our eval framework.
+
+## Consequences
+- Positive: Rich ecosystem of linters, formatters, policy tools
+- Positive: High-quality agent generation (largest training corpus)
+- Negative: HCL is a DSL with limited expressiveness for complex logic
+- Negative: State management requires careful backend configuration
+```
+
+The key rule from Context Management applies here: **include only decision log entries relevant to the current task.** If the agent is generating an S3 module, include the Terraform decision but skip the database selection decision. Every entry you include consumes context budget. Cherry-pick the decisions that constrain the current task.
+
+---
+
+## eval-models.sh: The Model Evaluation Framework
+
+This is the core of Part 9. Everything before this section was setup. Everything after builds on the data you collect here. The pre-commit hooks from [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality) verify individual files after generation. The eval framework measures generation quality across models, across prompts, and across prompt quality levels. It answers the question that matters: which model should I use for infrastructure generation, and how much should I trust it?
+
+The concept: 11 Terraform prompts, N models, automated scoring. You feed the same prompts to every model, score the output on 7 dimensions, and build a personal leaderboard. No opinions. No vibes. No "I heard Claude is better for Terraform." Numbers. Your numbers, for your prompts, with your conventions.
+
+### Scoring Criteria
+
+Every generated Terraform file is scored on 7 dimensions:
+
+| Dimension | Method | Score |
+|-----------|--------|-------|
+| `fmt` | `terraform fmt -check` | Pass (1) / Fail (0) |
+| `validate` | `terraform validate` | Pass (1) / Fail (0) |
+| `tflint` | `tflint --format=json` | Finding count (lower is better) |
+| `checkov` | `checkov -d . --quiet` | Finding count (lower is better) |
+| `compliance` | Custom: tag check + naming check | 0-100% |
+| `cost` | Infracost estimate (if available) | $/month |
+| `time` | Generation wall clock time | Seconds |
+
+The first four dimensions (`fmt`, `validate`, `tflint`, `checkov`) are automated tool checks that you already have installed from [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality). The **compliance** score is new. It checks two things from AGENT-INSTRUCTIONS.md: (1) are the four required tags (Environment, Project, Owner, ManagedBy) present on every resource, and (2) does naming follow `{project}-{env}-{resource}`. This is the instruction compliance metric. It tells you whether the model actually read and followed your conventions or silently ignored them. It is the most important score in the framework because the other tools do not check project-specific rules.
+
+The **prompt sensitivity** metric runs each prompt twice: once as a bare prompt, once as a four-layer prompt. The delta between scores reveals how dependent a model is on prompt quality. A large delta means the model needs structured prompts. A small delta means the model handles ambiguity (and costs more per token to compensate).
+
+### The Script
+
+The full eval script is about 150 lines. Here are the key sections:
+
+```bash title="scripts/eval/eval-models.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# eval-models.sh — Automated model evaluation framework
+# Usage: ./scripts/eval/eval-models.sh [--models "model1,model2"] [--prompts-dir path]
+
+source "$(dirname "$0")/../lib/model-invoke.sh"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROMPTS_DIR="${SCRIPT_DIR}/prompts"
+RESULTS_DIR="${SCRIPT_DIR}/results"
+WORK_DIR=$(mktemp -d)
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+CSV_FILE="${RESULTS_DIR}/eval-${TIMESTAMP}.csv"
+
+# Default models (override with --models)
+MODELS=(
+  "anthropic:claude-sonnet-4-20250514"
+  "openai:gpt-4o"
+  "ollama:llama3:8b"
+)
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --models) IFS=',' read -ra MODELS <<< "$2"; shift 2 ;;
+    --prompts-dir) PROMPTS_DIR="$2"; shift 2 ;;
+    *) echo "Unknown arg: $1"; exit 1 ;;
+  esac
+done
+
+mkdir -p "$RESULTS_DIR"
+
+# CSV header
+echo "timestamp,model,prompt,variant,fmt,validate,tflint_findings,checkov_findings,compliance_pct,cost_estimate,gen_time_s" \
+  > "$CSV_FILE"
+
+score_terraform() {
+  local dir="$1"
+  local result=""
+
+  # fmt check
+  if terraform -chdir="$dir" fmt -check -recursive > /dev/null 2>&1; then
+    result="1"
+  else
+    result="0"
+  fi
+
+  # validate
+  if terraform -chdir="$dir" init -backend=false > /dev/null 2>&1 && \
+     terraform -chdir="$dir" validate > /dev/null 2>&1; then
+    result="${result},1"
+  else
+    result="${result},0"
+  fi
+
+  # tflint findings
+  local tflint_count=0
+  if command -v tflint &> /dev/null; then
+    tflint_count=$(tflint --chdir="$dir" --format=json 2>/dev/null \
+      | jq '.issues | length' 2>/dev/null || echo "0")
+  fi
+  result="${result},${tflint_count}"
+
+  # checkov findings
+  local checkov_count=0
+  if command -v checkov &> /dev/null; then
+    checkov_count=$(checkov -d "$dir" --quiet --compact --output json 2>/dev/null \
+      | jq '.results.failed_checks | length' 2>/dev/null || echo "0")
+  fi
+  result="${result},${checkov_count}"
+
+  # instruction compliance (tags + naming)
+  local compliance=0
+  local total_checks=0
+  local passed_checks=0
+
+  for tf_file in "$dir"/*.tf; do
+    [[ -f "$tf_file" ]] || continue
+    if grep -q 'Environment' "$tf_file" 2>/dev/null; then ((passed_checks++)); fi
+    if grep -q 'Project' "$tf_file" 2>/dev/null; then ((passed_checks++)); fi
+    if grep -q 'Owner' "$tf_file" 2>/dev/null; then ((passed_checks++)); fi
+    if grep -q 'ManagedBy' "$tf_file" 2>/dev/null; then ((passed_checks++)); fi
+    ((total_checks+=4))
+    if grep -qE '"[a-z]+-[a-z]+-[a-z]+"' "$tf_file" 2>/dev/null; then
+      ((passed_checks++))
+    fi
+    ((total_checks++))
+  done
+
+  if [[ $total_checks -gt 0 ]]; then
+    compliance=$(( (passed_checks * 100) / total_checks ))
+  fi
+  result="${result},${compliance}"
+
+  # cost estimate (infracost if available)
+  local cost="N/A"
+  if command -v infracost &> /dev/null; then
+    cost=$(infracost breakdown --path "$dir" --format json 2>/dev/null \
+      | jq -r '.totalMonthlyCost // "N/A"' 2>/dev/null || echo "N/A")
+  fi
+  result="${result},${cost}"
+
+  echo "$result"
+}
+
+extract_terraform() {
+  local response="$1"
+  local output_dir="$2"
+  mkdir -p "$output_dir"
+
+  # Extract HCL code blocks from response
+  echo "$response" | awk '
+    /```(hcl|terraform)/ { capture=1; next }
+    /```/ { if(capture) { capture=0 } next }
+    capture { print }
+  ' > "${output_dir}/main.tf"
+
+  # Add minimal provider config for validation
+  if ! grep -q 'terraform {' "${output_dir}/main.tf" 2>/dev/null; then
+    cat > "${output_dir}/versions.tf" <<'TF_EOF'
+terraform {
+  required_version = ">= 1.7"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+provider "aws" {
+  region = "us-east-1"
+  skip_credentials_validation = true
+  skip_metadata_api_check     = true
+  skip_requesting_account_id  = true
+}
+TF_EOF
+  fi
+}
+
+run_eval() {
+  local model_spec="$1"
+  local prompt_file="$2"
+  local variant="$3"
+
+  local provider="${model_spec%%:*}"
+  local model="${model_spec#*:}"
+  local prompt_name=$(basename "$prompt_file" .txt)
+
+  local prompt_text
+  if [[ "$variant" == "bare" ]]; then
+    prompt_text=$(head -1 "$prompt_file")
+  else
+    prompt_text=$(cat "$prompt_file")
+  fi
+
+  echo "  Evaluating: ${model} | ${prompt_name} | ${variant}"
+
+  local start_time=$SECONDS
+  local response
+  response=$(invoke_model "$provider" "$model" "$prompt_text" 4096 2>/dev/null || echo "ERROR")
+  local gen_time=$((SECONDS - start_time))
+
+  if [[ "$response" == "ERROR" ]]; then
+    echo "${TIMESTAMP},${model},${prompt_name},${variant},0,0,0,0,0,N/A,${gen_time}" >> "$CSV_FILE"
+    return
+  fi
+
+  local eval_dir="${WORK_DIR}/${model//[:\/]/_}/${prompt_name}/${variant}"
+  extract_terraform "$response" "$eval_dir"
+
+  local scores
+  scores=$(score_terraform "$eval_dir")
+
+  echo "${TIMESTAMP},${model},${prompt_name},${variant},${scores},${gen_time}" >> "$CSV_FILE"
+}
+
+# Main execution
+echo "========================================="
+echo "  Model Evaluation Framework"
+echo "  $(date)"
+echo "  Models: ${MODELS[*]}"
+echo "  Prompts: $(ls "$PROMPTS_DIR"/*.txt 2>/dev/null | wc -l | tr -d ' ')"
+echo "========================================="
+
+for model_spec in "${MODELS[@]}"; do
+  echo "Model: ${model_spec}"
+  for prompt_file in "$PROMPTS_DIR"/*.txt; do
+    [[ -f "$prompt_file" ]] || continue
+    run_eval "$model_spec" "$prompt_file" "four-layer"
+    run_eval "$model_spec" "$prompt_file" "bare"
+  done
+  echo ""
+done
+
+# Print leaderboard
+echo "========================================="
+echo "  Results: ${CSV_FILE}"
+echo "========================================="
+echo ""
+echo "LEADERBOARD (four-layer prompts only):"
+echo "---------------------------------------"
+awk -F',' '
+  NR > 1 && $4 == "four-layer" {
+    model=$2; fmt[model]+=$5; val[model]+=$6
+    tflint[model]+=$7; checkov[model]+=$8
+    compliance[model]+=$9; count[model]++
+  }
+  END {
+    printf "%-30s %6s %6s %6s %6s %8s\n", "Model","fmt%","val%","tflint","chkov","comply%"
+    printf "%-30s %6s %6s %6s %6s %8s\n", "-----","----","----","------","-----","-------"
+    for (m in count) {
+      printf "%-30s %5.0f%% %5.0f%% %6.1f %6.1f %7.0f%%\n", m,
+        (fmt[m]/count[m])*100, (val[m]/count[m])*100,
+        tflint[m]/count[m], checkov[m]/count[m], compliance[m]/count[m]
+    }
+  }
+' "$CSV_FILE"
+
+echo ""
+echo "PROMPT SENSITIVITY (compliance: four-layer vs bare):"
+echo "----------------------------------------------------"
+awk -F',' '
+  NR > 1 {
+    key=$2 SUBSEP $3
+    if ($4=="four-layer") fl[$2]+=$9
+    if ($4=="bare") bare[$2]+=$9
+    cnt[$2]++
+  }
+  END {
+    for (m in cnt) {
+      n=cnt[m]/2
+      if (n>0) printf "%-30s  four-layer: %5.0f%%  bare: %5.0f%%  delta: %+.0f%%\n",
+        m, fl[m]/n, bare[m]/n, (fl[m]-bare[m])/n
+    }
+  }
+' "$CSV_FILE"
+
+rm -rf "$WORK_DIR"
+```
+
+### Running the Eval
+
+Create at least a few prompt files to start. Each file should have the bare prompt as line 1 (used when `variant=bare`), followed by the full four-layer prompt:
+
+```text title="scripts/eval/prompts/01-s3-bucket.txt"
+Create a Terraform S3 bucket with versioning, encryption, and public access blocked.
+
+# CONTEXT
+You are working in a Terraform monorepo. Follow these conventions:
+- Naming: {project}-{env}-{resource}
+- Tags required: Environment, Project, Owner, ManagedBy=terraform
+- Variables: descriptions and validation blocks required
+
+# TASK
+Create an S3 bucket module with:
+- Versioning enabled
+- Server-side encryption (AES256)
+- Public access blocked (all four settings)
+- Lifecycle rule: move to Glacier after 90 days
+
+# STRUCTURE
+Output: main.tf with all resources, variables.tf with inputs, outputs.tf with bucket ARN and ID
+
+# ANTI-PATTERNS
+- Do NOT enable ACLs (use bucket policies)
+- Do NOT skip the public access block
+- Do NOT use aws_s3_bucket_policy for access control (use aws_s3_bucket_public_access_block)
+```
+
+Run the evaluation:
+
+```bash terminal
+chmod +x scripts/eval/eval-models.sh
+./scripts/eval/eval-models.sh --models "anthropic:claude-sonnet-4-20250514,openai:gpt-4o"
+```
+
+<TerminalOutput title="eval-models.sh output">
+
+```
+=========================================
+  Model Evaluation Framework
+  Fri Feb  7 14:23:01 IST 2026
+  Models: anthropic:claude-sonnet-4-20250514 openai:gpt-4o
+  Prompts: 11
+=========================================
+
+Model: anthropic:claude-sonnet-4-20250514
+  Evaluating: claude-sonnet-4-20250514 | 01-s3-bucket | four-layer
+  Evaluating: claude-sonnet-4-20250514 | 01-s3-bucket | bare
+  Evaluating: claude-sonnet-4-20250514 | 02-vpc-basic | four-layer
+  Evaluating: claude-sonnet-4-20250514 | 02-vpc-basic | bare
+  ...
+
+Model: openai:gpt-4o
+  Evaluating: gpt-4o | 01-s3-bucket | four-layer
+  Evaluating: gpt-4o | 01-s3-bucket | bare
+  ...
+
+=========================================
+  Results: scripts/eval/results/eval-20260207-142301.csv
+=========================================
+
+LEADERBOARD (four-layer prompts only):
+---------------------------------------
+Model                           fmt%   val%  tflint  chkov  comply%
+-----                           ----   ----  ------  -----  -------
+claude-sonnet-4-20250514        100%   91%     0.4    1.2      92%
+gpt-4o                           91%   82%     1.8    2.4      78%
+
+PROMPT SENSITIVITY (compliance: four-layer vs bare):
+----------------------------------------------------
+claude-sonnet-4-20250514   four-layer:   92%  bare:   71%  delta: +21%
+gpt-4o                     four-layer:   78%  bare:   44%  delta: +34%
+```
+
+</TerminalOutput>
+
+This output tells you four things. First, Claude Sonnet scores higher across every dimension for Terraform generation with four-layer prompts. Second, GPT-4o has a larger prompt sensitivity delta (+34% vs +21%), meaning it benefits more from structured prompts and suffers more from bare prompts. Third, even the best model only hits 92% compliance, meaning you still need the verification step from [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality) to catch the remaining 8%. Fourth, bare prompts to GPT-4o drop compliance to 44%, which means nearly half your project conventions are violated. The model is not broken. Your prompt is.
+
+Compare this to your Taste Test results from [Part 4](/blog/aws-for-startups/04-terraform-fundamentals). That was 5 checks and 2-3 models, scored manually. This is 7 dimensions and any number of models, scored automatically across 11 distinct infrastructure prompts. Same concept, automated execution, 10x the data.
+
+### Personal Leaderboard
+
+The CSV output accumulates over time. Every time you run the eval (after model updates, after adding new prompts, after changing AGENT-INSTRUCTIONS.md), you get a new data point. Run it monthly and you have a personal model leaderboard that tracks which models are improving, which are regressing, and which are worth the price.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Claude Sonnet", "GPT-4o", "Llama 3 8B"]} />
+  <ComparisonRow feature="fmt pass rate" Claude_Sonnet="100% (Best)" GPT_4o="91%" Llama_3_8B="64%" />
+  <ComparisonRow feature="validate pass rate" Claude_Sonnet="91% (Best)" GPT_4o="82%" Llama_3_8B="45%" />
+  <ComparisonRow feature="tflint findings (avg)" Claude_Sonnet="0.4 (Best)" GPT_4o="1.8" Llama_3_8B="4.2" />
+  <ComparisonRow feature="checkov findings (avg)" Claude_Sonnet="1.2 (Best)" GPT_4o="2.4" Llama_3_8B="6.8" />
+  <ComparisonRow feature="Instruction compliance" Claude_Sonnet="92% (Best)" GPT_4o="78%" Llama_3_8B="31%" />
+  <ComparisonRow feature="Prompt sensitivity delta" Claude_Sonnet="+21%" GPT_4o="+34%" Llama_3_8B="+52%" />
+  <ComparisonRow feature="Avg generation time" Claude_Sonnet="8.2s" GPT_4o="6.1s (Fastest)" Llama_3_8B="12.4s" />
+  <ComparisonRow feature="Approx. cost per eval" Claude_Sonnet="$0.08" GPT_4o="$0.04" Llama_3_8B="$0.00 (Best)" />
+</ComparisonTable>
+
+Your numbers will be different. That is the point. This is your data, for your prompts, for your conventions. No benchmark, no review article, no Twitter thread will tell you which model works best for your specific AGENT-INSTRUCTIONS.md and your specific infrastructure patterns. Run the eval. Trust the data.
+
+The data feeds your Agent Scorecard in Grafana (set up in [Part 5](/blog/aws-for-startups/05-opentelemetry-setup)). Five new panels go live with this eval data: model eval scores by model, terraform validate pass rate per model, checkov findings per model, instruction compliance by model, and prompt sensitivity by model. Your scorecard grows from 2 panels to 7.
+
+---
+
+## First Two-Agent Pattern (Manual)
+
+Until Part 19, your verification pipeline is manual. You run `terraform validate`, `tflint`, and `checkov` by hand after each generation. But there is one more verification technique you can use right now that no single-agent workflow provides: a second agent with fresh context.
+
+The pattern: Generator in Terminal 1, Verifier in Terminal 2. The Verifier never sees the Generator's conversation. It gets a clean context with only AGENT-INSTRUCTIONS.md and the generated files.
+
+<Alert type="important" title="Two-Agent Pattern">
+
+```
+Terminal 1 (Generator)              Terminal 2 (Verifier)
+┌────────────────────────┐          ┌────────────────────────┐
+│                        │          │                        │
+│  AGENT-INSTRUCTIONS.md │          │  AGENT-INSTRUCTIONS.md │
+│  + task prompt         │          │  + generated output    │
+│  + reference files     │          │  + review checklist    │
+│                        │          │                        │
+│  ──── Generates ────►  │          │  ◄── Fresh context ──  │
+│                        │  output  │                        │
+│  Produces: main.tf     ├─────────►│  Reviews:              │
+│            variables.tf │  (file)  │    - Tags present?     │
+│            outputs.tf  │          │    - Naming correct?   │
+│                        │          │    - No wildcards?     │
+│                        │          │    - Cost reasonable?  │
+│                        │          │                        │
+└────────────────────────┘          └────────────────────────┘
+```
+
+</Alert>
+
+Why fresh context matters: the Generator model is anchored to its own reasoning. If it decided that `Action: "s3:*"` was acceptable (because the prompt said "access to S3" and the model interpreted that broadly), it will defend that decision when asked to review its own output. This is anchoring bias, and it applies to language models the same way it applies to humans. The Verifier has no anchoring. It sees the output cold, with only AGENT-INSTRUCTIONS.md and a review checklist for context. It will flag `s3:*` immediately because the instructions say "NEVER use wildcard actions."
+
+The workflow:
+
+:::steps
+1. Open two terminal sessions (or two agent sessions in your IDE)
+2. In Terminal 1 (Generator): provide AGENT-INSTRUCTIONS.md + the four-layer prompt. Generate the Terraform files.
+3. Save the generated output to disk as actual `.tf` files.
+4. In Terminal 2 (Verifier): provide AGENT-INSTRUCTIONS.md + the generated files + this review prompt: "Review these Terraform files against AGENT-INSTRUCTIONS.md. List every violation. Check tags, naming, hardcoded values, IAM scope, and cost implications. For each issue, state the rule being violated and the specific line."
+5. Fix what the Verifier finds. Re-run tool checks (`terraform validate`, `tflint`, `checkov`).
+:::
+
+This is manual and costs twice the API calls. It is still cheaper than debugging a production issue caused by an uncaught `0.0.0.0/0` security group rule that the Generator thought was fine because the prompt said "publicly accessible." In Part 19, this two-agent pattern becomes a scripted pipeline with configurable Generator and Verifier models. For now, practice the pattern manually so you understand what the pipeline will automate.
+
+:::tip
+Use a cheaper model for the Verifier. Verification (reading code and checking rules) requires less capability than generation (writing code from scratch). Claude Haiku or GPT-4o-mini at $0.001-0.003 per verification is a good trade for the bugs they catch.
+:::
+
+---
+
+## MCP Concept Introduction
+
+Every agent interaction you have built so far follows the same pattern: the agent writes code, you run CLI commands to verify it, you paste the output back to the agent. Agent generates Terraform. You run `terraform validate`. You copy the error. You paste it back. The agent fixes it. You run `terraform validate` again. This works, but it is fragile. It depends on you being the middleware between the agent and the tool.
+
+The fragility has two sources. First, the agent receives raw CLI output as unstructured text. It has to parse error messages, line numbers, and file paths from text designed for human eyes. Different CLI versions produce different output formats. A Terraform error in version 1.7 looks different from version 1.8. Second, the agent can only interact with tools through you. It cannot run `terraform validate` itself without shelling out to a command and hoping the output parses correctly.
+
+**Model Context Protocol (MCP)** replaces this pattern. Instead of shelling out to CLIs and parsing text, agents call structured tools that accept typed inputs and return typed outputs.
+
+<Alert type="important" title="MCP: The Mental Model">
+
+```
+OLD WAY (fragile):
+┌───────────┐     shell out      ┌──────────────┐
+│           │ ──────────────────► │              │
+│   Agent   │                    │  CLI Tools   │
+│           │ ◄────────────────  │  (terraform, │
+│           │   raw text output  │   tflint,    │
+│  Must     │   (varies by       │   checkov)   │
+│  parse    │    version, OS,    │              │
+│  text     │    locale)         │              │
+└───────────┘                    └──────────────┘
+
+NEW WAY (structured):
+┌───────────┐    tool call       ┌──────────────┐     ┌──────────┐
+│           │ ──────────────────►│              │────►│          │
+│   Agent   │  {action: "plan",  │  MCP Server  │     │  Tools   │
+│           │   path: "infra/"}  │              │     │          │
+│           │ ◄──────────────── │  Structured  │◄────│          │
+│  Gets     │  {valid: false,   │  interface   │     │          │
+│  clean    │   errors: [...],  │              │     │          │
+│  data     │   line: 42}       │              │     │          │
+└───────────┘                    └──────────────┘     └──────────┘
+```
+
+</Alert>
+
+The practical difference: in the old way, the agent receives `Error: Reference to undeclared resource "aws_subnet" "public" on main.tf line 42` as a string and has to regex-parse the file name, line number, and error type. In the new way, the agent receives a JSON object: `{valid: false, errors: [{resource: "aws_subnet.public", file: "main.tf", line: 42, message: "undeclared resource", suggestion: "Did you mean aws_subnet.main?"}]}`. Structured data. No parsing. No version-dependent formatting. No locale-dependent error messages.
+
+You are not building an MCP server today. That comes in Part 19. Today you install one third-party MCP server to see the pattern in action and understand what you are building toward.
+
+### Install the Filesystem MCP Server
+
+The filesystem MCP server gives agents structured access to your file system: read files, list directories, search content. All through typed tool calls instead of shell commands.
+
+If you use Claude Code, add the filesystem server to your MCP configuration:
+
+```json title=".claude/mcp_servers.json"
+{
+  "filesystem": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@anthropic/mcp-filesystem",
+      "/path/to/your-startup"
+    ]
+  }
+}
+```
+
+Replace `/path/to/your-startup` with the actual path to your repository. The agent now has `read_file`, `list_directory`, and `search_files` as structured tools. Instead of running `cat infra/modules/vpc/main.tf` in a shell and hoping the output does not exceed the terminal buffer, the agent calls `read_file({path: "infra/modules/vpc/main.tf"})` and gets the file contents as structured data with metadata (file size, last modified, permissions).
+
+This is one MCP server. One structured interface to one capability (filesystem access). The pattern scales. A Terraform MCP server exposes `plan`, `validate`, and `apply` as structured tools. A Checkov MCP server exposes `scan` with typed findings. A cost estimation MCP server returns structured pricing data instead of a wall of Infracost text. Each server turns a CLI tool into a typed API that agents can call reliably.
+
+:::note
+**Coming in Part 19:** Your first custom MCP server for Terraform operations. `terraform-plan`, `terraform-validate`, and `compliance-check` become structured MCP tools. The concept you learned today becomes a real tool that replaces the fragile shell-out pattern in your verification pipeline.
+:::
+
+---
+
+## Makefile
+
+Common commands across the entire project. Every script you created today gets a one-word shortcut. The Makefile is the developer's CLI: discoverable (run `make help`), consistent (same commands on every machine), and version-controlled.
+
+```makefile title="Makefile"
+.PHONY: eval eval-quick sync-config invoke verify help
+
+# Model evaluation
+eval:
+	@./scripts/eval/eval-models.sh
+
+eval-quick:
+	@./scripts/eval/eval-models.sh --models "anthropic:claude-sonnet-4-20250514"
+
+# Agent config sync
+sync-config:
+	@./scripts/setup/sync-agent-config.sh
+
+# Quick model invocation
+# Usage: make invoke PROVIDER=anthropic MODEL=claude-sonnet-4-20250514 PROMPT="your prompt"
+invoke:
+	@source scripts/lib/model-invoke.sh && invoke_model "$(PROVIDER)" "$(MODEL)" "$(PROMPT)"
+
+# Verify (terraform fmt + validate + tflint + checkov)
+verify:
+	@cd infra && terraform fmt -check -recursive
+	@cd infra && terraform validate
+	@tflint --recursive
+	@checkov -d infra/ --quiet
+
+help:
+	@echo "Available targets:"
+	@echo "  eval          Run full model evaluation (all models, all prompts)"
+	@echo "  eval-quick    Run evaluation with primary model only"
+	@echo "  sync-config   Regenerate all agent tool configs from AGENT-INSTRUCTIONS.md"
+	@echo "  invoke        Call a model (PROVIDER, MODEL, PROMPT required)"
+	@echo "  verify        Run terraform fmt, validate, tflint, checkov"
+	@echo "  help          Show this message"
+```
+
+Run `make eval` instead of remembering the script path. Run `make sync-config` after updating AGENT-INSTRUCTIONS.md. Run `make verify` to run the full pre-commit check suite manually. These are the muscle-memory commands for the rest of the series. Every part from here forward adds targets to this Makefile, and by Part 43 it is the single entry point for the entire pipeline.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No agent context. Ad-hoc prompts every time. One model for everything. No measurement. You are generating infrastructure with the same rigor as asking for a recipe. |
+| ✅ **Right** | Progressive AGENT-INSTRUCTIONS.md as the single source of truth. Four-layer prompts for infrastructure tasks. eval-models.sh running across 2-3 models with automated scoring. Model-agnostic invocation. Context budget awareness. |
+| ❌ **Over** | Custom fine-tuned models, complex RAG pipelines over your entire codebase, a full MLOps platform for model management, before you have deployed a single container to AWS. |
+| 🤖 **Agent Trap** | Agent ignores AGENT-INSTRUCTIONS.md when context window is full. The model does not error or warn. It silently drops conventions from the middle of context. Your tags disappear. Your naming conventions vanish. The code looks correct but violates every rule you set. The eval framework catches this: instruction compliance drops to 0% when context exceeds roughly 80% of the window. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 10: Docker Compose and Local Development**, we containerize the application. The AGENT-INSTRUCTIONS.md you built today travels with your repo. The eval framework you set up today measures the agent that generates your Dockerfiles. The four-layer prompt template you created today structures the Docker generation prompt. Everything connects.
+
+:::note
+**Coming in Part 19:** Your first custom MCP server and the first scripted Generate, Verify, Explain pipeline. The manual two-agent pattern you learned today becomes an automated workflow. The eval-models.sh framework you built today grows Infracost scoring and multi-file project evaluation. The concept becomes a daily tool.
+:::
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Repository Structure",
+    tasks: [
+      { text: "Monorepo layout matches directory structure (apps/, infra/, scripts/, decisions/, skills/)", syncKey: "part-09-monorepo-layout" },
+      { text: "AGENT-INSTRUCTIONS.md exists at repo root with 32 lines", syncKey: "part-09-agent-instructions" },
+      { text: "sync-agent-config.sh runs without errors and generates configs for all installed tools", syncKey: "part-09-sync-config" }
+    ]
+  },
+  {
+    category: "Model Invocation",
+    tasks: [
+      { text: "model-invoke.sh sources correctly and invoke_model function is available", syncKey: "part-09-model-invoke" },
+      { text: "invoke_model tested with at least 2 providers (e.g., anthropic + openai or anthropic + ollama)", syncKey: "part-09-two-providers" }
+    ]
+  },
+  {
+    category: "Prompt Engineering",
+    tasks: [
+      { text: "Four-layer prompt template created in skills/ directory", syncKey: "part-09-four-layer" },
+      { text: "At least one infrastructure prompt tested in both bare and four-layer format", syncKey: "part-09-prompt-test" }
+    ]
+  },
+  {
+    category: "Eval Framework",
+    tasks: [
+      { text: "eval-models.sh runs successfully and produces CSV output", syncKey: "part-09-eval-runs" },
+      { text: "All 11 prompt files exist in scripts/eval/prompts/", syncKey: "part-09-eleven-prompts" },
+      { text: "At least 2 models scored across all prompts", syncKey: "part-09-two-models" },
+      { text: "Prompt sensitivity metric visible in output (four-layer vs bare delta)", syncKey: "part-09-sensitivity" },
+      { text: "Personal leaderboard generated from CSV data", syncKey: "part-09-leaderboard" }
+    ]
+  },
+  {
+    category: "Agent Scorecard",
+    tasks: [
+      { text: "Panels 3-7 visible in Grafana with eval data (model scores, validate rate, checkov, compliance, sensitivity)", syncKey: "part-09-scorecard-panels" }
+    ]
+  },
+  {
+    category: "MCP",
+    tasks: [
+      { text: "One MCP server installed and functional (filesystem recommended)", syncKey: "part-09-mcp-installed" }
+    ]
+  },
+  {
+    category: "AGENT-INSTRUCTIONS.md",
+    tasks: [
+      { text: "Context Management section added (7 rules)", syncKey: "part-09-context-mgmt" },
+      { text: "Cumulative file is 32 lines", syncKey: "part-09-thirty-two-lines" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. AGENT-INSTRUCTIONS.md is the most important file in your repository. It is the bridge between your knowledge and your agent's behavior, and without it, every generation is a coin flip against training data defaults.
+2. Prompt quality is the single biggest lever on output quality. The four-layer anatomy (Context, Task, Structure, Anti-Patterns) turns a 3-minute investment into 20 minutes saved on every generation.
+3. Never trust a single model. eval-models.sh gives you data, not opinions, on which models work best for your specific infrastructure conventions and your specific project rules.
+4. Context is a backpack with a weight limit. Put instructions at the start, the task at the end, and cherry-pick everything in between, because the middle is where models lose attention and your conventions disappear.
+5. MCP is the future of agent-infrastructure interaction: structured tools replace fragile shell-out-and-parse patterns. The concept starts here in Part 9; the first custom server comes in [Part 19](/blog/aws-for-startups/19-first-scripted-pipeline).
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
