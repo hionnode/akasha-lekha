@@ -1,0 +1,578 @@
+---
+title: "Request Validation & OpenAPI: The Spec That Keeps Everyone Honest"
+description: "Implement request validation with OpenAPI spec, Zod, and Pydantic. Agents generate from spec, not ad hoc — consistent APIs by construction."
+excerpt: "The spec that keeps everyone honest. OpenAPI as source of truth, agents generate from it, validation enforces it, and your API stays consistent."
+date: "2026-04-08"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "api-gateway"]
+series: "AWS From Zero to Production"
+seriesPart: 24
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import PanelSwitcher from '../../../components/blog/code/PanelSwitcher.astro';
+import Panel from '../../../components/blog/code/Panel.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+
+Your agent generates an endpoint that accepts any JSON body. No validation. A user sends `{name: 123}` instead of `{name: "Alice"}` and your database stores a number where a string should be. Three months of bad data before anyone notices. You cannot fix it retroactively because downstream systems have already consumed the garbage. OpenAPI plus validation schemas prevent this by construction.
+
+**Time:** About 40 minutes.
+
+**Outcome:** An OpenAPI spec as the single source of truth for your API, request validation in your language of choice (Zod for Bun/Node, Pydantic for Python, struct tags for Go), and agents generating endpoint handlers from the spec instead of inventing contracts ad hoc.
+
+---
+
+## Why This Matters
+
+In [Part 23](/blog/aws-for-startups/23-api-design-rest), you designed the API contract: error format, pagination, trace IDs. That contract exists as documentation. Documentation is a promise. Validation is enforcement.
+
+Without validation, your API accepts anything. A `POST /api/v1/users` endpoint that expects `{email: string, name: string}` will happily accept `{email: 123, name: null, admin: true}`. The database stores garbage. Worse, an agent generating a frontend form might send fields that do not exist in your schema, and your backend silently accepts them because nothing checks.
+
+The fix is spec-first development. You write the OpenAPI spec. The spec defines every endpoint, every request body, every response shape. Validation schemas are generated from (or aligned with) the spec. Agents generate endpoint handlers by reading the spec, not by inventing contracts.
+
+The order matters: spec first, then implementation. Not the other way around. Code-first tools that generate specs from your implementation sound convenient, but they invert the dependency. When the spec is derived from code, the code is the truth and the spec is always slightly behind. When the spec is the truth, the code is wrong if it disagrees.
+
+---
+
+## What We're Building
+
+- An OpenAPI 3.1 spec for your API
+- Request validation schemas aligned with the spec
+- Language-specific validation (Zod, Pydantic, Go struct tags)
+- Agent workflow: generate from spec, not ad hoc
+
+---
+
+## Writing the OpenAPI Spec
+
+OpenAPI 3.1 is the current standard. It uses JSON Schema for type definitions, which means your validation schemas and your API documentation share the same type system.
+
+Start with one resource. You can expand later.
+
+```yaml title="api/openapi.yaml"
+openapi: '3.1.0'
+info:
+  title: Shipfast API
+  version: '1.0.0'
+  description: API for the Shipfast application
+
+servers:
+  - url: https://api.yourdomain.com/api/v1
+    description: Production
+  - url: http://localhost:8080/api/v1
+    description: Local development
+
+paths:
+  /users:
+    post:
+      operationId: createUser
+      summary: Create a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+
+    get:
+      operationId: listUsers
+      summary: List users with cursor pagination
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: Pagination cursor from previous response
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Number of items per page
+      responses:
+        '200':
+          description: Paginated list of users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
+
+  /users/{userId}:
+    get:
+      operationId: getUser
+      summary: Get a user by ID
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^usr_[a-zA-Z0-9]{26}$'
+      responses:
+        '200':
+          description: User found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+components:
+  schemas:
+    CreateUserRequest:
+      type: object
+      required:
+        - email
+        - name
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+      additionalProperties: false
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          pattern: '^usr_[a-zA-Z0-9]{26}$'
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    UserResponse:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/User'
+        request_id:
+          type: string
+        trace_id:
+          type: string
+
+    UserListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        request_id:
+          type: string
+        trace_id:
+          type: string
+
+    Pagination:
+      type: object
+      properties:
+        cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+        limit:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+        - request_id
+        - trace_id
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              reason:
+                type: string
+
+  responses:
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFoundError:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ConflictError:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+```
+
+Notice `additionalProperties: false` on `CreateUserRequest`. This rejects any field not in the schema. Without it, a client can send `{email: "a@b.com", name: "A", admin: true}` and the extra `admin` field passes validation silently.
+
+<FileTree>
+api/
+  openapi.yaml
+src/
+  errors/
+    codes.ts
+    response.ts
+  handlers/
+    users.ts
+  middleware/
+    ids.ts
+    validation.ts
+</FileTree>
+
+---
+
+## Validation by Language
+
+The OpenAPI spec defines what is valid. Your runtime code enforces it. Each language has its own idiomatic validation library.
+
+<PanelSwitcher defaultActive="bun">
+  <Panel label="Bun / Node (Zod)" value="bun">
+
+Zod is the standard for TypeScript runtime validation. Define schemas that mirror your OpenAPI types:
+
+```typescript title="src/validation/users.ts"
+import { z } from 'zod';
+
+export const CreateUserSchema = z.object({
+  email: z.string().email().max(255),
+  name: z.string().min(1).max(100),
+}).strict(); // strict() rejects unknown fields
+
+export const UserIdSchema = z.object({
+  userId: z.string().regex(/^usr_[a-zA-Z0-9]{26}$/),
+});
+
+export const PaginationSchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+export type CreateUserInput = z.infer<typeof CreateUserSchema>;
+```
+
+The `.strict()` method is the Zod equivalent of `additionalProperties: false`. It throws if the input contains fields not defined in the schema.
+
+Use it in your handler:
+
+```typescript title="src/handlers/users.ts"
+import { CreateUserSchema } from '../validation/users';
+import { errorResponse } from '../errors/response';
+
+export async function createUser(req: Request): Promise<Response> {
+  const body = await req.json().catch(() => null);
+
+  if (!body) {
+    return errorResponse({
+      error: 'VALIDATION_ERROR',
+      message: 'Request body must be valid JSON',
+      status: 400,
+    });
+  }
+
+  const result = CreateUserSchema.safeParse(body);
+
+  if (!result.success) {
+    return errorResponse({
+      error: 'VALIDATION_ERROR',
+      message: 'Request validation failed',
+      status: 400,
+      details: result.error.issues.map((issue) => ({
+        field: issue.path.join('.'),
+        reason: issue.message,
+      })),
+    });
+  }
+
+  // result.data is typed as CreateUserInput
+  const user = await db.createUser(result.data);
+  // ... return success response
+}
+```
+
+`safeParse` returns a discriminated union. If validation fails, you get structured errors with field paths and messages. These map directly to the `details` array in your error response format from [Part 23](/blog/aws-for-startups/23-api-design-rest).
+
+  </Panel>
+  <Panel label="Python (Pydantic)" value="python">
+
+Pydantic v2 is the standard for Python runtime validation. Define models that mirror your OpenAPI types:
+
+```python title="src/validation/users.py"
+from pydantic import BaseModel, EmailStr, Field
+from pydantic import ConfigDict
+
+
+class CreateUserRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')  # Reject unknown fields
+
+    email: EmailStr = Field(max_length=255)
+    name: str = Field(min_length=1, max_length=100)
+
+
+class PaginationParams(BaseModel):
+    cursor: str | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+```
+
+`extra='forbid'` rejects any field not in the schema. This is the Pydantic equivalent of `additionalProperties: false`.
+
+Use it in your handler (FastAPI makes this automatic):
+
+```python title="src/handlers/users.py"
+from fastapi import FastAPI, HTTPException
+from src.validation.users import CreateUserRequest
+
+app = FastAPI()
+
+@app.post("/api/v1/users", status_code=201)
+async def create_user(body: CreateUserRequest):
+    # body is already validated by Pydantic
+    # FastAPI returns 422 with field-level errors automatically
+    user = await db.create_user(
+        email=body.email,
+        name=body.name,
+    )
+    return {"data": user, "request_id": req_id, "trace_id": trace_id}
+```
+
+FastAPI validates the request body automatically using the Pydantic model. If validation fails, FastAPI returns a 422 response with structured error details. You may want to override the default error handler to match your standard error format from Part 23.
+
+  </Panel>
+  <Panel label="Go (struct tags)" value="go">
+
+Go uses struct tags with a validator library. The `go-playground/validator` package is the standard:
+
+```go title="internal/validation/users.go"
+package validation
+
+import "github.com/go-playground/validator/v10"
+
+var validate = validator.New()
+
+type CreateUserRequest struct {
+    Email string `json:"email" validate:"required,email,max=255"`
+    Name  string `json:"name"  validate:"required,min=1,max=100"`
+}
+
+func ValidateCreateUser(req CreateUserRequest) error {
+    return validate.Struct(req)
+}
+```
+
+Use it in your handler:
+
+```go title="internal/handlers/users.go"
+func CreateUser(w http.ResponseWriter, r *http.Request) {
+    var req validation.CreateUserRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        writeError(w, "VALIDATION_ERROR", "Invalid JSON body", 400, nil)
+        return
+    }
+
+    if err := validation.ValidateCreateUser(req); err != nil {
+        validationErrors := err.(validator.ValidationErrors)
+        details := make([]map[string]string, len(validationErrors))
+        for i, e := range validationErrors {
+            details[i] = map[string]string{
+                "field":  e.Field(),
+                "reason": e.Tag(),
+            }
+        }
+        writeError(w, "VALIDATION_ERROR", "Validation failed", 400, details)
+        return
+    }
+
+    // req is validated, proceed
+}
+```
+
+Go does not reject unknown fields by default when using `json.Decoder`. To enforce strict parsing, use `decoder.DisallowUnknownFields()` before calling `Decode`.
+
+  </Panel>
+</PanelSwitcher>
+
+---
+
+## Spec-First Agent Workflow
+
+The AGENT-INSTRUCTIONS.md rules from [Part 23](/blog/aws-for-startups/23-api-design-rest) include "OpenAPI spec is source of truth" and "Agents generate from spec, not ad hoc." Here is what that looks like in practice.
+
+### The Wrong Way: Ad Hoc Generation
+
+You tell the agent: "Create a POST endpoint for user registration." The agent invents the request body, the response shape, the error format, the status codes. It generates something that works. It does not match your spec because it never saw your spec.
+
+### The Right Way: Spec-Driven Generation
+
+You tell the agent: "Implement the `createUser` operation from `api/openapi.yaml`. Use the validation patterns from `src/validation/users.ts`. Follow the error response format in `src/errors/response.ts`."
+
+The agent reads the spec, reads the validation file, reads the error helper. It generates a handler that matches all three. The spec is the constraint. The existing code is the pattern. The agent fills in the implementation.
+
+```text title="Example Agent Prompt"
+Implement the createUser handler based on:
+- OpenAPI spec: api/openapi.yaml (operationId: createUser)
+- Validation: src/validation/users.ts (CreateUserSchema)
+- Error format: src/errors/response.ts (errorResponse helper)
+- ID generation: use ULID with usr_ prefix
+
+The handler should:
+1. Parse and validate the request body using CreateUserSchema
+2. Check for duplicate email (return 409 CONFLICT)
+3. Create the user in the database
+4. Return 201 with UserResponse shape
+```
+
+This prompt gives the agent three files as context and a clear implementation target. The agent cannot invent a new error format because it sees the existing one. It cannot skip validation because the validation schema is in the prompt.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate validation inline instead of using your existing validation schemas. You ask the agent to build a new endpoint, and it creates its own Zod schema inside the handler file instead of importing from `src/validation/`. Now you have two schemas for the same resource: one in the validation directory (aligned with OpenAPI) and one inline in the handler (invented by the agent). They will drift.
+
+**What catches it:** Code review. Check that every handler imports validation from `src/validation/`, never defines its own schemas inline. A lint rule can enforce this: no `z.object()` calls in handler files.
+
+</Alert>
+
+### Keeping Spec and Validation in Sync
+
+The OpenAPI spec and your validation schemas must agree. Two strategies:
+
+1. **Manual alignment.** Write both by hand. When the spec changes, update the validation schema. This works for small APIs (fewer than 20 endpoints) where the overhead of tooling exceeds the cost of manual updates.
+
+2. **Code generation.** Use a tool to generate validation schemas from the OpenAPI spec. For TypeScript, `openapi-typescript` generates types. For Python, `datamodel-code-generator` generates Pydantic models. For Go, `oapi-codegen` generates structs and handlers.
+
+For a startup with fewer than 10 endpoints, manual alignment is fine. The spec is small enough to keep in your head. When you hit 20+ endpoints, invest in code generation.
+
+:::tip
+Whichever strategy you choose, add a CI check that validates the OpenAPI spec on every PR. Use `spectral lint api/openapi.yaml` to catch spec errors before they reach main.
+:::
+
+---
+
+## Generated Documentation
+
+One benefit of spec-first development: documentation is free. Your OpenAPI spec is valid input for documentation generators.
+
+```bash terminal
+npx @redocly/cli build-docs api/openapi.yaml --output docs/api.html
+```
+
+This generates a static HTML page with every endpoint, request/response shapes, and examples. Host it on your documentation site or include it in your repository. The documentation is always accurate because it is generated from the same spec that drives your validation.
+
+You can also serve interactive documentation with Swagger UI or Scalar:
+
+```bash terminal
+npx @scalar/cli serve api/openapi.yaml --port 3100
+```
+
+This gives you a local API documentation server with a "Try it" button for every endpoint. Useful for frontend developers testing against your contract before the backend is fully implemented.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No validation. Accept any input. Store whatever arrives. Discover the data quality problem three months later when your analytics dashboard shows 47% of email addresses are integers. |
+| ✅ **Right** | OpenAPI spec as the single source of truth. Language-native validation (Zod, Pydantic, struct tags) at the API boundary. Agents generate from the spec, not ad hoc. `additionalProperties: false` rejects unknown fields. |
+| ❌ **Over** | Custom validation framework that wraps Zod that wraps JSON Schema that is generated from the OpenAPI spec that is generated from the Zod schema. Three layers of indirection. Nobody knows which one is the source of truth. |
+| 🤖 **Agent Trap** | Agent generates validation inline instead of from the OpenAPI spec. Handler A has its own Zod schema. Handler B has a different Zod schema for the same resource. The schemas drift. One accepts `admin: true`, the other rejects it. The spec says neither should exist. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 25: Mocking External Services**, you build test mocks for external APIs and AWS SDK calls. Your API contract and validation are defined. Now you need tests that verify them without depending on third-party uptime. MSW for JavaScript, responses for Python, gomock for Go.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "OpenAPI",
+    tasks: [
+      { text: "OpenAPI 3.1 spec written for all current endpoints", syncKey: "part-24-openapi-spec" },
+      { text: "Spec includes request schemas with additionalProperties: false", syncKey: "part-24-additional-properties" },
+      { text: "Spec includes standard error response references", syncKey: "part-24-error-responses" },
+      { text: "Spec validates with spectral lint (no errors)", syncKey: "part-24-spectral-lint" }
+    ]
+  },
+  {
+    category: "Validation",
+    tasks: [
+      { text: "Validation schemas created for all request bodies", syncKey: "part-24-validation-schemas" },
+      { text: "Validation rejects unknown fields (strict/forbid)", syncKey: "part-24-strict-validation" },
+      { text: "At least one endpoint fully validated end-to-end", syncKey: "part-24-e2e-validated" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "Agent prompts include OpenAPI spec as context", syncKey: "part-24-agent-spec-context" },
+      { text: "Generated handlers import from validation directory (no inline schemas)", syncKey: "part-24-no-inline-schemas" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. OpenAPI spec is the single source of truth. Agents generate FROM the spec, not alongside it. If the spec and the code disagree, the code is wrong.
+2. Validation happens at the API boundary, not deep in business logic. Validate early, trust internally. Once data passes the boundary, every function downstream can assume it is valid.
+3. Spec-first means your API contract exists before implementation. Agents implement, they do not design. The contract is a human decision.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

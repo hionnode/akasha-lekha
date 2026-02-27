@@ -1,0 +1,713 @@
+---
+title: "Mocking External Services: Testing Without the Real World"
+description: "Mock external APIs and AWS services in tests with MSW, responses/httpx-mock, and testify/gomock. Reliable tests that don't depend on third-party uptime."
+excerpt: "Testing without the real world. Mock external APIs and AWS services, because your tests shouldn't fail when Stripe is down."
+date: "2026-04-11"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "testing"]
+series: "AWS From Zero to Production"
+seriesPart: 25
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import PanelSwitcher from '../../../components/blog/code/PanelSwitcher.astro';
+import Panel from '../../../components/blog/code/Panel.astro';
+
+Your tests call Stripe's API. Stripe has a 15-minute outage. Your CI pipeline fails. Your deploy is blocked. Not because your code is broken, but because a third-party service you do not control is temporarily unavailable. Your team stares at a red X on the PR for 15 minutes, refreshes, sees green, clicks merge. Nobody learned anything. Nobody's code changed. Fifteen minutes of your deploy pipeline were wasted.
+
+**Time:** About 35 minutes.
+
+**Outcome:** External APIs mocked in your test suite (MSW for Bun/Node, responses for Python, gomock for Go), AWS SDK calls mocked for DynamoDB and S3, and test isolation patterns that ensure every test runs independently.
+
+---
+
+## Why This Matters
+
+You have an API contract from [Part 23](/blog/aws-for-startups/23-api-design-rest) and validation from [Part 24](/blog/aws-for-startups/24-request-validation-openapi). Now you need tests. But your API calls external services: Stripe for payments, SendGrid for email, AWS DynamoDB for storage, S3 for file uploads.
+
+Tests that hit real external services have three problems:
+
+1. **Flaky.** Third-party services have outages, rate limits, and network latency. Your test suite becomes a distributed systems availability problem. One service down means all tests touching that service fail.
+
+2. **Slow.** Network round trips add 50-500ms per call. A test suite with 100 tests making 3 external calls each adds 15-150 seconds. Locally that is annoying. In CI, that is expensive.
+
+3. **Non-deterministic.** External services return different data on different days. A test that checks "Stripe returns three products" fails when someone adds a fourth product in the Stripe dashboard. Your test is now coupled to someone else's data.
+
+Mocking fixes all three. Mocks return instantly, deterministically, and never go down. The tradeoff is that mocks can drift from reality. Your mock says Stripe returns `{id: "price_123"}` but Stripe changed the field to `{priceId: "price_123"}` six months ago. You manage this drift with contract tests (coming later) and by keeping mocks close to real API responses.
+
+---
+
+## What We're Building
+
+- HTTP-level mocks for external APIs (Stripe, SendGrid, etc.)
+- AWS SDK mocks for DynamoDB and S3
+- Test isolation patterns (reset between tests, factory functions)
+- Agent-generated mock patterns from API specs
+
+---
+
+## Mocking External HTTP APIs
+
+External API mocking happens at the HTTP level. Your code makes an HTTP request. Instead of reaching the real server, a mock interceptor catches the request and returns a predefined response. Your code cannot tell the difference.
+
+<PanelSwitcher defaultActive="bun">
+  <Panel label="Bun / Node (MSW)" value="bun">
+
+MSW (Mock Service Worker) is the standard for HTTP mocking in the JavaScript ecosystem. It intercepts requests at the network level, which means your code (including third-party SDKs) works exactly as it does in production.
+
+```bash terminal
+bun add -d msw
+```
+
+Set up handlers for external services:
+
+```typescript title="src/test/mocks/handlers.ts"
+import { http, HttpResponse } from 'msw';
+
+export const stripeHandlers = [
+  // Create a customer
+  http.post('https://api.stripe.com/v1/customers', () => {
+    return HttpResponse.json({
+      id: 'cus_test123',
+      object: 'customer',
+      email: 'dev@shipfast.io',
+      created: 1712000000,
+    });
+  }),
+
+  // Create a payment intent
+  http.post('https://api.stripe.com/v1/payment_intents', () => {
+    return HttpResponse.json({
+      id: 'pi_test456',
+      object: 'payment_intent',
+      amount: 2000,
+      currency: 'usd',
+      status: 'requires_payment_method',
+      client_secret: 'pi_test456_secret_test789',
+    });
+  }),
+];
+
+export const sendgridHandlers = [
+  http.post('https://api.sendgrid.com/v3/mail/send', () => {
+    return new HttpResponse(null, { status: 202 });
+  }),
+];
+
+export const handlers = [...stripeHandlers, ...sendgridHandlers];
+```
+
+Set up the mock server for tests:
+
+```typescript title="src/test/mocks/server.ts"
+import { setupServer } from 'msw/node';
+import { handlers } from './handlers';
+
+export const server = setupServer(...handlers);
+```
+
+Wire it into your test setup:
+
+```typescript title="src/test/setup.ts"
+import { afterAll, afterEach, beforeAll } from 'vitest';
+import { server } from './mocks/server';
+
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+```
+
+The key setting is `onUnhandledRequest: 'error'`. This throws an error when your code makes an HTTP request that has no mock handler. Without this, unmocked requests silently hit the real service, and you think your tests are isolated when they are not.
+
+Now write tests that use the mocks:
+
+```typescript title="src/test/handlers/payments.test.ts"
+import { describe, it, expect } from 'vitest';
+import { http, HttpResponse } from 'msw';
+import { server } from '../mocks/server';
+import { createPaymentIntent } from '../../handlers/payments';
+
+describe('createPaymentIntent', () => {
+  it('returns client secret on success', async () => {
+    const result = await createPaymentIntent({
+      amount: 2000,
+      currency: 'usd',
+      customerId: 'cus_test123',
+    });
+
+    expect(result.clientSecret).toBe('pi_test456_secret_test789');
+  });
+
+  it('handles Stripe errors', async () => {
+    // Override the default handler for this test
+    server.use(
+      http.post('https://api.stripe.com/v1/payment_intents', () => {
+        return HttpResponse.json(
+          {
+            error: {
+              type: 'card_error',
+              message: 'Your card was declined.',
+              code: 'card_declined',
+            },
+          },
+          { status: 402 }
+        );
+      })
+    );
+
+    const result = await createPaymentIntent({
+      amount: 2000,
+      currency: 'usd',
+      customerId: 'cus_test123',
+    });
+
+    expect(result.error).toBe('PAYMENT_FAILED');
+  });
+});
+```
+
+The `server.use()` call in the second test overrides the default handler for that single test. After the test, `afterEach(() => server.resetHandlers())` restores the defaults. This is how you test error paths without affecting other tests.
+
+  </Panel>
+  <Panel label="Python (responses)" value="python">
+
+The `responses` library mocks the `requests` library. For `httpx` (async), use `respx` or `httpx-mock`.
+
+```bash terminal
+pip install responses pytest
+```
+
+```python title="tests/mocks/external.py"
+import responses
+
+STRIPE_MOCKS = [
+    responses.Response(
+        method=responses.POST,
+        url="https://api.stripe.com/v1/customers",
+        json={
+            "id": "cus_test123",
+            "object": "customer",
+            "email": "dev@shipfast.io",
+            "created": 1712000000,
+        },
+        status=200,
+    ),
+    responses.Response(
+        method=responses.POST,
+        url="https://api.stripe.com/v1/payment_intents",
+        json={
+            "id": "pi_test456",
+            "object": "payment_intent",
+            "amount": 2000,
+            "currency": "usd",
+            "status": "requires_payment_method",
+            "client_secret": "pi_test456_secret_test789",
+        },
+        status=200,
+    ),
+]
+```
+
+Use in tests:
+
+```python title="tests/test_payments.py"
+import responses
+from tests.mocks.external import STRIPE_MOCKS
+from src.handlers.payments import create_payment_intent
+
+
+@responses.activate
+def test_create_payment_intent_success():
+    for mock in STRIPE_MOCKS:
+        responses.add(mock)
+
+    result = create_payment_intent(
+        amount=2000, currency="usd", customer_id="cus_test123"
+    )
+
+    assert result["client_secret"] == "pi_test456_secret_test789"
+
+
+@responses.activate
+def test_create_payment_intent_card_declined():
+    responses.add(
+        responses.POST,
+        "https://api.stripe.com/v1/payment_intents",
+        json={
+            "error": {
+                "type": "card_error",
+                "message": "Your card was declined.",
+                "code": "card_declined",
+            }
+        },
+        status=402,
+    )
+
+    result = create_payment_intent(
+        amount=2000, currency="usd", customer_id="cus_test123"
+    )
+
+    assert result["error"] == "PAYMENT_FAILED"
+```
+
+The `@responses.activate` decorator intercepts all HTTP requests made by `requests`. Any unmocked request raises a `ConnectionError`, which is the equivalent of MSW's `onUnhandledRequest: 'error'`.
+
+  </Panel>
+  <Panel label="Go (httptest)" value="go">
+
+Go's standard library includes `httptest`, which creates real HTTP servers on localhost. For more complex mocking, use `jarcoal/httpmock`.
+
+```bash terminal
+go get github.com/jarcoal/httpmock
+```
+
+```go title="internal/testutil/mocks.go"
+package testutil
+
+import (
+    "github.com/jarcoal/httpmock"
+)
+
+func RegisterStripeMocks() {
+    httpmock.RegisterResponder("POST", "https://api.stripe.com/v1/customers",
+        httpmock.NewJsonResponderOrPanic(200, map[string]interface{}{
+            "id":      "cus_test123",
+            "object":  "customer",
+            "email":   "dev@shipfast.io",
+            "created": 1712000000,
+        }),
+    )
+
+    httpmock.RegisterResponder("POST", "https://api.stripe.com/v1/payment_intents",
+        httpmock.NewJsonResponderOrPanic(200, map[string]interface{}{
+            "id":            "pi_test456",
+            "object":        "payment_intent",
+            "amount":        2000,
+            "currency":      "usd",
+            "status":        "requires_payment_method",
+            "client_secret": "pi_test456_secret_test789",
+        }),
+    )
+}
+```
+
+Use in tests:
+
+```go title="internal/handlers/payments_test.go"
+package handlers
+
+import (
+    "testing"
+    "github.com/jarcoal/httpmock"
+    "myapp/internal/testutil"
+)
+
+func TestCreatePaymentIntentSuccess(t *testing.T) {
+    httpmock.Activate()
+    defer httpmock.DeactivateAndReset()
+
+    testutil.RegisterStripeMocks()
+
+    result, err := CreatePaymentIntent(2000, "usd", "cus_test123")
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+
+    if result.ClientSecret != "pi_test456_secret_test789" {
+        t.Errorf("expected client secret pi_test456_secret_test789, got %s", result.ClientSecret)
+    }
+
+    // Verify the mock was actually called
+    info := httpmock.GetCallCountInfo()
+    if info["POST https://api.stripe.com/v1/payment_intents"] != 1 {
+        t.Error("expected exactly one call to Stripe payment_intents")
+    }
+}
+```
+
+`httpmock.Activate()` intercepts all HTTP traffic from Go's default transport. `DeactivateAndReset()` restores normal behavior after the test. Always defer it.
+
+  </Panel>
+</PanelSwitcher>
+
+---
+
+## Mocking AWS SDK Calls
+
+Your API uses DynamoDB, S3, and SES through the AWS SDK. You mock these the same way you mock external APIs, but at the SDK client level instead of the HTTP level.
+
+<PanelSwitcher defaultActive="bun">
+  <Panel label="Bun / Node (aws-sdk-client-mock)" value="bun">
+
+The `aws-sdk-client-mock` library is purpose-built for mocking AWS SDK v3 clients:
+
+```bash terminal
+bun add -d aws-sdk-client-mock
+```
+
+```typescript title="src/test/mocks/aws.ts"
+import { mockClient } from 'aws-sdk-client-mock';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+
+export const ddbMock = mockClient(DynamoDBDocumentClient);
+export const s3Mock = mockClient(S3Client);
+
+export function setupDynamoDBMocks() {
+  ddbMock.reset();
+
+  ddbMock.on(GetCommand).resolves({
+    Item: {
+      PK: 'USER#usr_test123',
+      SK: 'PROFILE',
+      email: 'dev@shipfast.io',
+      name: 'Developer',
+      createdAt: '2026-04-04T10:30:00Z',
+    },
+  });
+
+  ddbMock.on(PutCommand).resolves({});
+
+  ddbMock.on(QueryCommand).resolves({
+    Items: [
+      { PK: 'USER#usr_001', SK: 'PROFILE', email: 'a@test.io', name: 'Alice' },
+      { PK: 'USER#usr_002', SK: 'PROFILE', email: 'b@test.io', name: 'Bob' },
+    ],
+    LastEvaluatedKey: undefined,
+  });
+}
+
+export function setupS3Mocks() {
+  s3Mock.reset();
+
+  s3Mock.on(PutObjectCommand).resolves({ ETag: '"abc123"' });
+  s3Mock.on(GetObjectCommand).resolves({
+    Body: 'file-contents' as any,
+    ContentType: 'application/json',
+  });
+}
+```
+
+Use in tests:
+
+```typescript title="src/test/handlers/users.test.ts"
+import { describe, it, expect, beforeEach } from 'vitest';
+import { ddbMock, setupDynamoDBMocks } from '../mocks/aws';
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
+import { getUser } from '../../handlers/users';
+
+describe('getUser', () => {
+  beforeEach(() => {
+    setupDynamoDBMocks();
+  });
+
+  it('returns user from DynamoDB', async () => {
+    const result = await getUser('usr_test123');
+    expect(result.data.email).toBe('dev@shipfast.io');
+  });
+
+  it('returns 404 when user not found', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+    const result = await getUser('usr_nonexistent');
+    expect(result.error).toBe('NOT_FOUND');
+  });
+});
+```
+
+`ddbMock.reset()` in `beforeEach` clears all mock state between tests. Override specific commands per test to test error paths.
+
+  </Panel>
+  <Panel label="Python (moto)" value="python">
+
+`moto` is the standard library for mocking AWS services in Python. It creates a full in-memory simulation of AWS services:
+
+```bash terminal
+pip install moto[dynamodb2,s3]
+```
+
+```python title="tests/conftest.py"
+import boto3
+import pytest
+from moto import mock_aws
+
+
+@pytest.fixture
+def aws_credentials(monkeypatch):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_SECURITY_TOKEN", "testing")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-south-1")
+
+
+@pytest.fixture
+def dynamodb_table(aws_credentials):
+    with mock_aws():
+        client = boto3.resource("dynamodb", region_name="ap-south-1")
+        table = client.create_table(
+            TableName="shipfast-prod",
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        # Seed test data
+        table.put_item(Item={
+            "PK": "USER#usr_test123",
+            "SK": "PROFILE",
+            "email": "dev@shipfast.io",
+            "name": "Developer",
+        })
+        yield table
+```
+
+Use in tests:
+
+```python title="tests/test_users.py"
+from moto import mock_aws
+from src.handlers.users import get_user
+
+
+@mock_aws
+def test_get_user_success(dynamodb_table):
+    result = get_user("usr_test123")
+    assert result["data"]["email"] == "dev@shipfast.io"
+
+
+@mock_aws
+def test_get_user_not_found(dynamodb_table):
+    result = get_user("usr_nonexistent")
+    assert result["error"] == "NOT_FOUND"
+```
+
+`moto` provides a full DynamoDB implementation in memory. You create real tables, insert real items, and query them. The behavior matches AWS closely enough for unit and integration tests.
+
+  </Panel>
+  <Panel label="Go (interfaces)" value="go">
+
+Go's idiomatic approach is dependency injection with interfaces. Define an interface for your DynamoDB operations, then create a mock implementation:
+
+```go title="internal/db/interface.go"
+package db
+
+import "context"
+
+type UserStore interface {
+    GetUser(ctx context.Context, userID string) (*User, error)
+    CreateUser(ctx context.Context, user *User) error
+    ListUsers(ctx context.Context, cursor string, limit int) ([]*User, string, error)
+}
+```
+
+```go title="internal/db/mock.go"
+package db
+
+import "context"
+
+type MockUserStore struct {
+    Users      map[string]*User
+    CreateErr  error
+    GetErr     error
+}
+
+func NewMockUserStore() *MockUserStore {
+    return &MockUserStore{
+        Users: map[string]*User{
+            "usr_test123": {
+                ID:    "usr_test123",
+                Email: "dev@shipfast.io",
+                Name:  "Developer",
+            },
+        },
+    }
+}
+
+func (m *MockUserStore) GetUser(ctx context.Context, userID string) (*User, error) {
+    if m.GetErr != nil {
+        return nil, m.GetErr
+    }
+    user, ok := m.Users[userID]
+    if !ok {
+        return nil, ErrNotFound
+    }
+    return user, nil
+}
+
+func (m *MockUserStore) CreateUser(ctx context.Context, user *User) error {
+    if m.CreateErr != nil {
+        return m.CreateErr
+    }
+    m.Users[user.ID] = user
+    return nil
+}
+```
+
+Your handler accepts the interface, not the concrete type. Tests inject the mock:
+
+```go title="internal/handlers/users_test.go"
+func TestGetUserSuccess(t *testing.T) {
+    store := db.NewMockUserStore()
+    handler := NewUserHandler(store)
+
+    req := httptest.NewRequest("GET", "/api/v1/users/usr_test123", nil)
+    w := httptest.NewRecorder()
+
+    handler.GetUser(w, req)
+
+    if w.Code != 200 {
+        t.Errorf("expected 200, got %d", w.Code)
+    }
+}
+```
+
+This is the Go way. No magic, no HTTP interception, no monkey patching. Just interfaces and implementations.
+
+  </Panel>
+</PanelSwitcher>
+
+---
+
+## Test Isolation Patterns
+
+Every test must be independent. Test A must not affect Test B. Three patterns enforce this.
+
+### 1. Reset Mock State Between Tests
+
+Every test framework has a "before each" hook. Use it to reset mocks:
+
+```typescript title="src/test/setup.ts"
+import { beforeEach } from 'vitest';
+import { server } from './mocks/server';
+import { ddbMock, s3Mock } from './mocks/aws';
+
+beforeEach(() => {
+  server.resetHandlers();  // Reset HTTP mocks
+  ddbMock.reset();         // Reset DynamoDB mock
+  s3Mock.reset();          // Reset S3 mock
+});
+```
+
+### 2. Factory Functions for Test Data
+
+Do not copy-paste test data. Create factory functions:
+
+```typescript title="src/test/factories/user.ts"
+import { randomUUIDv7 } from 'crypto';
+
+interface UserOverrides {
+  id?: string;
+  email?: string;
+  name?: string;
+  createdAt?: string;
+}
+
+export function createTestUser(overrides: UserOverrides = {}) {
+  return {
+    id: overrides.id ?? `usr_${randomUUIDv7()}`,
+    email: overrides.email ?? `test-${Date.now()}@shipfast.io`,
+    name: overrides.name ?? 'Test User',
+    createdAt: overrides.createdAt ?? new Date().toISOString(),
+  };
+}
+```
+
+Factory functions generate unique data by default. Override specific fields when a test needs deterministic values. This prevents collision between parallel tests.
+
+### 3. No Shared Mutable State
+
+If two tests need the same external service to behave differently, they set up their own mocks. Never rely on test execution order.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents mock at the wrong level. You ask the agent to test your payment handler, and it mocks your own `createPaymentIntent` function instead of mocking the Stripe HTTP call. The test passes, but it tests nothing. Your actual Stripe integration code never runs. The mock should intercept the HTTP request to `api.stripe.com`, not replace your function.
+
+**What catches it:** Integration tests that run without mocks (in a separate test suite) will fail if the real integration code has bugs. But the real guard is code review: check that mocks intercept external boundaries, not internal functions.
+
+</Alert>
+
+---
+
+## Agent-Generated Mocks
+
+Agents generate good mock setups when given the right context. Include the real API response in your prompt.
+
+```text title="Example Agent Prompt"
+Generate MSW mock handlers for the Stripe Payment Intents API.
+Use the response format from: https://docs.stripe.com/api/payment_intents
+
+Mock these scenarios:
+1. Successful payment intent creation (status: requires_payment_method)
+2. Card declined (402, card_error)
+3. Rate limited (429, rate_limit_error)
+
+Follow the mock handler pattern in: src/test/mocks/handlers.ts
+Place handlers in: src/test/mocks/stripe.ts
+```
+
+The key is giving the agent the real API response format. Without it, the agent generates mock responses from its training data, which may be outdated or for a different API version. With the real format, the mock matches production.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Tests hit real external services. CI fails when Stripe is down. Tests take 3 minutes because of network round trips. Test data depends on production state. |
+| ✅ **Right** | External APIs mocked at the HTTP level (MSW, responses, httpmock). AWS SDK calls mocked with purpose-built libraries. Tests reset between runs. Factory functions generate test data. `onUnhandledRequest: 'error'` catches unmocked calls. |
+| ❌ **Over** | Mock everything, including your own internal services. Test mocks are so abstracted from reality that your entire test suite passes but the real integration fails on the first request. Full in-memory AWS simulation for a CRUD API. |
+| 🤖 **Agent Trap** | Agent mocks at the wrong level. Instead of intercepting the HTTP request to `api.stripe.com`, it replaces your `createPaymentIntent` function with a stub. The test passes. The real Stripe integration code never executes. The bug ships to production. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 26: E2E Testing with Playwright**, you test the full user journey through a real browser. Unit tests verify functions. Integration tests verify service boundaries. E2E tests verify what the user actually sees. Playwright runs your frontend against your mocked backend across Chromium, Firefox, and WebKit.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Mocking",
+    tasks: [
+      { text: "External API calls mocked in test suite (Stripe, SendGrid, etc.)", syncKey: "part-25-external-mocks" },
+      { text: "AWS SDK calls mocked (DynamoDB, S3)", syncKey: "part-25-aws-mocks" },
+      { text: "Tests pass without network access", syncKey: "part-25-offline-tests" },
+      { text: "onUnhandledRequest: 'error' (or equivalent) catches unmocked calls", syncKey: "part-25-unhandled-error" }
+    ]
+  },
+  {
+    category: "Test Isolation",
+    tasks: [
+      { text: "Mock state resets between tests (beforeEach)", syncKey: "part-25-mock-reset" },
+      { text: "Factory functions used for test data (no copy-paste)", syncKey: "part-25-factories" },
+      { text: "Tests run in any order without affecting each other", syncKey: "part-25-test-isolation" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Mock external services and AWS SDK calls at the boundary. Your tests should never depend on third-party uptime. A flaky test suite caused by network issues is a solved problem.
+2. Mock at the right level: HTTP interception for external APIs, SDK client mocking for AWS services. Never mock your own functions to test integration code.
+3. Agents generate good mock setups when given the real API response format as context. Include it in the prompt. Without it, the agent invents mock responses from stale training data.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

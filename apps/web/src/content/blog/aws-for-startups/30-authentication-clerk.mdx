@@ -1,0 +1,463 @@
+---
+title: "Authentication with Clerk: Auth You Don't Have to Build"
+description: "Integrate Clerk authentication across Bun, Python, and Go backends. Social login, JWT verification, and middleware patterns without building auth from scratch."
+excerpt: "Auth you don't have to build. Clerk integration across all three backends, because rolling your own auth is a full-time job you don't need."
+date: "2026-04-30"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "authentication", "backend"]
+series: "AWS From Zero to Production"
+seriesPart: 30
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import PanelSwitcher from '../../../components/blog/code/PanelSwitcher.astro';
+import Panel from '../../../components/blog/code/Panel.astro';
+
+You ask an agent to add authentication to your API. It generates a custom JWT implementation with `jsonwebtoken`, a hand-rolled password hashing function, a session table in your database, a forgot-password email flow, and 400 lines of middleware. Two days later you discover the JWT secret is hardcoded, the password hash uses MD5, and there is no rate limiting on the login endpoint. You have not built authentication. You have built a security liability.
+
+**Time:** About 45 minutes.
+
+**Outcome:** Clerk handling authentication for your application. Social login (Google, GitHub) working. JWT verification middleware integrated into your Bun.js API. The same pattern ready to apply to Python and Go backends. Zero custom auth code to maintain.
+
+---
+
+## Why This Matters
+
+Authentication is the most dangerous thing to build yourself. Not because it is technically hard (it is), but because the consequences of getting it wrong are catastrophic. A SQL injection in your items endpoint leaks item names. A vulnerability in your auth system leaks every user's session, email, and (if you stored them) credentials.
+
+The build-versus-buy calculus for auth is straightforward:
+
+| Factor | Build | Buy (Clerk) |
+|--------|-------|-------------|
+| Time to implement | 2-4 weeks | 2-4 hours |
+| Social login (Google, GitHub) | OAuth integration per provider | Toggle in dashboard |
+| MFA | Build from scratch | Checkbox |
+| Session management | You maintain it | They maintain it |
+| Security patches | Your responsibility | Their responsibility |
+| Cost at 10K MAU | Your engineering time | $25/month |
+| Compliance (SOC 2) | You certify | They are certified |
+
+For a startup, engineering time is the scarcest resource. Spending two weeks building auth means two weeks not building your product. Clerk (or Auth0, or Supabase Auth) handles the complexity so you do not have to. We use Clerk because it has the best developer experience and the simplest integration across multiple languages.
+
+---
+
+## What We're Building
+
+- Clerk project with Google and GitHub social login enabled
+- JWT verification middleware for Bun.js (Hono)
+- Protected and public route patterns
+- The same middleware pattern documented for Python (FastAPI) and Go
+- Environment-based configuration (no hardcoded secrets)
+
+---
+
+## Clerk Setup
+
+:::steps
+1. Create an account at [clerk.com](https://clerk.com)
+2. Create a new application
+3. Enable **Google** and **GitHub** as social login providers
+4. Copy your **Publishable Key** and **Secret Key** from the API Keys page
+:::
+
+Store the keys in your environment, never in code:
+
+```bash title=".env"
+CLERK_PUBLISHABLE_KEY=pk_test_abc123...
+CLERK_SECRET_KEY=sk_test_xyz789...
+```
+
+```bash title=".env.example"
+CLERK_PUBLISHABLE_KEY=pk_test_your_key_here
+CLERK_SECRET_KEY=sk_test_your_key_here
+```
+
+The `.env` file is gitignored. The `.env.example` is committed with placeholders. This pattern was established in [Part 12](/blog/aws-for-startups/12-env-vars-secrets-security).
+
+On your EC2 instance, these values come from AWS Secrets Manager (which you will set up in [Part 37](/blog/aws-for-startups/37-secrets-manager)). For now, set them directly in your systemd service environment.
+
+---
+
+## Bun.js Integration
+
+Install the Clerk backend SDK:
+
+```bash terminal
+cd api-bun && bun add @clerk/backend
+```
+
+### JWT Verification Middleware
+
+The middleware extracts the JWT from the `Authorization` header, verifies it with Clerk's public keys, and attaches the user information to the request context:
+
+```typescript title="api-bun/src/middleware/auth.ts"
+import { createClerkClient } from '@clerk/backend';
+import type { Context, Next } from 'hono';
+
+const clerk = createClerkClient({
+  secretKey: process.env.CLERK_SECRET_KEY,
+});
+
+export async function requireAuth(c: Context, next: Next) {
+  const authHeader = c.req.header('Authorization');
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return c.json({ error: 'unauthorized', message: 'Missing or invalid Authorization header' }, 401);
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+
+  try {
+    const payload = await clerk.verifyToken(token);
+
+    c.set('userId', payload.sub);
+    c.set('sessionId', payload.sid);
+
+    await next();
+  } catch (error) {
+    return c.json({ error: 'unauthorized', message: 'Invalid or expired token' }, 401);
+  }
+}
+
+export function optionalAuth() {
+  return async (c: Context, next: Next) => {
+    const authHeader = c.req.header('Authorization');
+
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.replace('Bearer ', '');
+      try {
+        const payload = await clerk.verifyToken(token);
+        c.set('userId', payload.sub);
+        c.set('sessionId', payload.sid);
+      } catch {
+        // Token invalid, continue without auth context
+      }
+    }
+
+    await next();
+  };
+}
+```
+
+Two middleware functions:
+
+- **`requireAuth`**: Returns 401 if no valid token. Use on endpoints that require authentication.
+- **`optionalAuth`**: Attempts to parse the token but continues regardless. Use on endpoints that behave differently for authenticated users (personalized responses, for example).
+
+### Applying Middleware to Routes
+
+```typescript title="api-bun/src/routes/items.ts"
+import { Hono } from 'hono';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+import { requireAuth } from '../middleware/auth';
+
+const tracer = trace.getTracer('api-bun', '1.0.0');
+
+export const itemRoutes = new Hono();
+
+// Public: list items
+itemRoutes.get('/', (c) => {
+  return tracer.startActiveSpan('list-items', (span) => {
+    try {
+      const items = [
+        { id: '1', name: 'Item One', createdAt: '2026-04-26T00:00:00Z' },
+        { id: '2', name: 'Item Two', createdAt: '2026-04-26T00:00:00Z' },
+      ];
+      span.setAttribute('items.count', items.length);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return c.json({ items, total: items.length });
+    } finally {
+      span.end();
+    }
+  });
+});
+
+// Protected: create item
+itemRoutes.post('/', requireAuth, (c) => {
+  return tracer.startActiveSpan('create-item', async (span) => {
+    try {
+      const userId = c.get('userId');
+      const body = await c.req.json();
+
+      span.setAttribute('user.id', userId);
+      span.setAttribute('item.name', body.name);
+
+      const item = {
+        id: crypto.randomUUID(),
+        name: body.name,
+        createdBy: userId,
+        createdAt: new Date().toISOString(),
+      };
+
+      span.setStatus({ code: SpanStatusCode.OK });
+      return c.json(item, 201);
+    } catch (error) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return c.json({ error: 'bad_request', message: 'Invalid request body' }, 400);
+    } finally {
+      span.end();
+    }
+  });
+});
+```
+
+GET `/api/items` is public. POST `/api/items` requires authentication. The `requireAuth` middleware runs before the route handler and sets `userId` in the request context. The route handler reads it with `c.get('userId')`.
+
+### Health Check Stays Public
+
+```typescript title="api-bun/src/routes/health.ts"
+import { Hono } from 'hono';
+
+export const healthRoutes = new Hono();
+
+// Health check is ALWAYS public. ALB checks this endpoint.
+healthRoutes.get('/', (c) => {
+  return c.json({
+    status: 'healthy',
+    service: 'api-bun',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+```
+
+:::caution
+Never put authentication middleware on health check endpoints. Your ALB hits `/health` every 30 seconds. If the health check requires a JWT, the ALB cannot authenticate, the target shows as unhealthy, and the ALB stops routing traffic to your instance. Your API goes down because of a middleware ordering mistake.
+:::
+
+<Alert type="caution" title="Agent Trap">
+
+Agents apply authentication middleware globally with `app.use('*', requireAuth)` because it is the simplest way to "secure everything." This breaks the ALB health check, CORS preflight requests, and any public endpoint. The agent's code works in isolation but fails the moment it sits behind a load balancer.
+
+**What catches it:** The ALB health check immediately shows the target as `unhealthy`. If you see your instance cycling between healthy and unhealthy after adding auth, check whether the health check endpoint requires authentication.
+
+</Alert>
+
+---
+
+## The Same Pattern in Python and Go
+
+JWT verification middleware follows the same structure in every language: extract the token, verify it, attach user context. The framework changes, the pattern does not.
+
+<PanelSwitcher defaultActive="python">
+  <Panel label="Python (FastAPI)" value="python">
+
+```python title="api-python/middleware/auth.py"
+from functools import wraps
+from fastapi import Request, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import httpx
+import os
+
+security = HTTPBearer()
+
+CLERK_SECRET_KEY = os.environ["CLERK_SECRET_KEY"]
+CLERK_API_URL = "https://api.clerk.com/v1"
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{CLERK_API_URL}/tokens/verify",
+                headers={"Authorization": f"Bearer {CLERK_SECRET_KEY}"},
+                json={"token": token},
+            )
+            if response.status_code != 200:
+                raise HTTPException(status_code=401, detail="Invalid token")
+            return response.json()
+    except httpx.HTTPError:
+        raise HTTPException(status_code=401, detail="Token verification failed")
+```
+
+```python title="api-python/routes/items.py"
+from fastapi import APIRouter, Depends
+from middleware.auth import verify_token
+
+router = APIRouter()
+
+@router.get("/")
+async def list_items():
+    """Public endpoint - no auth required"""
+    return {"items": [], "total": 0}
+
+@router.post("/", dependencies=[Depends(verify_token)])
+async def create_item(body: dict, user=Depends(verify_token)):
+    """Protected endpoint - requires valid Clerk JWT"""
+    return {"id": "new-id", "createdBy": user["sub"]}
+```
+
+  </Panel>
+  <Panel label="Go" value="go">
+
+```go title="api-go/middleware/auth.go"
+package middleware
+
+import (
+    "context"
+    "net/http"
+    "os"
+    "strings"
+
+    "github.com/clerk/clerk-sdk-go/v2"
+    "github.com/clerk/clerk-sdk-go/v2/jwt"
+)
+
+type contextKey string
+const UserIDKey contextKey = "userId"
+
+func RequireAuth(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        authHeader := r.Header.Get("Authorization")
+        if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+            http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+            return
+        }
+
+        token := strings.TrimPrefix(authHeader, "Bearer ")
+
+        claims, err := jwt.Verify(r.Context(), &jwt.VerifyParams{
+            Token: token,
+        })
+        if err != nil {
+            http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+            return
+        }
+
+        ctx := context.WithValue(r.Context(), UserIDKey, claims.Subject)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+```
+
+```go title="api-go/main.go"
+package main
+
+import (
+    "net/http"
+    "api-go/middleware"
+)
+
+func main() {
+    mux := http.NewServeMux()
+
+    // Public
+    mux.HandleFunc("GET /health", healthHandler)
+    mux.HandleFunc("GET /api/items", listItemsHandler)
+
+    // Protected
+    mux.Handle("POST /api/items",
+        middleware.RequireAuth(http.HandlerFunc(createItemHandler)))
+
+    http.ListenAndServe(":3000", mux)
+}
+```
+
+  </Panel>
+</PanelSwitcher>
+
+The pattern is identical across all three languages:
+
+1. Extract the `Authorization` header
+2. Verify the JWT with Clerk's SDK or API
+3. Attach the user ID to the request context
+4. Let the route handler access it
+
+You integrate Clerk once per language. Every protected route uses the same middleware. This is why authentication is a buy decision. The integration takes an hour. Building it from scratch takes weeks, and maintaining it takes forever.
+
+---
+
+## Frontend Integration
+
+On the frontend (your React or Astro application), Clerk provides drop-in components:
+
+```typescript title="frontend/src/App.tsx"
+import { ClerkProvider, SignInButton, UserButton } from '@clerk/clerk-react';
+
+function App() {
+  return (
+    <ClerkProvider publishableKey={import.meta.env.VITE_CLERK_PUBLISHABLE_KEY}>
+      <header>
+        <SignInButton />
+        <UserButton />
+      </header>
+      {/* Your app content */}
+    </ClerkProvider>
+  );
+}
+```
+
+When a user signs in, Clerk returns a JWT. Your frontend includes this JWT in API requests. Your backend middleware verifies it. The user is authenticated end-to-end without you writing a single line of session management, password hashing, or OAuth callback handling.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No authentication, or a hand-rolled JWT implementation with hardcoded secrets, no refresh tokens, and MD5 password hashing. Your users' data is one exploit away from a breach notification email. |
+| ✅ **Right** | Clerk for authentication, JWT verification middleware on protected routes, social login enabled, health checks excluded from auth. Zero custom auth code. One hour to integrate, zero hours to maintain. |
+| ❌ **Over** | Custom auth service with SAML federation, SCIM provisioning, MFA policies, passwordless magic links, and a dedicated auth database, for a product with 50 beta users. You have built an identity platform instead of your product. |
+| 🤖 **Agent Trap** | Agent implements custom JWT authentication with `jsonwebtoken` instead of using the Clerk SDK. It generates 300 lines of auth code, hardcodes the JWT secret, skips refresh token rotation, and misses rate limiting on the login endpoint. You now have a custom auth system to audit, patch, and maintain forever. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 31: Backend on EC2, Python FastAPI with Traces**, you deploy the second backend on the same infrastructure. Same VPC, same ALB, same SigNoz. Different language, same deployment pipeline. The Clerk middleware you saw in the Python tab above becomes a full implementation.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Authentication",
+    tasks: [
+      { text: "Clerk account created with application configured", syncKey: "part-30-clerk-account" },
+      { text: "Google and GitHub social login enabled", syncKey: "part-30-social-login" },
+      { text: "Clerk keys stored in environment (not in code)", syncKey: "part-30-keys-env" }
+    ]
+  },
+  {
+    category: "Backend Integration",
+    tasks: [
+      { text: "JWT verification middleware working in Bun.js", syncKey: "part-30-bun-middleware" },
+      { text: "Protected routes return 401 without token", syncKey: "part-30-401-test" },
+      { text: "Protected routes return 200 with valid token", syncKey: "part-30-200-test" },
+      { text: "Health check endpoint NOT behind auth middleware", syncKey: "part-30-health-public" }
+    ]
+  },
+  {
+    category: "Security",
+    tasks: [
+      { text: "No hardcoded Clerk secrets in code", syncKey: "part-30-no-hardcoded-secrets" },
+      { text: ".env.example committed with placeholders", syncKey: "part-30-env-example" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Authentication is a buy decision, not a build decision. Clerk handles social login, session management, MFA, and compliance. You handle calling `requireAuth` on protected routes. The complexity ratio is 1,000:1 in your favor.
+2. Agents love building custom auth because it is a well-defined problem with clear training data. Resist. Every line of custom auth code is a line you have to audit for security vulnerabilities forever.
+3. JWT verification middleware follows the same pattern across Bun.js, Python, and Go: extract token, verify with Clerk, attach user context. The framework does not matter.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

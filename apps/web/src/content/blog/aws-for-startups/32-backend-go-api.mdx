@@ -1,0 +1,527 @@
+---
+title: "Backend on EC2: Go API with Traces"
+description: "Deploy a Go API on EC2 with OpenTelemetry. Static binary, minimal memory footprint, and the same infrastructure pipeline as Bun and Python."
+excerpt: "Go API with traces. Static binary, tiny memory footprint, same infrastructure. The third language on the same pipeline."
+date: "2026-05-08"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ec2", "backend", "opentelemetry"]
+series: "AWS From Zero to Production"
+seriesPart: 32
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+You have deployed Bun.js (28 MB memory) and Python (95 MB memory) on the same EC2 instance. Now deploy Go. One binary, 8 MB of memory, zero runtime dependencies. Copy a single file to the instance, start a systemd service, and you are running. No `node_modules`, no `virtualenv`, no package manager. The simplest deployment in this entire series.
+
+**Time:** About 40 minutes.
+
+**Outcome:** A Go API running on EC2 behind the ALB, instrumented with OpenTelemetry, sending traces to SigNoz alongside Bun.js and Python. Three services on the service map. One infrastructure pipeline serving three languages. A concrete comparison of latency and resource usage across all three.
+
+---
+
+## Why This Matters
+
+Go's static binary compilation means your deployment artifact is a single executable file. There is no runtime to install, no dependency resolution at deploy time, no version conflicts between your development machine and the server. You build the binary locally (or in CI), copy it to the instance, and run it.
+
+This is the simplest deployment model possible. It also means Go is the easiest language to deploy to new infrastructure. When you containerize these services in [Part 39](/blog/aws-for-startups/39-docker-production), Go's advantage persists: the Docker image is a scratch container with a single binary, typically under 20 MB.
+
+But the real lesson of this part is not "Go is better." It is that your infrastructure does not care. The same Terraform module, the same ALB target group, the same SigNoz pipeline, the same operational runbook. Three languages, one infrastructure. That is what language-agnostic infrastructure means in practice.
+
+---
+
+## What We're Building
+
+- A Go API using the standard library's `net/http` with a lightweight router
+- OpenTelemetry instrumentation with the `otel-go` SDK
+- Cross-compilation for Linux AMD64 (or ARM64 for Graviton)
+- Deployment as a single binary with a systemd service
+- Three-language comparison in SigNoz
+
+---
+
+## Go API Setup
+
+<FileTree>
+api-go/
+  cmd/
+    server/
+      main.go
+  internal/
+    handler/
+      health.go
+      items.go
+    middleware/
+      auth.go
+      tracing.go
+  go.mod
+  go.sum
+  Makefile
+</FileTree>
+
+```go title="api-go/go.mod"
+module api-go
+
+go 1.22
+
+require (
+	go.opentelemetry.io/otel v1.27.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.27.0
+	go.opentelemetry.io/otel/sdk v1.27.0
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.52.0
+)
+```
+
+### Instrumentation
+
+```go title="api-go/cmd/server/main.go"
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"api-go/internal/handler"
+	"api-go/internal/middleware"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+)
+
+func initTracer(ctx context.Context) (*sdktrace.TracerProvider, error) {
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "localhost:4318"
+	}
+
+	exporter, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithEndpoint(endpoint),
+		otlptracehttp.WithInsecure(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating OTLP exporter: %w", err)
+	}
+
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceName("api-go"),
+			semconv.ServiceVersion("1.0.0"),
+			semconv.DeploymentEnvironment(os.Getenv("ENVIRONMENT")),
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating resource: %w", err)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+	)
+
+	otel.SetTracerProvider(tp)
+	return tp, nil
+}
+
+func main() {
+	ctx := context.Background()
+
+	tp, err := initTracer(ctx)
+	if err != nil {
+		log.Fatalf("Failed to initialize tracer: %v", err)
+	}
+	defer func() {
+		if err := tp.Shutdown(ctx); err != nil {
+			log.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
+
+	mux := http.NewServeMux()
+
+	// Public routes
+	mux.HandleFunc("GET /health", handler.Health)
+	mux.HandleFunc("GET /api/items", handler.ListItems)
+	mux.HandleFunc("GET /api/items/{id}", handler.GetItem)
+
+	// Protected routes
+	mux.Handle("POST /api/items",
+		middleware.RequireAuth(http.HandlerFunc(handler.CreateItem)))
+
+	// Wrap with OTel HTTP instrumentation
+	wrappedMux := otelhttp.NewHandler(mux, "api-go")
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3002"
+	}
+
+	server := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrappedMux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+		<-sigChan
+
+		shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		log.Println("Shutting down gracefully...")
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Forced shutdown: %v", err)
+		}
+	}()
+
+	log.Printf("API starting on port %s", port)
+	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+```
+
+Three things to note in this Go server that you did not need in the Bun.js or Python versions:
+
+1. **Explicit timeouts.** Go's default HTTP server has no read, write, or idle timeout. Without them, a slow client can hold a connection open forever, eventually exhausting file descriptors. Always set all three timeouts.
+2. **Graceful shutdown.** The signal handler catches SIGTERM (sent by systemd on `systemctl stop`) and drains active requests before exiting. Without this, stopping the service kills in-flight requests.
+3. **OTel wrapping.** The `otelhttp.NewHandler` wraps the entire mux, auto-instrumenting every request. Unlike Bun.js (where instrumentation patches at import time) or Python (where `FastAPIInstrumentor` instruments the app object), Go instrumentation wraps the handler explicitly.
+
+### Route Handlers
+
+```go title="api-go/internal/handler/health.go"
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+	"time"
+)
+
+var startTime = time.Now()
+
+func Health(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	response := map[string]interface{}{
+		"status":    "healthy",
+		"service":   "api-go",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"uptime":    time.Since(startTime).String(),
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+```
+
+```go title="api-go/internal/handler/items.go"
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+)
+
+var tracer = otel.Tracer("api-go")
+
+type Item struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy string    `json:"created_by,omitempty"`
+}
+
+func ListItems(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "list-items")
+	defer span.End()
+
+	items := []Item{
+		{ID: "1", Name: "Item One", CreatedAt: time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC)},
+		{ID: "2", Name: "Item Two", CreatedAt: time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC)},
+	}
+
+	span.SetAttributes(attribute.Int("items.count", len(items)))
+	span.SetStatus(codes.Ok, "")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"items": items,
+		"total": len(items),
+	})
+
+	_ = ctx // Ensure context propagation in future downstream calls
+}
+
+func GetItem(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "get-item")
+	defer span.End()
+
+	id := r.PathValue("id")
+	span.SetAttributes(attribute.String("item.id", id))
+
+	item := Item{
+		ID:        id,
+		Name:      "Item " + id,
+		CreatedAt: time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC),
+	}
+
+	span.SetStatus(codes.Ok, "")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(item)
+}
+
+func CreateItem(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "create-item")
+	defer span.End()
+
+	var body struct {
+		Name string `json:"name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		span.SetStatus(codes.Error, "invalid request body")
+		http.Error(w, `{"error":"bad_request","message":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+
+	if body.Name == "" {
+		span.SetStatus(codes.Error, "missing name field")
+		http.Error(w, `{"error":"bad_request","message":"name is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	span.SetAttributes(attribute.String("item.name", body.Name))
+	span.SetStatus(codes.Ok, "")
+
+	item := Item{
+		ID:        "new-uuid",
+		Name:      body.Name,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(item)
+}
+```
+
+<Alert type="caution" title="Agent Trap">
+
+Agent-generated Go code frequently ignores returned errors. The classic pattern: `json.NewEncoder(w).Encode(response)` returns an error that is silently discarded. In Go, every function that returns an error must have that error checked. Agents skip error checks because it makes the code shorter and compiles fine. The compiler does not enforce error checking (unlike Rust). You must enforce it during review.
+
+**What catches it:** `golangci-lint` with the `errcheck` linter enabled flags every unchecked error return. Add it to your pre-commit hooks.
+
+</Alert>
+
+---
+
+## Build and Deploy
+
+Go cross-compilation produces a binary for your target architecture without needing Go installed on the server.
+
+### Build for Linux
+
+```makefile title="api-go/Makefile"
+BINARY_NAME=api-go
+VERSION=1.0.0
+
+.PHONY: build build-linux build-arm clean
+
+build:
+	go build -o bin/$(BINARY_NAME) ./cmd/server
+
+build-linux:
+	GOOS=linux GOARCH=amd64 go build -o bin/$(BINARY_NAME)-linux-amd64 ./cmd/server
+
+build-arm:
+	GOOS=linux GOARCH=arm64 go build -o bin/$(BINARY_NAME)-linux-arm64 ./cmd/server
+
+clean:
+	rm -rf bin/
+```
+
+```bash terminal
+make build-linux
+ls -lh bin/api-go-linux-amd64
+```
+
+<TerminalOutput title="Binary size">
+
+```
+-rwxr-xr-x  1 user  staff  12M May  8 10:00 bin/api-go-linux-amd64
+```
+
+</TerminalOutput>
+
+12 MB. The entire application, compiled and ready to run. No dependencies.
+
+### Deploy to EC2
+
+```bash terminal
+# Copy binary to instance
+scp -P 2222 bin/api-go-linux-amd64 ec2-user@localhost:/opt/app-go/api-go
+ssh -p 2222 ec2-user@localhost "chmod +x /opt/app-go/api-go"
+```
+
+### Systemd Service
+
+```ini title="/etc/systemd/system/api-go.service"
+[Unit]
+Description=Go API Service
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/app-go
+Environment=PORT=3002
+Environment=ENVIRONMENT=dev
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=your-signoz-host:4318
+ExecStart=/opt/app-go/api-go
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash terminal
+sudo systemctl daemon-reload
+sudo systemctl enable api-go
+sudo systemctl start api-go
+sudo systemctl status api-go
+```
+
+<TerminalOutput title="systemctl status api-go">
+
+```
+● api-go.service - Go API Service
+     Loaded: loaded (/etc/systemd/system/api-go.service; enabled)
+     Active: active (running) since Thu 2026-05-08 10:00:00 UTC
+   Main PID: 34567 (api-go)
+      Tasks: 6
+     Memory: 8.2M
+        CPU: 45ms
+     CGroup: /system.slice/api-go.service
+             └─34567 /opt/app-go/api-go
+
+May 08 10:00:00 ip-10-0-3-45 systemd[1]: Started Go API Service.
+May 08 10:00:00 ip-10-0-3-45 api-go[34567]: API starting on port 3002
+```
+
+</TerminalOutput>
+
+8.2 MB of memory. Compare: Bun.js uses 28 MB, Python uses 95 MB. Go uses 8 MB. All three serve the same API.
+
+---
+
+## Three-Language Comparison
+
+You now have three backends running on the same EC2 instance, all sending traces to SigNoz:
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Bun.js", "Python (FastAPI)", "Go"]} />
+  <ComparisonRow feature="Memory usage" Bun_js="28 MB" Python__FastAPI_="95 MB" Go="8 MB (Best)" />
+  <ComparisonRow feature="Binary/package size" Bun_js="node_modules (50+ MB)" Python__FastAPI_="virtualenv (120+ MB)" Go="12 MB binary (Best)" />
+  <ComparisonRow feature="Startup time" Bun_js="~200ms" Python__FastAPI_="~800ms" Go="~50ms (Best)" />
+  <ComparisonRow feature="Deploy complexity" Bun_js="Runtime + packages" Python__FastAPI_="Runtime + virtualenv + WSGI" Go="Single binary (Best)" />
+  <ComparisonRow feature="Type safety" Bun_js="TypeScript (compile-time)" Python__FastAPI_="Pydantic (runtime)" Go="Static types (compile-time, Best)" />
+  <ComparisonRow feature="OTel integration" Bun_js="Auto + manual" Python__FastAPI_="Auto + manual" Go="Manual wrapping" />
+  <ComparisonRow feature="Agent code quality" Bun_js="Good" Python__FastAPI_="Good (sync trap)" Go="Fair (error handling)" />
+</ComparisonTable>
+
+Open SigNoz. The service map now shows three nodes: `api-bun`, `api-python`, and `api-go`. Click each one and compare latency distributions. The numbers are small right now with no real traffic, but the baseline matters for [Part 34](/blog/aws-for-startups/34-k6-human-judgment) when you run load tests.
+
+The comparison is not about choosing a winner. It is about proving that your infrastructure supports all three equally. When you need a CPU-intensive service, deploy it in Go. When you need rapid prototyping, use Bun.js. When your team's data engineers need an API, they can write it in Python. Your infrastructure handles all three with zero changes.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | A different deployment pipeline for each language. Different monitoring. Different infrastructure modules. Three languages means three times the operational overhead, and you spend more time managing deployments than building features. |
+| ✅ **Right** | Same Terraform, same ALB, same OTel pipeline, same SigNoz. Go's static binary makes deployment the simplest of the three. One infrastructure pattern that handles any language. |
+| ❌ **Over** | Go-specific optimizations (goroutine pool tuning, GC parameter tweaking, custom memory allocators) before you have profiled the application under real load. Go's defaults are good. Optimize after you have data, not before. |
+| 🤖 **Agent Trap** | Agent generates Go code with unchecked error returns because Go compiles without enforcing error handling. Every `json.Encode`, `http.Write`, and `os.Open` returns an error. If the agent ignores them, your API silently drops responses and corrupts data. `golangci-lint` with `errcheck` catches this. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 33: Auto Scaling Groups**, you stop managing individual EC2 instances. ASGs create, destroy, and replace instances automatically based on traffic. Your backends become cattle, not pets. When an instance fails a health check, the ASG terminates it and launches a replacement without you waking up.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Backend",
+    tasks: [
+      { text: "Go API running on EC2 as systemd service", syncKey: "part-32-go-running" },
+      { text: "API accessible through ALB on its path", syncKey: "part-32-alb-accessible" },
+      { text: "Health check endpoint passing", syncKey: "part-32-health-check" }
+    ]
+  },
+  {
+    category: "Observability",
+    tasks: [
+      { text: "Go traces visible in SigNoz", syncKey: "part-32-traces-visible" },
+      { text: "Three services on SigNoz service map", syncKey: "part-32-three-services" },
+      { text: "Latency comparison visible across all three runtimes", syncKey: "part-32-latency-comparison" }
+    ]
+  },
+  {
+    category: "Code Quality",
+    tasks: [
+      { text: "All error returns checked (no ignored errors)", syncKey: "part-32-error-handling" },
+      { text: "HTTP server timeouts configured (read, write, idle)", syncKey: "part-32-timeouts" },
+      { text: "Graceful shutdown on SIGTERM", syncKey: "part-32-graceful-shutdown" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Go's static binary is the simplest deployment in this series: build one file, copy it, run it. No runtime, no package manager, no dependency resolution on the server.
+2. Three languages, one infrastructure pipeline, one observability surface. The infrastructure does not care what language serves HTTP on port 3000. If it does, the infrastructure is wrong.
+3. Agent-generated Go code frequently ignores error returns. The compiler allows it. Your linter should not. Enable `errcheck` in `golangci-lint` and treat unchecked errors as build failures.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

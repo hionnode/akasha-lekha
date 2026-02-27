@@ -1,0 +1,574 @@
+---
+title: "K6 Load Testing: Know Your Limits Before Production"
+description: "Performance baselines with K6, the Agent Delegation Matrix for when AI helps vs hurts, and Recalibration Checkpoint 2. Human judgment required."
+excerpt: "Know your limits before production. Agents cannot do this for you. K6 load testing, the Agent Delegation Matrix, and your second trust recalibration."
+date: "2026-05-16"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "testing", "ai-agents", "model-eval"]
+series: "AWS From Zero to Production"
+seriesPart: 34
+featured: true
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+An agent generates a K6 script. Runs it. Reports "All checks passed, p95 = 250ms." You deploy to production. Under real load, p95 hits 2 seconds. The agent set the threshold at 500ms because it had no context for what "acceptable" means for your users. A p95 of 200ms is great for a REST API. It is unacceptable for a real-time game server. It is luxurious for a batch processor. Performance thresholds are business decisions. Agents cannot make business decisions. Full stop.
+
+**Time:** About 90 minutes.
+
+**Outcome:** K6 load test scripts for smoke, load, and stress testing. Performance baselines for all three backends. Thresholds set by you (not by the agent). Traces in SigNoz correlated with load test results. The Agent Delegation Matrix documented. AGENT-INSTRUCTIONS.md updated with Performance and Human Judgment Boundaries sections. Scorecard panels 15-17 live. Recalibration Checkpoint 2 completed.
+
+---
+
+## Why This Matters
+
+You have three backends running behind an ALB, instrumented with OpenTelemetry, sending traces to SigNoz. You know they work. You do not know their limits.
+
+How many concurrent users can your `t3.micro` handle before p95 latency exceeds 500ms? At what request rate does the ASG trigger a scale-out event? Where is the bottleneck: CPU, memory, network, or your application code?
+
+Without load testing, the answers are "you find out in production." Your first real traffic spike becomes your first load test, and your users are the test subjects.
+
+K6 is the right tool for this. It is open source, scriptable in JavaScript, integrates with CI/CD, and outputs metrics that you can correlate with SigNoz traces. Agents can generate K6 scripts (they are good at this). Agents cannot decide what "acceptable performance" means (they are bad at this). That boundary, between what agents handle and what requires human judgment, is the most important concept in this entire series.
+
+---
+
+## What We're Building
+
+- K6 test scripts: smoke, load, and stress tests
+- Performance baselines for Bun.js, Python, and Go APIs
+- K6 + SigNoz correlation (traces from load test traffic)
+- The Agent Delegation Matrix
+- AGENT-INSTRUCTIONS.md: Performance and Human Judgment Boundaries sections
+- Scorecard panels 15-17
+- Recalibration Checkpoint 2
+
+---
+
+## K6 Fundamentals
+
+K6 tests are JavaScript scripts that define virtual users (VUs), duration, and checks. Install K6 locally:
+
+```bash terminal
+brew install k6
+```
+
+### Test Types
+
+| Test Type | VUs | Duration | Purpose |
+|-----------|-----|----------|---------|
+| Smoke | 1-5 | 1 minute | Verify the test script works |
+| Load | 50-100 | 5-10 minutes | Normal traffic patterns |
+| Stress | 200-500 | 5-10 minutes | Find the breaking point |
+| Soak | 50-100 | 30-60 minutes | Memory leaks, connection exhaustion |
+
+Start with smoke. Graduate to load. Use stress to find limits. Run soak before production deployments. This order is not optional. Running a stress test before a smoke test wastes time debugging script errors at high concurrency.
+
+---
+
+## Writing K6 Scripts
+
+### Smoke Test
+
+```javascript title="tests/k6/smoke.js"
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+export const options = {
+  vus: 3,
+  duration: '1m',
+
+  // THRESHOLDS SET BY HUMAN - NOT BY AGENT
+  thresholds: {
+    http_req_duration: ['p(95)<500'],    // 95% of requests under 500ms
+    http_req_failed: ['rate<0.01'],       // Less than 1% failure rate
+    checks: ['rate>0.99'],               // 99% of checks pass
+  },
+};
+
+const BASE_URL = __ENV.BASE_URL || 'https://api.yourdomain.com';
+
+export default function () {
+  // Health check
+  const healthRes = http.get(`${BASE_URL}/health`);
+  check(healthRes, {
+    'health status 200': (r) => r.status === 200,
+    'health has status field': (r) => JSON.parse(r.body).status === 'healthy',
+  });
+
+  // List items
+  const listRes = http.get(`${BASE_URL}/api/items`);
+  check(listRes, {
+    'list status 200': (r) => r.status === 200,
+    'list returns array': (r) => JSON.parse(r.body).items !== undefined,
+  });
+
+  // Get single item
+  const getRes = http.get(`${BASE_URL}/api/items/1`);
+  check(getRes, {
+    'get status 200': (r) => r.status === 200,
+    'get returns item': (r) => JSON.parse(r.body).id === '1',
+  });
+
+  sleep(1);
+}
+```
+
+### Load Test
+
+```javascript title="tests/k6/load.js"
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+export const options = {
+  stages: [
+    { duration: '2m', target: 50 },   // Ramp up to 50 VUs
+    { duration: '5m', target: 50 },   // Stay at 50 VUs
+    { duration: '2m', target: 0 },    // Ramp down
+  ],
+
+  // THRESHOLDS SET BY HUMAN - NOT BY AGENT
+  thresholds: {
+    http_req_duration: ['p(95)<500', 'p(99)<1000'],
+    http_req_failed: ['rate<0.01'],
+    checks: ['rate>0.99'],
+  },
+};
+
+const BASE_URL = __ENV.BASE_URL || 'https://api.yourdomain.com';
+
+export default function () {
+  const responses = http.batch([
+    ['GET', `${BASE_URL}/health`],
+    ['GET', `${BASE_URL}/api/items`],
+    ['GET', `${BASE_URL}/api/items/1`],
+  ]);
+
+  responses.forEach((res, i) => {
+    check(res, {
+      [`request ${i} status 200`]: (r) => r.status === 200,
+    });
+  });
+
+  sleep(Math.random() * 3 + 1); // Random 1-4 second think time
+}
+```
+
+### Stress Test
+
+```javascript title="tests/k6/stress.js"
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+export const options = {
+  stages: [
+    { duration: '1m', target: 50 },    // Warm up
+    { duration: '2m', target: 100 },   // Normal load
+    { duration: '2m', target: 200 },   // Beyond normal
+    { duration: '2m', target: 300 },   // Stress
+    { duration: '2m', target: 0 },     // Recovery
+  ],
+
+  // THRESHOLDS: intentionally looser for stress test
+  // We WANT to find the breaking point
+  thresholds: {
+    http_req_duration: ['p(95)<2000'],   // 2 seconds under stress is acceptable
+    http_req_failed: ['rate<0.10'],       // Up to 10% failures expected at peak
+  },
+};
+
+const BASE_URL = __ENV.BASE_URL || 'https://api.yourdomain.com';
+
+export default function () {
+  const res = http.get(`${BASE_URL}/api/items`);
+  check(res, {
+    'status 200': (r) => r.status === 200,
+  });
+
+  sleep(0.5);
+}
+```
+
+Note the threshold differences between load and stress tests. Load test thresholds define your SLO (service level objective): what performance your users should expect under normal conditions. Stress test thresholds are intentionally loose because the goal is to find the breaking point, not to pass.
+
+<Alert type="caution" title="Agent Trap">
+
+The agent sets K6 thresholds to "reasonable defaults" from its training data. `p(95)<200` is a common default. But "reasonable" depends entirely on your application. A p95 of 200ms is aggressive for an API that queries a database. A p95 of 500ms is generous for an API that returns cached data.
+
+Thresholds must come from two sources:
+1. **Business requirements.** What latency do your users tolerate?
+2. **Baseline measurements.** What does your application actually achieve?
+
+Agents have access to neither. They guess. You decide.
+
+</Alert>
+
+### Running the Tests
+
+```bash terminal
+# Smoke test first
+k6 run tests/k6/smoke.js --env BASE_URL=https://api.yourdomain.com
+```
+
+<TerminalOutput title="K6 Smoke Test Results">
+
+```
+          /\      |‾‾| /‾‾/   /‾‾/
+     /\  /  \     |  |/  /   /  /
+    /  \/    \    |     (   /   ‾‾\
+   /          \   |  |\  \ |  (‾)  |
+  / __________ \  |__| \__\ \_____/ .io
+
+  execution: local
+     script: tests/k6/smoke.js
+     output: -
+
+  scenarios: (100.00%) 1 scenario, 3 max VUs, 1m30s max duration
+           * default: 3 looping VUs for 1m0s
+
+     ✓ health status 200
+     ✓ health has status field
+     ✓ list status 200
+     ✓ list returns array
+     ✓ get status 200
+     ✓ get returns item
+
+     checks.........................: 100.00% ✓ 540  ✗ 0
+     data_received..................: 156 kB  2.6 kB/s
+     data_sent......................: 48 kB   795 B/s
+     http_req_blocked...............: avg=1.2ms   min=0s     med=0s     max=120ms  p(90)=0s     p(95)=0s
+     http_req_duration..............: avg=45ms    min=12ms   med=38ms   max=220ms  p(90)=82ms   p(95)=105ms
+   ✓ { expected_response:true }....: avg=45ms    min=12ms   med=38ms   max=220ms  p(90)=82ms   p(95)=105ms
+     http_req_failed................: 0.00%   ✓ 0    ✗ 540
+     http_reqs......................: 540     8.99/s
+     iteration_duration.............: avg=1.14s   min=1.01s  med=1.12s  max=1.45s  p(90)=1.28s  p(95)=1.34s
+     iterations.....................: 180     2.99/s
+     vus............................: 3       min=3      max=3
+     vus_max........................: 3       min=3      max=3
+
+     ✓ http_req_duration.............: p(95)<500
+     ✓ http_req_failed...............: rate<0.01
+     ✓ checks.......................: rate>0.99
+```
+
+</TerminalOutput>
+
+Smoke test passes. p95 = 105ms. Now run the load test:
+
+```bash terminal
+k6 run tests/k6/load.js --env BASE_URL=https://api.yourdomain.com
+```
+
+Record these baselines. They are your first performance data point. In Recalibration Checkpoint 2 (below), you will use them to calibrate your expectations.
+
+---
+
+## K6 + SigNoz Correlation
+
+While K6 runs, your backends generate OpenTelemetry traces. Open SigNoz during or immediately after a load test. You will see:
+
+1. **Request rate spike** corresponding to the K6 ramp-up stages
+2. **Latency distribution shift** as VUs increase
+3. **Individual slow traces** that you can drill into to find the bottleneck
+
+This correlation is why you deployed SigNoz before you had an application. K6 tells you what is slow. SigNoz tells you why.
+
+Filter traces in SigNoz by the time window of your load test. Sort by duration descending. The slowest traces reveal your bottleneck. Is it database queries? Serialization? Network latency? You cannot answer these questions with K6 alone. You need traces.
+
+:::tip
+Add a custom header to your K6 requests (`k6-test: true`) and filter for it in SigNoz. This separates load test traffic from organic traffic when you run tests against a shared environment.
+:::
+
+---
+
+## The Agent Delegation Matrix
+
+This is the most important framework in this series.
+
+Over 33 parts, you have seen what agents do well and where they fail. The pattern is consistent: agents excel at mechanical, deterministic tasks and fail at tasks requiring judgment, context, or business understanding. The Agent Delegation Matrix formalizes this observation.
+
+| Task Dimension | Agent-Safe | Human-Required | Why |
+|----------------|------------|----------------|-----|
+| **Generate code** | Yes | Review required | Agents generate correct syntax. Correctness of logic requires human review. |
+| **Set thresholds** | No | Yes | Thresholds are business decisions. Agent has no business context. |
+| **Run tests** | Yes | Interpret results | Agents execute scripts perfectly. Interpreting results requires domain knowledge. |
+| **Fix lint errors** | Yes | No | Lint fixes are mechanical transformations with deterministic outputs. |
+| **Choose instance sizes** | No | Yes | Sizing depends on budget, traffic, and growth expectations the agent cannot know. |
+| **Write Terraform** | Yes | Review required | Syntax is correct. Security, cost, and naming require verification. |
+| **Set scaling policies** | No | Yes | Scaling targets depend on traffic patterns and budget. Agent uses generic defaults. |
+| **Create monitoring alerts** | Partially | Set alert thresholds | Agents can create the alarm resource. Humans decide what latency or error rate is actionable. |
+| **Rollback decisions** | No | Yes | Rollback is a risk assessment. Agent cannot evaluate blast radius or user impact. |
+| **Incident triage** | Partially | Final call | Agents can gather logs and suggest causes. Humans decide the response. |
+| **Cost optimization** | Partially | Approve changes | Agents can identify waste. Humans decide what to cut (some "waste" is insurance). |
+| **Security review** | Partially | Final approval | Agents can scan for known patterns. Novel vulnerabilities require human judgment. |
+
+### The Core Principle
+
+Agents handle **what** and **how**. Humans handle **why** and **whether**.
+
+- **What** to generate: Agent-safe. "Generate a Terraform module for an S3 bucket." The output is verifiable.
+- **How** to implement: Agent-safe. "Use gp3 volumes instead of gp2." The implementation is deterministic.
+- **Why** to build it: Human-required. "Should we add a caching layer?" The answer depends on business context.
+- **Whether** to deploy it: Human-required. "Is this change safe for production?" Risk assessment is not computable.
+
+When an agent needs a judgment call, it should surface three things: **options, tradeoffs, and data**. Not a recommendation. The agent calculates and presents. You decide.
+
+<Alert type="caution" title="Agent Trap">
+
+The most dangerous agent behavior is not generating wrong code. It is making judgment calls that look right. "I recommend t3.medium for production." "I set the p95 threshold to 200ms." "I configured min_size=3 for high availability." These are all reasonable-sounding statements with no connection to your specific situation.
+
+The Agent Delegation Matrix is not about preventing agents from doing things. It is about recognizing which outputs require your explicit approval before they become configuration.
+
+</Alert>
+
+---
+
+## AGENT-INSTRUCTIONS.md: Performance and Human Judgment Boundaries
+
+Add these two sections to your AGENT-INSTRUCTIONS.md. They are the most important additions since the IAM rules in [Part 2](/blog/aws-for-startups/02-iam-key-to-everything).
+
+```markdown title="AGENT-INSTRUCTIONS.md (additions)"
+## Performance
+
+- Load test thresholds set by HUMANS, not agents
+- p95 latency targets must be documented in this file before agents reference them
+- Cost-per-request calculated from actual load test data + billing data, not estimated
+- Never set scaling policy targets without load test baselines
+- Performance optimization changes require before/after benchmarks
+
+## Human Judgment Boundaries
+
+- Agents NEVER set performance thresholds, SLOs, or budget limits
+- Agents NEVER make rollback decisions
+- Agents NEVER decide acceptable risk levels
+- Agents CAN calculate, scan, generate options, and summarize
+- When agent needs a judgment call, it must surface: options, tradeoffs, data
+- Agent recommendations are INPUT to human decisions, not decisions themselves
+```
+
+These 11 lines bring AGENT-INSTRUCTIONS.md to 64 cumulative lines (up from 53 at the start of Phase 7).
+
+The Human Judgment Boundaries section is philosophical, and intentionally so. It draws a bright line that no amount of agent improvement erases. Even if models become 99.9% accurate on code generation, the decision about what to deploy, when to roll back, and what risk to accept remains human. This is not a technical limitation. It is an organizational principle.
+
+---
+
+## Scorecard: Panels 15-17
+
+Your Agent Scorecard in Grafana gets three new panels, all driven by K6 and billing data.
+
+### Panel 15: p95 Latency Over Time (with Deploy Markers)
+
+This panel tracks p95 latency from your load tests as a time series. Each data point is one load test run. Deploy markers (vertical lines) show when you shipped changes. When p95 latency spikes after a deploy, the correlation is immediate and visible.
+
+**Data source:** Prometheus or JSON file from K6 output.
+
+```bash terminal
+# Run K6 with JSON output for Scorecard ingestion
+k6 run tests/k6/load.js \
+  --env BASE_URL=https://api.yourdomain.com \
+  --out json=results/load-test-$(date +%Y%m%d-%H%M%S).json
+```
+
+### Panel 16: Cost-per-Request Trend
+
+Calculate cost-per-request from your AWS bill divided by total requests over the billing period. This number should trend down as your traffic grows (fixed infrastructure costs amortized over more requests) and spike when you over-provision or leave unused resources running.
+
+Formula: `(Monthly EC2 cost + ALB cost + data transfer) / Total monthly requests`
+
+For a `t3.micro` at $7.50/month serving 1 million requests/month: $0.0000075 per request. That is your baseline. Track it monthly.
+
+### Panel 17: Load Test Pass/Fail History
+
+A table showing the last 10 load test runs with:
+
+- Date
+- Test type (smoke, load, stress)
+- Pass/Fail
+- p95 latency
+- Error rate
+- VU count
+
+This panel gives you a trend. If load tests start failing after previously passing, something changed. Cross-reference with deploy markers from Panel 15 to find the cause.
+
+---
+
+## Recalibration Checkpoint 2
+
+This is the second data-driven trust adjustment. The first was in [Part 19](/blog/aws-for-startups/19-preview-environments). You have significantly more data now.
+
+### Step 1: Re-run eval-models.sh
+
+```bash terminal
+./scripts/eval/eval-models.sh
+```
+
+Compare results to your Recalibration 1 data. Are models improving, staying flat, or regressing? If a model you rely on has regressed, investigate. If a cheaper model now matches your current model's quality, consider switching.
+
+### Step 2: Review Scorecard Panels
+
+Look at all 17 panels. Focus on:
+
+- **Pre-commit pass/fail rate (Panel 1):** Is agent code quality improving over time? If agent-generated PRs pass pre-commit on the first try more than 90% of the time, you can reduce manual review scope for mechanical checks.
+- **Cost trend (Panel 10):** Is infrastructure cost stable, growing, or spiking? If your load test data shows you have headroom on your `t3.micro`, the cost trend should be flat.
+- **Load test results (Panel 17):** Are all tests passing? If the stress test found your breaking point, document it. That is your capacity ceiling.
+
+### Step 3: Review AGENT-INSTRUCTIONS.md
+
+Walk through every rule in the file. For each one:
+
+- **Consistently followed?** Keep it.
+- **Consistently violated?** Rephrase it or add a pre-commit hook that enforces it mechanically.
+- **Unnecessary?** Remove it. Dead rules add cognitive load.
+
+### Step 4: Adjust Pipeline Intensity
+
+Check the iterations-to-clean metric from your verify loop. If agent code consistently passes verification on the first iteration, your prompts and AGENT-INSTRUCTIONS.md are working. If it consistently takes 3+ iterations, your prompts need improvement or the task is too complex for the agent.
+
+### Step 5: Update Cost Budget
+
+Calculate your total agent API cost (model API calls for generation, verification, explanation) as a percentage of your infrastructure cost. If agent API spend exceeds 5% of infrastructure spend, optimize: use cheaper models for verification, reduce sampling, or batch operations.
+
+:::note
+Recalibration Checkpoints are not ceremonies. They are data reviews. Open the Scorecard, look at the trends, and make one or two concrete adjustments. The entire process should take 30 minutes. If it takes longer, you are overthinking it.
+:::
+
+---
+
+## Running Load Tests Against All Three Backends
+
+Test each backend separately to establish per-language baselines:
+
+```bash terminal
+# Bun.js backend
+k6 run tests/k6/load.js --env BASE_URL=https://api.yourdomain.com/bun
+
+# Python backend
+k6 run tests/k6/load.js --env BASE_URL=https://api.yourdomain.com/python
+
+# Go backend
+k6 run tests/k6/load.js --env BASE_URL=https://api.yourdomain.com/go
+```
+
+Record the results in a comparison table. Your SigNoz traces from the load test window show per-language latency breakdowns.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Bun.js", "Python", "Go"]} />
+  <ComparisonRow feature="p50 latency" Bun_js="25ms" Python="35ms" Go="12ms (Best)" />
+  <ComparisonRow feature="p95 latency" Bun_js="85ms" Python="150ms" Go="45ms (Best)" />
+  <ComparisonRow feature="p99 latency" Bun_js="180ms" Python="320ms" Go="95ms (Best)" />
+  <ComparisonRow feature="Max RPS (50 VUs)" Bun_js="~800" Python="~400" Go="~1200 (Best)" />
+  <ComparisonRow feature="Memory at 50 VUs" Bun_js="45 MB" Python="180 MB" Go="12 MB (Best)" />
+  <ComparisonRow feature="CPU at 50 VUs" Bun_js="35%" Python="55%" Go="15% (Best)" />
+</ComparisonTable>
+
+These numbers are illustrative baselines. Your actual numbers depend on your instance type, application logic, and network conditions. The point is not which language "wins." The point is that you have data. When someone asks "can our API handle 500 concurrent users?" you have a number, not a guess.
+
+---
+
+## Setting Your Thresholds
+
+Based on your load test results, set your performance thresholds. Document them in AGENT-INSTRUCTIONS.md:
+
+```markdown title="AGENT-INSTRUCTIONS.md (threshold documentation)"
+## Performance Baselines (Last Updated: 2026-05-16)
+
+- p95 target: 500ms (based on load test at 50 VUs)
+- p99 target: 1000ms
+- Max error rate: 1%
+- ASG scale-out trigger: CPU > 60%
+- Capacity ceiling: ~1200 RPS on t3.micro (Go), ~800 RPS (Bun), ~400 RPS (Python)
+```
+
+These numbers are yours. The agent did not set them. You looked at the data, considered your users' tolerance for latency, and decided. This is what the Agent Delegation Matrix looks like in practice: the agent ran the tests and calculated the metrics. You interpreted the results and set the targets.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No load testing. You deploy and hope. Your first traffic spike is your first load test, and your users are the test subjects. When the API slows down, you do not know whether the problem is your code, your instance, or your database because you have no baseline. |
+| ✅ **Right** | K6 smoke, load, and stress tests with human-set thresholds. SigNoz correlation for bottleneck analysis. Agent Delegation Matrix documented. Performance baselines recorded. Recalibration Checkpoint 2 completed with data-driven adjustments. |
+| ❌ **Over** | Continuous load testing in production, chaos engineering with fault injection, synthetic monitoring from 12 regions, detailed capacity planning models, for a product with 50 beta users. You are building Netflix's testing infrastructure for a seed-stage startup. |
+| 🤖 **Agent Trap** | Agent sets performance thresholds based on generic defaults from its training data. "p95 < 200ms" sounds professional but has no relationship to your application's actual performance or your users' expectations. You deploy, the threshold passes, and you believe your API is fast. It might be. Or the threshold might be so loose that a 5x regression goes unnoticed. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 35: RDS PostgreSQL**, you add a real database. Your APIs have been returning hardcoded data. PostgreSQL behind RDS changes that. Terraform-managed, in your private subnet, with automated backups and connection pooling. Your load test baselines from today will help you measure the performance impact of adding a database layer.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Load Testing",
+    tasks: [
+      { text: "K6 installed locally", syncKey: "part-34-k6-installed" },
+      { text: "Smoke test script written and passing", syncKey: "part-34-smoke-test" },
+      { text: "Load test script written and passing", syncKey: "part-34-load-test" },
+      { text: "Stress test script written (found breaking point)", syncKey: "part-34-stress-test" },
+      { text: "Thresholds set by human and documented", syncKey: "part-34-human-thresholds" },
+      { text: "K6 results correlated with SigNoz traces", syncKey: "part-34-signoz-correlation" }
+    ]
+  },
+  {
+    category: "Agent Delegation",
+    tasks: [
+      { text: "Agent Delegation Matrix documented", syncKey: "part-34-delegation-matrix" },
+      { text: "Matrix applied to at least one real decision (threshold setting)", syncKey: "part-34-matrix-applied" }
+    ]
+  },
+  {
+    category: "Scorecard",
+    tasks: [
+      { text: "Panel 15: p95 latency with deploy markers", syncKey: "part-34-panel-15" },
+      { text: "Panel 16: cost-per-request trend", syncKey: "part-34-panel-16" },
+      { text: "Panel 17: load test pass/fail history", syncKey: "part-34-panel-17" }
+    ]
+  },
+  {
+    category: "Recalibration",
+    tasks: [
+      { text: "eval-models.sh re-run and compared to Checkpoint 1", syncKey: "part-34-eval-rerun" },
+      { text: "Scorecard reviewed (all 17 panels)", syncKey: "part-34-scorecard-review" },
+      { text: "AGENT-INSTRUCTIONS.md reviewed and updated", syncKey: "part-34-instructions-review" },
+      { text: "Pipeline intensity adjusted based on data", syncKey: "part-34-pipeline-adjustment" }
+    ]
+  },
+  {
+    category: "AGENT-INSTRUCTIONS.md",
+    tasks: [
+      { text: "Performance section added (5 rules)", syncKey: "part-34-performance-section" },
+      { text: "Human Judgment Boundaries section added (6 rules)", syncKey: "part-34-judgment-section" },
+      { text: "Performance baselines documented with date", syncKey: "part-34-baselines-documented" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Performance thresholds are human decisions. Agents can generate scripts, run tests, and calculate metrics. They cannot decide what "acceptable" means for your users, your budget, or your product.
+2. The Agent Delegation Matrix is the framework: agents handle **what** and **how**, humans handle **why** and **whether**. When an agent needs a judgment call, it surfaces options, tradeoffs, and data. You decide.
+3. K6 + SigNoz together tell the complete story. K6 shows you what is slow (p95 = 320ms on Python). SigNoz shows you why (database query taking 280ms). Neither tool alone gives you the full picture.
+4. Human Judgment Boundaries in AGENT-INSTRUCTIONS.md: agents never set thresholds, make rollback decisions, or determine acceptable risk levels. This is not a technical limitation of current models. It is an organizational principle that applies regardless of model capability.
+5. Recalibration Checkpoint 2: your trust data is growing. Adjust the pipeline based on what the data shows, not based on how you felt about agent output three months ago.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

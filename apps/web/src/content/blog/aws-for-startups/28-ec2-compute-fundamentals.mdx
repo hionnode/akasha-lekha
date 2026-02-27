@@ -1,0 +1,424 @@
+---
+title: "EC2 Compute Fundamentals: Your First Server on AWS"
+description: "Launch EC2 instances with Terraform. Instance types, AMI selection, user data scripts, and the agent-assisted workflow for compute provisioning."
+excerpt: "Your first server on AWS. EC2 with Terraform, instance types, AMIs, user data, and why agents always pick the wrong instance size."
+date: "2026-04-22"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ec2", "terraform", "backend"]
+series: "AWS From Zero to Production"
+seriesPart: 28
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your VPC is built. Your ALB is listening. Your security groups are locked down. There is nothing behind any of it. Today you put compute behind the load balancer. An agent will happily provision a `t3.xlarge` at $120/month "for safety" when a `t3.micro` at $7.50/month would handle your traffic for the next six months. Right-sizing starts on day one, not after your first bill shock.
+
+**Time:** About 45 minutes.
+
+**Outcome:** A Terraform-managed EC2 instance running in a private subnet, connected to your ALB target group, bootstrapped with a user data script, and accessible only through your bastion or SSM. No public IP.
+
+---
+
+## Why This Matters
+
+EC2 is the oldest and most flexible compute service in AWS. It is also the service where cost mistakes compound the fastest. A wrong instance type runs 24/7. A wrong AMI means patching headaches. A public subnet placement means your API is one security group change away from being exposed to the internet.
+
+Every service you build on AWS eventually runs on EC2 or something that abstracts EC2 (ECS, EKS, Lambda). Understanding how instances work, how they connect to your network, and how to right-size them is foundational. You cannot debug production compute problems if you do not understand the underlying instance.
+
+Agents are particularly bad at instance sizing. They default to "safe" choices from their training data, which means `t3.large` or `t3.xlarge` for everything. Those defaults come from enterprise production workloads, not from your startup that serves 50 requests per minute. Start small. Scale when data tells you to.
+
+---
+
+## What We're Building
+
+- An EC2 instance in a private subnet (using the VPC from [Part 20](/blog/aws-for-startups/20-vpc-fundamentals))
+- Connection to the ALB target group from [Part 22](/blog/aws-for-startups/22-alb-load-balancer)
+- A user data script that bootstraps the instance on launch
+- SSH access through bastion/SSM only (no public IP)
+- Terraform module for repeatable EC2 provisioning
+
+---
+
+## Instance Types: What Actually Matters
+
+AWS has hundreds of instance types. You need to know about five of them right now.
+
+| Instance | vCPUs | Memory | Cost/month | Use Case |
+|----------|-------|--------|------------|----------|
+| `t3.micro` | 2 | 1 GB | ~$7.50 | Dev/test, low-traffic APIs |
+| `t3.small` | 2 | 2 GB | ~$15 | Light production APIs |
+| `t3.medium` | 2 | 4 GB | ~$30 | Medium-traffic APIs |
+| `t4g.micro` | 2 | 1 GB | ~$6 | Same workload, ARM (Graviton) |
+| `t4g.small` | 2 | 2 GB | ~$12 | ARM production APIs |
+
+The `t3` and `t4g` families are **burstable** instances. They accumulate CPU credits when idle and spend them when busy. For APIs with variable traffic (which is every startup API), burstable instances are the right default.
+
+### ARM vs x86
+
+The `t4g` family runs on AWS Graviton (ARM) processors. They cost 20% less than equivalent `t3` (x86) instances for comparable performance. If your application runs on ARM (most Node.js, Python, and Go applications do), use `t4g`. The only reason to stick with `t3` is if you depend on x86-specific binaries or libraries.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents default to `t3.xlarge` or `m5.large` because their training data comes from enterprise workloads and AWS documentation examples that prioritize "production-ready" over "cost-appropriate." A `t3.xlarge` costs $120/month. A `t3.micro` costs $7.50/month. For an API handling fewer than 100 requests per second, the `t3.micro` is fine.
+
+**What catches it:** Your AGENT-INSTRUCTIONS.md cost constraints. Add: "Default instance type is t3.micro unless load testing proves otherwise."
+
+</Alert>
+
+### Burstable Credits Explained
+
+Burstable instances earn CPU credits when running below baseline (20% for `t3.micro`). When your API gets a burst of traffic, it spends those credits to run at full CPU. If credits run out, performance drops to baseline.
+
+For a startup API, you accumulate credits all night and spend them during peak hours. Check your credit balance in CloudWatch. If credits consistently hit zero, you need a larger instance. If they stay near maximum, you are overpaying.
+
+---
+
+## AMI Selection: Never Hardcode
+
+An **Amazon Machine Image (AMI)** is the template for your instance's operating system and pre-installed software. Two good choices for startup APIs:
+
+- **Amazon Linux 2023** (AL2023): AWS's own Linux, optimized for EC2. Good package manager, good security defaults, long support.
+- **Ubuntu 24.04 LTS**: If your team already knows Ubuntu. Larger community, more Stack Overflow answers.
+
+Pick one and standardize. Do not mix operating systems across your fleet.
+
+### Using Data Sources Instead of Hardcoded AMI IDs
+
+AMI IDs are region-specific and change when AWS releases updates. Hardcoding `ami-0c55b159cbfafe1f0` works today and breaks next month when AWS publishes a security patch with a new AMI ID.
+
+Use Terraform data sources:
+
+```hcl title="infra/modules/ec2/data.tf"
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
+}
+```
+
+For ARM (Graviton) instances, change the architecture filter:
+
+```hcl title="infra/modules/ec2/data.tf"
+data "aws_ami" "amazon_linux_arm" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-arm64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
+}
+```
+
+<Alert type="caution" title="Agent Trap">
+
+Agents hardcode AMI IDs every single time. They pull an AMI ID from their training data (often outdated by months or years) and paste it directly into the resource block. The code works on `terraform apply`, but six months later the AMI is deprecated and your next instance launch fails.
+
+**What catches it:** The AGENT-INSTRUCTIONS.md rule "NEVER hardcode AMI IDs (use data sources)" and `tflint` with AWS rules enabled.
+
+</Alert>
+
+---
+
+## User Data Scripts: Bootstrap on Launch
+
+User data is a script that runs when an EC2 instance first boots. It installs packages, configures services, and prepares the instance to serve traffic. Think of it as the instance's setup script.
+
+```bash title="infra/modules/ec2/userdata.sh"
+#!/bin/bash
+set -euo pipefail
+
+# Log everything to /var/log/user-data.log
+exec > >(tee /var/log/user-data.log) 2>&1
+
+echo "Starting user data script at $(date)"
+
+# Update packages
+dnf update -y
+
+# Install Node.js (for Bun runtime in Part 29)
+dnf install -y nodejs
+
+# Install Bun
+curl -fsSL https://bun.sh/install | bash
+echo 'export PATH="$HOME/.bun/bin:$PATH"' >> /etc/profile.d/bun.sh
+
+# Create application directory
+mkdir -p /opt/app
+chown ec2-user:ec2-user /opt/app
+
+# Install CloudWatch agent for logs
+dnf install -y amazon-cloudwatch-agent
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s
+
+echo "User data script completed at $(date)"
+```
+
+Three rules for user data scripts:
+
+1. **Always use `set -euo pipefail`.** Without it, a failed command halfway through leaves your instance in a broken state with no error.
+2. **Always log to a file.** When user data fails, you need `/var/log/user-data.log` to debug it. Without logging, you SSH in and guess.
+3. **Keep it under 50 lines.** User data runs once on boot. If your setup needs 200 lines of bash, use a configuration management tool (Ansible, Chef) or a custom AMI.
+
+---
+
+## The Terraform Module
+
+Here is the EC2 module that ties instance type, AMI, user data, and networking together:
+
+```hcl title="infra/modules/ec2/main.tf"
+resource "aws_instance" "api" {
+  ami                    = data.aws_ami.amazon_linux.id
+  instance_type          = var.instance_type
+  subnet_id              = var.private_subnet_id
+  vpc_security_group_ids = [var.app_security_group_id]
+  key_name               = var.key_pair_name
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+
+  user_data = file("${path.module}/userdata.sh")
+
+  metadata_options {
+    http_tokens = "required"  # IMDSv2 only
+  }
+
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 20
+    encrypted   = true
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-api"
+  })
+}
+```
+
+```hcl title="infra/modules/ec2/variables.tf"
+variable "instance_type" {
+  description = "EC2 instance type. Start with t3.micro, scale based on load test data."
+  type        = string
+  default     = "t3.micro"
+
+  validation {
+    condition     = can(regex("^t[34]g?\\.", var.instance_type))
+    error_message = "Use t3 or t4g burstable instances for API workloads."
+  }
+}
+
+variable "private_subnet_id" {
+  description = "Subnet ID for EC2 placement. Must be a private subnet."
+  type        = string
+}
+
+variable "app_security_group_id" {
+  description = "Security group allowing ALB traffic on the application port."
+  type        = string
+}
+
+variable "key_pair_name" {
+  description = "SSH key pair name for instance access. Used with bastion only."
+  type        = string
+}
+
+variable "project" {
+  description = "Project name for resource naming."
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)."
+  type        = string
+}
+
+variable "common_tags" {
+  description = "Tags applied to all resources."
+  type        = map(string)
+}
+```
+
+```hcl title="infra/modules/ec2/iam.tf"
+resource "aws_iam_role" "ec2_role" {
+  name = "${var.project}-${var.environment}-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "${var.project}-${var.environment}-ec2-profile"
+  role = aws_iam_role.ec2_role.name
+}
+```
+
+Key decisions in this module:
+
+- **IMDSv2 required.** The `metadata_options` block forces IMDSv2, which prevents SSRF attacks from accessing instance credentials. This is a security baseline, not optional.
+- **gp3 volume.** GP3 is cheaper than GP2 with better baseline performance. No reason to use GP2 for new instances.
+- **Encrypted root volume.** EBS encryption is free and automatic with the `encrypted = true` flag. No excuse to skip it.
+- **SSM access.** The IAM role attachment for SSM lets you access the instance through Systems Manager Session Manager, which logs every command and does not require open SSH ports.
+
+---
+
+## Connecting to the ALB
+
+Your ALB from [Part 22](/blog/aws-for-startups/22-alb-load-balancer) needs a target group with your EC2 instance registered to it:
+
+```hcl title="infra/modules/ec2/alb.tf"
+resource "aws_lb_target_group_attachment" "api" {
+  target_group_arn = var.target_group_arn
+  target_id        = aws_instance.api.id
+  port             = var.app_port
+}
+```
+
+```hcl title="infra/modules/ec2/outputs.tf"
+output "instance_id" {
+  description = "EC2 instance ID"
+  value       = aws_instance.api.id
+}
+
+output "private_ip" {
+  description = "Private IP address of the EC2 instance"
+  value       = aws_instance.api.private_ip
+}
+```
+
+The ALB health check will start hitting the instance on the configured health check path. Until your application is running and responding to health checks, the target will show as `unhealthy`. That is expected. We deploy the application in [Part 29](/blog/aws-for-startups/29-backend-bun-signoz).
+
+---
+
+## Accessing Your Instance
+
+Your EC2 instance has no public IP. That is intentional. API servers do not need public IPs. Traffic flows through the ALB.
+
+For SSH access (debugging, log inspection), you have two options:
+
+**Option 1: SSM Session Manager (recommended)**
+
+```bash terminal
+aws ssm start-session --target i-0abc123def456
+```
+
+SSM does not require open SSH ports, does not need a bastion host, and logs every command to CloudWatch. It is the right default for production instances.
+
+**Option 2: SSH through bastion**
+
+If you set up a bastion host in your public subnet, tunnel through it:
+
+```bash terminal
+ssh -J ec2-user@bastion-public-ip ec2-user@10.0.3.x
+```
+
+SSM is simpler and more secure. Use the bastion only when SSM is not available (air-gapped environments, specific compliance requirements).
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Manual EC2 launch via console, public subnet, no user data, SSH from anywhere. Your instance is a snowflake you cannot reproduce and an attack surface you cannot defend. |
+| ✅ **Right** | Terraform-managed EC2 in private subnet, right-sized instance (t3.micro), user data bootstrap, ALB target group registration, SSM access. Reproducible and secure. |
+| ❌ **Over** | Custom AMI pipeline with Packer, placement groups, dedicated hosts, Nitro enclaves, for a single API serving 50 requests per minute. That infrastructure costs more than the API earns. |
+| 🤖 **Agent Trap** | Agent provisions `t3.xlarge` ($120/month) because its training data equates "production" with "large." A `t3.micro` ($7.50/month) handles your actual traffic. The 16x cost difference buys you 15 months of runway on the smaller instance. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 29: Backend on EC2, Bun.js API with Real Traces**, we deploy an actual application on this instance. A Bun.js API with OpenTelemetry instrumentation, and your SigNoz dashboard from [Part 5](/blog/aws-for-startups/05-observability-setup) finally gets its first real traces. The empty dashboard earns its keep.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "EC2 Instance",
+    tasks: [
+      { text: "EC2 instance launched in private subnet", syncKey: "part-28-private-subnet" },
+      { text: "Instance connected to ALB target group", syncKey: "part-28-alb-target" },
+      { text: "User data script runs successfully on boot", syncKey: "part-28-user-data" },
+      { text: "Instance accessible via SSM (no public IP)", syncKey: "part-28-ssm-access" }
+    ]
+  },
+  {
+    category: "Security",
+    tasks: [
+      { text: "IMDSv2 required (http_tokens = required)", syncKey: "part-28-imdsv2" },
+      { text: "EBS volume encrypted", syncKey: "part-28-ebs-encrypted" },
+      { text: "No public IP assigned to instance", syncKey: "part-28-no-public-ip" }
+    ]
+  },
+  {
+    category: "Cost",
+    tasks: [
+      { text: "Instance type is t3.micro or t4g.micro (right-sized)", syncKey: "part-28-right-sized" },
+      { text: "No hardcoded AMI IDs (using data sources)", syncKey: "part-28-no-hardcoded-ami" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Start with the smallest instance that works (`t3.micro` or `t4g.micro`). Scaling up is a one-line Terraform change. Scaling your bill down requires noticing you are overpaying, and that often takes months.
+2. Never hardcode AMI IDs. Use Terraform data sources. Agents hardcode them every time, and the code breaks silently when AWS publishes a new AMI.
+3. EC2 lives in private subnets, accessed through the ALB. If your API server has a public IP, your network architecture has a bug.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

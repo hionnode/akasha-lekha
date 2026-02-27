@@ -1,0 +1,451 @@
+---
+title: "Backend on EC2: Bun.js API with Real Traces"
+description: "Deploy a Bun.js API on EC2 with OpenTelemetry instrumentation. First real application traces in SigNoz, the empty dashboard from Part 5 gets its data."
+excerpt: "Bun.js API with real traces. Deploy to EC2, instrument with OpenTelemetry, and watch SigNoz light up. The empty dashboard from Part 5 finally earns its keep."
+date: "2026-04-26"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ec2", "backend", "opentelemetry", "observability"]
+series: "AWS From Zero to Production"
+seriesPart: 29
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your SigNoz dashboard has been empty since [Part 5](/blog/aws-for-startups/05-observability-setup). Twenty-three parts of infrastructure setup, and the traces panel shows nothing. Today it lights up. A real API, handling real requests, with every operation traced end-to-end. You will see exactly where time goes: middleware, route handling, JSON serialization. The whiteboard gets its first writing.
+
+**Time:** About 60 minutes.
+
+**Outcome:** A Bun.js API running on EC2 behind your ALB, instrumented with OpenTelemetry, sending traces to SigNoz. Health checks passing. Service visible in the SigNoz service map. Latency distribution rendering with real data.
+
+---
+
+## Why This Matters
+
+Infrastructure without applications is a parking lot without cars. You have built a VPC, security groups, an ALB, and an EC2 instance. All of it exists to serve traffic. Until an application runs behind the load balancer and handles requests, your infrastructure is a cost center with zero value.
+
+More importantly, this is where observability proves itself. You deployed SigNoz in Part 5 as an investment. You trusted that paying for observability infrastructure before you had anything to observe was the right call. Today you validate that trust. Traces show you where time is spent in every request. When something is slow in production, you will know why before your users finish complaining.
+
+Bun.js is the first of three runtimes you will deploy on this same infrastructure. The deployment pattern you establish here (systemd service, ALB health check, OTel instrumentation) repeats in Parts 31 and 32 with Python and Go. Get it right once, reuse it three times.
+
+---
+
+## What We're Building
+
+- A Bun.js API using the Hono framework
+- OpenTelemetry auto-instrumentation plus manual spans for business logic
+- Deployment to EC2 as a systemd service
+- ALB health check integration
+- First traces visible in SigNoz
+
+---
+
+## Bun.js API with Hono
+
+Hono is a lightweight web framework that runs on Bun, Deno, Cloudflare Workers, and Node.js. It is fast, has zero dependencies in its core, and its API is close enough to Express that the learning curve is negligible.
+
+<FileTree>
+api-bun/
+  src/
+    index.ts
+    routes/
+      health.ts
+      items.ts
+    middleware/
+      tracing.ts
+    instrumentation.ts
+  package.json
+  tsconfig.json
+</FileTree>
+
+```typescript title="api-bun/package.json"
+{
+  "name": "api-bun",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.4.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.52.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.48.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.52.0",
+    "@opentelemetry/resources": "^1.25.0",
+    "@opentelemetry/semantic-conventions": "^1.25.0"
+  }
+}
+```
+
+### Instrumentation Setup
+
+OpenTelemetry instrumentation must initialize before your application code loads. This is the single most common mistake people make (and agents make it every time). If the OTel SDK initializes after your HTTP framework, auto-instrumentation misses the framework's request handling.
+
+```typescript title="api-bun/src/instrumentation.ts"
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { Resource } from '@opentelemetry/resources';
+import {
+  ATTR_SERVICE_NAME,
+  ATTR_SERVICE_VERSION,
+  ATTR_DEPLOYMENT_ENVIRONMENT_NAME,
+} from '@opentelemetry/semantic-conventions';
+
+const sdk = new NodeSDK({
+  resource: new Resource({
+    [ATTR_SERVICE_NAME]: 'api-bun',
+    [ATTR_SERVICE_VERSION]: '1.0.0',
+    [ATTR_DEPLOYMENT_ENVIRONMENT_NAME]: process.env.ENVIRONMENT || 'dev',
+  }),
+  traceExporter: new OTLPTraceExporter({
+    url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4318/v1/traces',
+  }),
+  instrumentations: [
+    getNodeAutoInstrumentations({
+      '@opentelemetry/instrumentation-fs': { enabled: false },
+    }),
+  ],
+});
+
+sdk.start();
+console.log('OpenTelemetry instrumentation initialized');
+
+process.on('SIGTERM', () => {
+  sdk.shutdown().then(() => process.exit(0));
+});
+```
+
+Note the `fs` instrumentation is disabled. File system auto-instrumentation creates a span for every file read, which floods your traces with noise. You do not need to trace Bun reading your source files.
+
+### Application Code
+
+```typescript title="api-bun/src/index.ts"
+import './instrumentation';
+import { Hono } from 'hono';
+import { healthRoutes } from './routes/health';
+import { itemRoutes } from './routes/items';
+
+const app = new Hono();
+
+app.route('/health', healthRoutes);
+app.route('/api/items', itemRoutes);
+
+const port = parseInt(process.env.PORT || '3000');
+
+console.log(`API starting on port ${port}`);
+
+export default {
+  port,
+  fetch: app.fetch,
+};
+```
+
+The import order matters. `./instrumentation` must be the first import. It initializes the OTel SDK before Hono loads, so auto-instrumentation can patch the HTTP handling.
+
+```typescript title="api-bun/src/routes/health.ts"
+import { Hono } from 'hono';
+
+export const healthRoutes = new Hono();
+
+healthRoutes.get('/', (c) => {
+  return c.json({
+    status: 'healthy',
+    service: 'api-bun',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+```
+
+```typescript title="api-bun/src/routes/items.ts"
+import { Hono } from 'hono';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+
+const tracer = trace.getTracer('api-bun', '1.0.0');
+
+export const itemRoutes = new Hono();
+
+itemRoutes.get('/', (c) => {
+  return tracer.startActiveSpan('list-items', (span) => {
+    try {
+      const items = [
+        { id: '1', name: 'Item One', createdAt: '2026-04-26T00:00:00Z' },
+        { id: '2', name: 'Item Two', createdAt: '2026-04-26T00:00:00Z' },
+      ];
+
+      span.setAttribute('items.count', items.length);
+      span.setStatus({ code: SpanStatusCode.OK });
+
+      return c.json({ items, total: items.length });
+    } catch (error) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+      throw error;
+    } finally {
+      span.end();
+    }
+  });
+});
+
+itemRoutes.get('/:id', (c) => {
+  return tracer.startActiveSpan('get-item', (span) => {
+    const id = c.req.param('id');
+    span.setAttribute('item.id', id);
+
+    try {
+      const item = { id, name: `Item ${id}`, createdAt: '2026-04-26T00:00:00Z' };
+      span.setStatus({ code: SpanStatusCode.OK });
+      return c.json(item);
+    } catch (error) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+      throw error;
+    } finally {
+      span.end();
+    }
+  });
+});
+```
+
+The `list-items` and `get-item` spans are manual. Auto-instrumentation creates a span for the HTTP request itself (method, path, status code). The manual spans add business context: how many items were returned, which item ID was requested. This is the 20% of instrumentation that auto-instrumentation cannot provide.
+
+---
+
+## Deploy to EC2
+
+Your EC2 instance from [Part 28](/blog/aws-for-startups/28-ec2-compute-fundamentals) is running with the user data script that installed Bun. Now you need to get your application code onto the instance and run it as a service.
+
+### Copy Application Code
+
+For now, use `scp` through SSM or your bastion. In [Part 45](/blog/aws-for-startups/45-github-actions-ci), you will automate this with GitHub Actions.
+
+```bash terminal
+# Package the application
+cd api-bun && tar -czf api-bun.tar.gz --exclude=node_modules .
+
+# Copy to instance via SSM
+aws ssm start-session --target i-0abc123def456 \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["22"],"localPortNumber":["2222"]}'
+
+# In another terminal
+scp -P 2222 api-bun.tar.gz ec2-user@localhost:/opt/app/
+```
+
+### Install Dependencies and Configure Systemd
+
+SSH into the instance and set up the service:
+
+```bash terminal
+# On the EC2 instance
+cd /opt/app
+tar -xzf api-bun.tar.gz
+bun install --production
+```
+
+Create a systemd service file so the API starts automatically and restarts on failure:
+
+```ini title="/etc/systemd/system/api-bun.service"
+[Unit]
+Description=Bun.js API Service
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/app
+Environment=PORT=3000
+Environment=ENVIRONMENT=dev
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://your-signoz-host:4318/v1/traces
+ExecStart=/home/ec2-user/.bun/bin/bun run src/index.ts
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash terminal
+sudo systemctl daemon-reload
+sudo systemctl enable api-bun
+sudo systemctl start api-bun
+sudo systemctl status api-bun
+```
+
+<TerminalOutput title="systemctl status api-bun">
+
+```
+● api-bun.service - Bun.js API Service
+     Loaded: loaded (/etc/systemd/system/api-bun.service; enabled)
+     Active: active (running) since Tue 2026-04-26 10:30:00 UTC
+   Main PID: 12345 (bun)
+      Tasks: 4
+     Memory: 28.0M
+        CPU: 156ms
+     CGroup: /system.slice/api-bun.service
+             └─12345 /home/ec2-user/.bun/bin/bun run src/index.ts
+
+Apr 26 10:30:00 ip-10-0-3-45 systemd[1]: Started Bun.js API Service.
+Apr 26 10:30:01 ip-10-0-3-45 bun[12345]: OpenTelemetry instrumentation initialized
+Apr 26 10:30:01 ip-10-0-3-45 bun[12345]: API starting on port 3000
+```
+
+</TerminalOutput>
+
+28 MB of memory. That is why `t3.micro` with 1 GB is plenty for a Bun.js API.
+
+### Verify ALB Health Check
+
+Your ALB should now show the target as healthy:
+
+```bash terminal
+aws elbv2 describe-target-health \
+  --target-group-arn arn:aws:elasticloadbalancing:ap-south-1:123456789012:targetgroup/api-tg/abc123
+```
+
+<TerminalOutput title="Target Health">
+
+```json
+{
+  "TargetHealthDescriptions": [
+    {
+      "Target": {
+        "Id": "i-0abc123def456",
+        "Port": 3000
+      },
+      "HealthCheckPort": "3000",
+      "TargetHealth": {
+        "State": "healthy"
+      }
+    }
+  ]
+}
+```
+
+</TerminalOutput>
+
+Hit the ALB endpoint to confirm end-to-end:
+
+```bash terminal
+curl https://api.yourdomain.com/health
+```
+
+---
+
+## SigNoz Lights Up
+
+Open your SigNoz dashboard. Navigate to **Services**. You should see `api-bun` listed. Click into it.
+
+For the first time since Part 5, you have real data:
+
+- **Service map:** Shows `api-bun` as a node. When you add a database in [Part 35](/blog/aws-for-startups/35-rds-postgres), the service map will show the connection between your API and PostgreSQL.
+- **Latency distribution:** p50, p90, p95, p99 for your API endpoints. Right now, with no real traffic, these will be fast. The baselines matter for [Part 34](/blog/aws-for-startups/34-k6-human-judgment) when you run load tests.
+- **Request rate:** Requests per second by endpoint. The ALB health check will show as a steady stream of GET /health requests.
+- **Error rate:** Percentage of 5xx responses. Should be 0% right now.
+
+Click on any trace to see the full span waterfall: the HTTP request span (auto-instrumented), your manual `list-items` or `get-item` span nested inside it, and any downstream calls.
+
+This is the payoff for deploying SigNoz 23 parts ago. When something is slow in production, you do not grep logs hoping to find a clue. You open SigNoz, find the slow trace, and see exactly which operation took too long.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents configure OpenTelemetry with 100% trace sampling. Every single request gets a full trace. For an API handling 1,000 requests per second, that is 86 million traces per day. SigNoz storage fills up in days, and your traces become so numerous they are useless for debugging.
+
+**Set sampling to match your traffic.** For development, 100% is fine. For production under 100 RPS, 50% works. For production over 1,000 RPS, sample 1-10%. Add a `sampler` configuration to your OTel SDK setup.
+
+</Alert>
+
+### Configuring Sampling
+
+Add a sampler to your instrumentation for production use:
+
+```typescript title="api-bun/src/instrumentation.ts"
+import { TraceIdRatioBasedSampler } from '@opentelemetry/sdk-trace-node';
+
+const samplingRate = parseFloat(process.env.OTEL_SAMPLING_RATE || '1.0');
+
+const sdk = new NodeSDK({
+  // ... resource config from above
+  sampler: new TraceIdRatioBasedSampler(samplingRate),
+  // ... rest of config
+});
+```
+
+Set `OTEL_SAMPLING_RATE=0.1` in production for 10% sampling. Always sample 100% in development and staging so you can debug issues before they reach production.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No instrumentation. `console.log` debugging in production. When something is slow, you add more console.log statements, redeploy, wait for it to happen again, and read unstructured text. Your mean time to resolution is measured in hours. |
+| ✅ **Right** | OTel auto-instrumentation for HTTP spans plus manual spans on business-critical paths. Traces flowing to SigNoz. Sampling rate set to 100% in dev, 10-50% in production. Service map showing your API. Latency distribution rendering. |
+| ❌ **Over** | Custom spans on every function call, 100% trace sampling in production, custom SigNoz dashboards for 15 metrics before you have any traffic to visualize. You are building an observatory before you have a sky to watch. |
+| 🤖 **Agent Trap** | Agent instruments everything with 100% sampling and no sampling configuration. SigNoz storage fills up, your monthly observability cost exceeds your compute cost, and the volume of traces makes finding the one slow request harder, not easier. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 30: Authentication with Clerk**, you add auth to your API. Social login, JWT verification, and middleware that protects your routes. Authentication is a buy decision, not a build decision, and Clerk handles the complexity you do not want to own.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Backend",
+    tasks: [
+      { text: "Bun.js API running on EC2 as systemd service", syncKey: "part-29-bun-running" },
+      { text: "API accessible through ALB (curl returns 200)", syncKey: "part-29-alb-accessible" },
+      { text: "Health check endpoint passing", syncKey: "part-29-health-check" }
+    ]
+  },
+  {
+    category: "Observability",
+    tasks: [
+      { text: "Traces visible in SigNoz", syncKey: "part-29-traces-visible" },
+      { text: "Service map shows api-bun", syncKey: "part-29-service-map" },
+      { text: "Latency distribution rendering with data", syncKey: "part-29-latency" },
+      { text: "Sampling rate configured (not hardcoded to 100%)", syncKey: "part-29-sampling" }
+    ]
+  },
+  {
+    category: "Code Quality",
+    tasks: [
+      { text: "OTel instrumentation initializes before app code", syncKey: "part-29-otel-order" },
+      { text: "Manual spans on business-critical routes", syncKey: "part-29-manual-spans" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. SigNoz gets its first real application data, 23 parts after deployment. The empty dashboard proves its worth the moment you click a trace and see exactly where time was spent.
+2. Auto-instrumentation gets you 80% of observability for free. Manual spans on business-critical paths get the remaining 20%. Do not instrument everything.
+3. Always configure trace sampling. Agents default to 100%, which floods your observability backend and makes debugging harder, not easier. Match sampling rate to traffic volume.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

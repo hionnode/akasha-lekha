@@ -1,0 +1,586 @@
+---
+title: "E2E Testing with Playwright: Confidence Before You Deploy"
+description: "Set up cross-browser E2E tests with Playwright. Test your frontend + API integration, visual regression, and CI-ready test configuration."
+excerpt: "Confidence before you deploy. Playwright E2E tests across Chromium, Firefox, and Safari, because unit tests don't catch integration bugs."
+date: "2026-04-14"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "testing"]
+series: "AWS From Zero to Production"
+seriesPart: 26
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+All unit tests pass. All integration tests pass. You deploy. The login button does not work because a CSS change moved it behind the cookie banner. The button exists in the DOM. The click handler is wired up. JavaScript runs fine. But the user cannot physically click the button because another element covers it. No unit test catches this. No integration test catches this. Only a real browser, rendering real CSS, clicking real elements, catches this.
+
+**Time:** About 40 minutes.
+
+**Outcome:** A Playwright test suite covering critical user journeys across Chromium, Firefox, and WebKit. Page objects for maintainable selectors. Traces and screenshots captured on failure. Configuration ready for CI.
+
+---
+
+## Why This Matters
+
+You have three layers of testing now. Unit tests verify individual functions ([Part 24](/blog/aws-for-startups/24-request-validation-openapi) validation schemas). Mock tests verify service boundaries ([Part 25](/blog/aws-for-startups/25-mocking-external-services)). But neither runs a real browser. Neither renders CSS. Neither clicks buttons.
+
+The gap between "all tests pass" and "the app works" is the E2E gap. E2E tests fill it by driving a real browser through real user flows. They catch CSS overlap issues, JavaScript errors that only appear in Firefox, forms that submit to the wrong endpoint, and loading states that never resolve.
+
+The tradeoff is speed and maintenance. E2E tests are slower than unit tests (seconds vs milliseconds). They are more brittle because UI changes break selectors. The strategy is simple: test critical paths only. Do not try to E2E test every feature. Test login, the primary CRUD flow, and the error states that would embarrass you in production.
+
+---
+
+## What We're Building
+
+- Playwright installed with Chromium, Firefox, and WebKit
+- Page object pattern for maintainable selectors
+- Critical path tests: login, core CRUD, error states
+- Trace and screenshot capture on failure
+- CI-ready headless configuration
+
+---
+
+## Playwright Setup
+
+Install Playwright and its browser binaries:
+
+<Command cmd="npm init playwright@latest" description="Initialize Playwright in your project" />
+
+When prompted, choose TypeScript, place tests in `e2e/`, and say yes to installing browsers. Playwright downloads Chromium, Firefox, and WebKit binaries.
+
+If you are adding Playwright to an existing project:
+
+```bash terminal
+npm install -D @playwright/test
+npx playwright install --with-deps chromium firefox webkit
+```
+
+The `--with-deps` flag installs system dependencies that browsers need (fonts, graphics libraries). On CI machines, this is required. On your Mac, it is usually a no-op.
+
+### Configuration
+
+```typescript title="playwright.config.ts"
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './e2e',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: process.env.CI
+    ? [['html', { open: 'never' }], ['github']]
+    : [['html', { open: 'on-failure' }]],
+
+  use: {
+    baseURL: process.env.BASE_URL ?? 'http://localhost:8080',
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
+    video: 'retain-on-failure',
+  },
+
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'firefox',
+      use: { ...devices['Desktop Firefox'] },
+    },
+    {
+      name: 'webkit',
+      use: { ...devices['Desktop Safari'] },
+    },
+    {
+      name: 'mobile-chrome',
+      use: { ...devices['Pixel 5'] },
+    },
+  ],
+
+  webServer: {
+    command: 'npm run dev',
+    url: 'http://localhost:8080',
+    reuseExistingServer: !process.env.CI,
+    timeout: 30_000,
+  },
+});
+```
+
+Key decisions:
+
+- **`fullyParallel: true`** runs test files in parallel. Each file gets its own browser context.
+- **`retries: 2` in CI only.** Retries mask flaky tests locally, making them harder to find. In CI, a single retry catches genuine environment hiccups.
+- **`workers: 1` in CI.** Parallel workers on a CI machine with 2 vCPUs cause more flake than they save in time. Locally, use all available cores.
+- **`trace: 'on-first-retry'`** captures a full trace (network requests, DOM snapshots, console logs) only when a test fails and retries. Traces are large. Capturing them on every test wastes disk.
+- **`webServer`** starts your dev server automatically. Playwright waits for it to be ready before running tests.
+
+<FileTree>
+e2e/
+  fixtures/
+    auth.ts
+  pages/
+    login.page.ts
+    dashboard.page.ts
+    users.page.ts
+  tests/
+    auth.spec.ts
+    users.spec.ts
+    error-states.spec.ts
+playwright.config.ts
+</FileTree>
+
+---
+
+## Page Object Pattern
+
+Page objects are the difference between maintainable E2E tests and a test suite you delete after six months.
+
+Without page objects, every test file contains selectors:
+
+```typescript title="Bad: selectors in test files"
+// This breaks when you rename the button class, change the form structure,
+// or add a wrapper div. Every test that clicks this button must be updated.
+await page.click('[data-testid="login-button"]');
+await page.fill('#email-input', 'dev@shipfast.io');
+```
+
+With page objects, selectors live in one place:
+
+```typescript title="e2e/pages/login.page.ts"
+import { type Page, type Locator } from '@playwright/test';
+
+export class LoginPage {
+  readonly page: Page;
+  readonly emailInput: Locator;
+  readonly passwordInput: Locator;
+  readonly loginButton: Locator;
+  readonly errorMessage: Locator;
+
+  constructor(page: Page) {
+    this.page = page;
+    this.emailInput = page.getByLabel('Email');
+    this.passwordInput = page.getByLabel('Password');
+    this.loginButton = page.getByRole('button', { name: 'Sign in' });
+    this.errorMessage = page.getByRole('alert');
+  }
+
+  async goto() {
+    await this.page.goto('/login');
+  }
+
+  async login(email: string, password: string) {
+    await this.emailInput.fill(email);
+    await this.passwordInput.fill(password);
+    await this.loginButton.click();
+  }
+
+  async expectError(message: string) {
+    await expect(this.errorMessage).toContainText(message);
+  }
+}
+```
+
+Three things to notice:
+
+1. **Selectors use accessible locators.** `getByLabel('Email')` and `getByRole('button', { name: 'Sign in' })` are more resilient than CSS selectors or test IDs. They survive CSS refactors and component restructures. They also verify your accessibility is correct.
+
+2. **Actions are methods.** `login(email, password)` encapsulates the multi-step interaction. Tests read like user stories, not like DOM manipulation scripts.
+
+3. **Assertions are methods.** `expectError(message)` puts the assertion logic with the page knowledge. When the error display changes from a toast to an inline message, you update one method, not 12 tests.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate E2E tests with hardcoded CSS selectors: `page.click('.btn-primary.mt-4.login-submit')`. This selector breaks the moment anyone changes the button's Tailwind classes. Agents do this because CSS selectors are the most common pattern in their training data. Refactor to page objects with accessible locators (`getByRole`, `getByLabel`, `getByText`) immediately.
+
+**What catches it:** Review all agent-generated Playwright tests for raw CSS selectors. Any test using `page.click('.')` or `page.locator('div > span.class')` needs refactoring.
+
+</Alert>
+
+### Dashboard Page Object
+
+```typescript title="e2e/pages/dashboard.page.ts"
+import { type Page, type Locator, expect } from '@playwright/test';
+
+export class DashboardPage {
+  readonly page: Page;
+  readonly heading: Locator;
+  readonly userMenu: Locator;
+  readonly logoutButton: Locator;
+  readonly createButton: Locator;
+
+  constructor(page: Page) {
+    this.page = page;
+    this.heading = page.getByRole('heading', { name: 'Dashboard' });
+    this.userMenu = page.getByRole('button', { name: /user menu/i });
+    this.logoutButton = page.getByRole('menuitem', { name: 'Sign out' });
+    this.createButton = page.getByRole('link', { name: 'Create new' });
+  }
+
+  async expectLoaded() {
+    await expect(this.heading).toBeVisible();
+  }
+
+  async logout() {
+    await this.userMenu.click();
+    await this.logoutButton.click();
+  }
+}
+```
+
+---
+
+## Critical Path Tests
+
+Test the flows that matter most. If these break, users cannot use your product.
+
+### Authentication Flow
+
+```typescript title="e2e/tests/auth.spec.ts"
+import { test, expect } from '@playwright/test';
+import { LoginPage } from '../pages/login.page';
+import { DashboardPage } from '../pages/dashboard.page';
+
+test.describe('Authentication', () => {
+  test('successful login redirects to dashboard', async ({ page }) => {
+    const loginPage = new LoginPage(page);
+    const dashboard = new DashboardPage(page);
+
+    await loginPage.goto();
+    await loginPage.login('dev@shipfast.io', 'test-password-123');
+
+    await dashboard.expectLoaded();
+    await expect(page).toHaveURL('/dashboard');
+  });
+
+  test('invalid credentials show error message', async ({ page }) => {
+    const loginPage = new LoginPage(page);
+
+    await loginPage.goto();
+    await loginPage.login('dev@shipfast.io', 'wrong-password');
+
+    await loginPage.expectError('Invalid email or password');
+    await expect(page).toHaveURL('/login');
+  });
+
+  test('logout returns to login page', async ({ page }) => {
+    const loginPage = new LoginPage(page);
+    const dashboard = new DashboardPage(page);
+
+    // Login first
+    await loginPage.goto();
+    await loginPage.login('dev@shipfast.io', 'test-password-123');
+    await dashboard.expectLoaded();
+
+    // Logout
+    await dashboard.logout();
+    await expect(page).toHaveURL('/login');
+  });
+});
+```
+
+### CRUD Operations
+
+```typescript title="e2e/tests/users.spec.ts"
+import { test, expect } from '@playwright/test';
+import { LoginPage } from '../pages/login.page';
+import { UsersPage } from '../pages/users.page';
+
+test.describe('User Management', () => {
+  test.beforeEach(async ({ page }) => {
+    // Login before each test
+    const loginPage = new LoginPage(page);
+    await loginPage.goto();
+    await loginPage.login('dev@shipfast.io', 'test-password-123');
+  });
+
+  test('create a new user', async ({ page }) => {
+    const usersPage = new UsersPage(page);
+    await usersPage.goto();
+
+    await usersPage.createUser({
+      email: `test-${Date.now()}@shipfast.io`,
+      name: 'E2E Test User',
+    });
+
+    await usersPage.expectUserInList('E2E Test User');
+  });
+
+  test('search filters the user list', async ({ page }) => {
+    const usersPage = new UsersPage(page);
+    await usersPage.goto();
+
+    await usersPage.search('Alice');
+
+    const rows = page.getByRole('row');
+    // Header row + filtered results
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(1)).toContainText('Alice');
+  });
+
+  test('displays empty state when no results', async ({ page }) => {
+    const usersPage = new UsersPage(page);
+    await usersPage.goto();
+
+    await usersPage.search('nonexistent-user-xyz');
+
+    await expect(page.getByText('No users found')).toBeVisible();
+  });
+});
+```
+
+### Error States
+
+```typescript title="e2e/tests/error-states.spec.ts"
+import { test, expect } from '@playwright/test';
+
+test.describe('Error States', () => {
+  test('404 page shows for non-existent routes', async ({ page }) => {
+    await page.goto('/this-page-does-not-exist');
+    await expect(page.getByText('Page not found')).toBeVisible();
+  });
+
+  test('API error shows user-friendly message', async ({ page }) => {
+    // Mock the API to return 500
+    await page.route('**/api/v1/users', (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: 'INTERNAL_ERROR',
+          message: 'Something went wrong',
+          request_id: 'req_test',
+          trace_id: 'trace_test',
+        }),
+      })
+    );
+
+    await page.goto('/users');
+    await expect(page.getByText('Something went wrong')).toBeVisible();
+  });
+});
+```
+
+`page.route()` intercepts requests at the browser level. This is different from MSW in [Part 25](/blog/aws-for-startups/25-mocking-external-services), which intercepts at the Node.js level. Use `page.route()` in Playwright tests to simulate API failures without changing your test server.
+
+---
+
+## Authentication Fixtures
+
+Most tests need an authenticated user. Playwright fixtures handle this without repeating login code:
+
+```typescript title="e2e/fixtures/auth.ts"
+import { test as base, expect } from '@playwright/test';
+import { LoginPage } from '../pages/login.page';
+
+type AuthFixtures = {
+  authenticatedPage: ReturnType<typeof base['page']>;
+};
+
+export const test = base.extend<AuthFixtures>({
+  authenticatedPage: async ({ page }, use) => {
+    const loginPage = new LoginPage(page);
+    await loginPage.goto();
+    await loginPage.login('dev@shipfast.io', 'test-password-123');
+    await expect(page).toHaveURL('/dashboard');
+    await use(page);
+  },
+});
+
+export { expect };
+```
+
+Use the fixture in tests:
+
+```typescript title="e2e/tests/users-with-fixture.spec.ts"
+import { test, expect } from '../fixtures/auth';
+import { UsersPage } from '../pages/users.page';
+
+test('create user (using auth fixture)', async ({ authenticatedPage: page }) => {
+  const usersPage = new UsersPage(page);
+  await usersPage.goto();
+  await usersPage.createUser({ email: 'new@test.io', name: 'New User' });
+  await usersPage.expectUserInList('New User');
+});
+```
+
+For faster CI runs, use Playwright's storage state feature. Log in once, save the session cookies to a file, and reuse them across tests:
+
+```typescript title="e2e/global-setup.ts"
+import { chromium } from '@playwright/test';
+import { LoginPage } from './pages/login.page';
+
+async function globalSetup() {
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  const loginPage = new LoginPage(page);
+  await loginPage.goto();
+  await loginPage.login('dev@shipfast.io', 'test-password-123');
+
+  await page.context().storageState({ path: './e2e/.auth/user.json' });
+  await browser.close();
+}
+
+export default globalSetup;
+```
+
+Add to your config:
+
+```typescript title="playwright.config.ts (add to existing)"
+export default defineConfig({
+  // ... existing config
+  globalSetup: './e2e/global-setup.ts',
+  projects: [
+    { name: 'setup', testMatch: /global-setup\.ts/ },
+    {
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        storageState: './e2e/.auth/user.json',
+      },
+      dependencies: ['setup'],
+    },
+    // ... other browsers
+  ],
+});
+```
+
+---
+
+## Artifacts on Failure
+
+When a test fails in CI, you need to see what happened. Playwright captures three types of artifacts:
+
+- **Screenshots** show the page state at the moment of failure
+- **Videos** show the entire test run (useful for timing issues)
+- **Traces** are the gold standard: a complete recording of DOM state, network requests, console logs, and actions
+
+The config from earlier captures all three on failure:
+
+```typescript title="playwright.config.ts (use section)"
+use: {
+  trace: 'on-first-retry',
+  screenshot: 'only-on-failure',
+  video: 'retain-on-failure',
+},
+```
+
+View traces locally:
+
+<Command cmd="npx playwright show-trace test-results/auth-login-chromium/trace.zip" description="Open the Playwright trace viewer" />
+
+The trace viewer shows a timeline of every action, the DOM at each step, network requests, and console output. When a test fails in CI, download the trace artifact and open it locally. You will see exactly what the browser saw.
+
+---
+
+## Running Tests
+
+Run all tests:
+
+<Command cmd="npx playwright test" description="Run all E2E tests across all configured browsers" />
+
+Run a specific test file:
+
+<Command cmd="npx playwright test e2e/tests/auth.spec.ts" description="Run only auth tests" />
+
+Run in headed mode (see the browser):
+
+<Command cmd="npx playwright test --headed" description="Run tests with visible browser" />
+
+Run in UI mode (interactive, best for development):
+
+<Command cmd="npx playwright test --ui" description="Open Playwright's interactive UI runner" />
+
+<TerminalOutput title="npx playwright test">
+
+```
+Running 12 tests using 4 workers
+
+  ✓  1 [chromium] > auth.spec.ts:8:3 > Authentication > successful login (2.1s)
+  ✓  2 [chromium] > auth.spec.ts:17:3 > Authentication > invalid credentials (1.8s)
+  ✓  3 [chromium] > auth.spec.ts:25:3 > Authentication > logout (2.4s)
+  ✓  4 [firefox] > auth.spec.ts:8:3 > Authentication > successful login (3.2s)
+  ✓  5 [firefox] > auth.spec.ts:17:3 > Authentication > invalid credentials (2.7s)
+  ✓  6 [firefox] > auth.spec.ts:25:3 > Authentication > logout (3.1s)
+  ✓  7 [webkit] > auth.spec.ts:8:3 > Authentication > successful login (2.8s)
+  ✓  8 [webkit] > auth.spec.ts:17:3 > Authentication > invalid credentials (2.3s)
+  ✓  9 [webkit] > auth.spec.ts:25:3 > Authentication > logout (2.9s)
+  ✓ 10 [chromium] > users.spec.ts:14:3 > User Management > create user (2.6s)
+  ✓ 11 [chromium] > users.spec.ts:26:3 > User Management > search filters (1.9s)
+  ✓ 12 [chromium] > error-states.spec.ts:5:3 > Error States > 404 page (1.2s)
+
+  12 passed (18.4s)
+```
+
+</TerminalOutput>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No E2E tests. Manual testing only. You find out the login page is broken when a user emails you. Or worse, when they tweet about it. |
+| ✅ **Right** | Playwright with critical path coverage (auth, core CRUD, error states). Three browsers. Page objects for selectors. Traces captured on failure. CI-ready headless config. Tests cover the 5-10 flows that matter most, not every button on the page. |
+| ❌ **Over** | 100% E2E coverage. Visual regression on every component. Screenshot diffing on every page in four breakpoints. 200 E2E tests that take 45 minutes to run. CI is permanently blocked by flaky screenshot comparisons. |
+| 🤖 **Agent Trap** | Agent generates E2E tests with hardcoded CSS selectors like `page.click('.btn-primary.mt-4')`. The selectors break on any Tailwind class change or component restructure. The fix is accessible locators (`getByRole`, `getByLabel`) wrapped in page objects. Agent-generated tests need immediate refactoring to this pattern. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 27: Testing in CI**, you wire unit tests, integration tests, and E2E tests into your CI pipeline. Agent-assisted failure triage reads CI logs and identifies root causes. Monthly model evaluation runs in GitHub Actions. MCP tools replace raw CLI commands in CI workflows. This is the Phase 6 capstone: your entire test pyramid running automatically on every PR.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Playwright Setup",
+    tasks: [
+      { text: "Playwright installed with Chromium, Firefox, and WebKit", syncKey: "part-26-playwright-installed" },
+      { text: "playwright.config.ts configured with all three browsers", syncKey: "part-26-config" },
+      { text: "Tests run headlessly for CI (npx playwright test)", syncKey: "part-26-headless" }
+    ]
+  },
+  {
+    category: "Test Quality",
+    tasks: [
+      { text: "Page objects created (no hardcoded selectors in test files)", syncKey: "part-26-page-objects" },
+      { text: "Accessible locators used (getByRole, getByLabel, getByText)", syncKey: "part-26-accessible-locators" },
+      { text: "Tests are isolated and independent (no shared state)", syncKey: "part-26-test-isolation" },
+      { text: "Traces and screenshots captured on failure", syncKey: "part-26-artifacts" }
+    ]
+  },
+  {
+    category: "Critical Path Coverage",
+    tasks: [
+      { text: "Login flow tested (success and failure)", syncKey: "part-26-auth-tests" },
+      { text: "Core CRUD operation tested", syncKey: "part-26-crud-tests" },
+      { text: "Error states tested (404, API errors)", syncKey: "part-26-error-tests" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. E2E tests catch what unit tests cannot: real browser interactions, CSS overlap, cross-browser rendering bugs, and integration issues that only appear when the full stack runs together.
+2. Test critical paths only: login, core CRUD, error states. Five well-maintained E2E tests are worth more than 50 brittle ones covering every edge case.
+3. Agent-generated Playwright tests use hardcoded CSS selectors. Refactor to page objects with accessible locators (`getByRole`, `getByLabel`) immediately. This is not optional. Selectors like `.btn-primary.mt-4` will break on the next Tailwind update.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

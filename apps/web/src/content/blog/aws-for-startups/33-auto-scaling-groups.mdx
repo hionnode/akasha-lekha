@@ -1,0 +1,413 @@
+---
+title: "Auto Scaling Groups: Servers That Scale Themselves"
+description: "Configure EC2 Auto Scaling Groups with launch templates, scaling policies, and health checks. Terraform-managed, agent-generated, human-reviewed."
+excerpt: "Servers that scale themselves. Auto Scaling Groups with launch templates and scaling policies, because manually provisioning EC2 at 3 AM is not a strategy."
+date: "2026-05-12"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ec2", "terraform", "backend"]
+series: "AWS From Zero to Production"
+seriesPart: 33
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your API is running on a single EC2 instance. That instance is a pet. It has a name, a history, and a personality formed by weeks of manual configuration. When it dies, you grieve. You SSH in, inspect logs, restart services, and hope. At 3 AM, you are the scaling mechanism. Your phone buzzes, you open your laptop, and you manually launch another instance while your users see errors.
+
+**Time:** About 45 minutes.
+
+**Outcome:** An Auto Scaling Group managing your EC2 instances with a launch template, target tracking scaling policy, and ALB health check integration. Instances are cattle, not pets. When one fails, it is automatically replaced. When traffic increases, new instances appear. When traffic drops, excess instances are terminated.
+
+---
+
+## Why This Matters
+
+A single EC2 instance has two problems that Auto Scaling Groups solve:
+
+**Problem 1: Availability.** When your instance crashes, reboots, or the underlying host fails, your API goes down. It stays down until you notice, investigate, and manually launch a replacement. Mean time to recovery is however long it takes you to wake up and open a terminal.
+
+**Problem 2: Capacity.** When traffic exceeds your instance's capacity, requests slow down and eventually time out. You cannot add capacity without manually launching instances, configuring them, and registering them with the ALB. By the time you do, the traffic spike may be over (and your users may be gone).
+
+Auto Scaling Groups solve both problems with one abstraction. You define a launch template (what to launch), capacity settings (how many), and scaling policies (when to scale). The ASG handles the rest. When an instance fails the health check, the ASG terminates it and launches a replacement. When CPU exceeds a threshold, the ASG adds instances. When traffic drops, it removes them.
+
+This is the difference between "I manage servers" and "servers manage themselves."
+
+---
+
+## What We're Building
+
+- A launch template based on the EC2 configuration from [Part 28](/blog/aws-for-startups/28-ec2-compute-fundamentals)
+- An Auto Scaling Group with min=1, max=4, desired=1
+- Target tracking scaling policy based on CPU utilization
+- ALB health check integration (not EC2 health checks)
+- Terraform module for the entire setup
+
+---
+
+## Launch Templates
+
+A **launch template** captures everything the ASG needs to create new instances: AMI, instance type, security groups, user data, IAM role, and block device configuration. It is the factory blueprint for your instances.
+
+```hcl title="infra/modules/asg/launch-template.tf"
+resource "aws_launch_template" "api" {
+  name_prefix   = "${var.project}-${var.environment}-api-"
+  image_id      = data.aws_ami.amazon_linux.id
+  instance_type = var.instance_type
+
+  vpc_security_group_ids = [var.app_security_group_id]
+
+  iam_instance_profile {
+    arn = aws_iam_instance_profile.ec2_profile.arn
+  }
+
+  user_data = base64encode(file("${path.module}/userdata.sh"))
+
+  metadata_options {
+    http_tokens = "required"  # IMDSv2
+  }
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      volume_size = 20
+      volume_type = "gp3"
+      encrypted   = true
+    }
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(var.common_tags, {
+      Name = "${var.project}-${var.environment}-api"
+    })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags = merge(var.common_tags, {
+      Name = "${var.project}-${var.environment}-api-volume"
+    })
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+The `name_prefix` instead of `name` combined with `create_before_destroy` is critical. When you update the launch template (new AMI, new user data), Terraform creates the new template version before destroying the old one. The ASG then gradually replaces instances using the new template. Without this lifecycle rule, Terraform tries to destroy the old template first, which fails because the ASG still references it.
+
+:::tip
+Launch templates support versioning. When you update the template, the ASG uses the `$Latest` version by default. Old instances keep running on their original version until they are replaced by the ASG (during scaling events or instance refresh).
+:::
+
+---
+
+## Auto Scaling Group
+
+```hcl title="infra/modules/asg/main.tf"
+resource "aws_autoscaling_group" "api" {
+  name                = "${var.project}-${var.environment}-api-asg"
+  desired_capacity    = var.desired_capacity
+  min_size            = var.min_size
+  max_size            = var.max_size
+  vpc_zone_identifier = var.private_subnet_ids
+
+  launch_template {
+    id      = aws_launch_template.api.id
+    version = "$Latest"
+  }
+
+  target_group_arns = [var.target_group_arn]
+
+  health_check_type         = "ELB"
+  health_check_grace_period = 300
+
+  # Replace instances when launch template changes
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 50
+    }
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${var.project}-${var.environment}-api"
+    propagate_at_launch = true
+  }
+
+  dynamic "tag" {
+    for_each = var.common_tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+### Key Configuration Choices
+
+**`health_check_type = "ELB"`** is the most important setting in this entire module. The default is `EC2`, which only checks if the instance is running. ELB health checks ask the ALB whether the instance is responding to HTTP requests on your health check endpoint. An instance can be running (passing EC2 health check) while your application is crashed (failing ELB health check). With ELB health checks, the ASG replaces instances that are running but not serving traffic.
+
+**`health_check_grace_period = 300`** gives new instances 5 minutes to start up and pass the health check before the ASG considers them unhealthy. Your user data script installs packages, your application starts, and it begins responding to health checks. If this period is too short, the ASG kills instances before they finish bootstrapping, creating an infinite launch-terminate loop.
+
+**`instance_refresh`** with rolling strategy means that when you update the launch template, the ASG replaces instances gradually (keeping at least 50% healthy) instead of terminating all instances at once. This gives you zero-downtime deployments for infrastructure changes.
+
+```hcl title="infra/modules/asg/variables.tf"
+variable "desired_capacity" {
+  description = "Desired number of instances. Start with 1."
+  type        = number
+  default     = 1
+}
+
+variable "min_size" {
+  description = "Minimum number of instances. 1 for non-critical, 2 for production."
+  type        = number
+  default     = 1
+}
+
+variable "max_size" {
+  description = "Maximum number of instances. Set based on budget, not aspirational load."
+  type        = number
+  default     = 4
+}
+
+variable "private_subnet_ids" {
+  description = "List of private subnet IDs across AZs."
+  type        = list(string)
+}
+
+variable "target_group_arn" {
+  description = "ALB target group ARN for instance registration."
+  type        = string
+}
+
+variable "instance_type" {
+  description = "EC2 instance type for the launch template."
+  type        = string
+  default     = "t3.micro"
+}
+
+variable "app_security_group_id" {
+  description = "Security group for application instances."
+  type        = string
+}
+
+variable "project" {
+  type = string
+}
+
+variable "environment" {
+  type = string
+}
+
+variable "common_tags" {
+  type = map(string)
+}
+```
+
+<Alert type="caution" title="Agent Trap">
+
+Agents set `min_size = 3` and `desired_capacity = 3` because their training data equates "high availability" with "at least 3 instances." For an early-stage startup serving fewer than 100 requests per second, 3 instances is 2 instances too many. That is $15/month versus $45/month on `t3.micro`, or $90/month versus $270/month on `t3.medium`.
+
+Start with `min=1, desired=1, max=4`. Scale based on load test data from [Part 34](/blog/aws-for-startups/34-k6-human-judgment), not based on an agent's definition of "best practice."
+
+**What catches it:** Your AGENT-INSTRUCTIONS.md cost constraints and code review.
+
+</Alert>
+
+---
+
+## Scaling Policies
+
+A scaling policy tells the ASG when to add or remove instances. **Target tracking** is the simplest and most effective policy type. You set a target (for example, average CPU at 60%), and the ASG adds instances when CPU exceeds the target and removes them when it drops below.
+
+```hcl title="infra/modules/asg/scaling.tf"
+resource "aws_autoscaling_policy" "cpu_target" {
+  name                   = "${var.project}-${var.environment}-cpu-target"
+  autoscaling_group_name = aws_autoscaling_group.api.name
+  policy_type            = "TargetTrackingScaling"
+
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ASGAverageCPUUtilization"
+    }
+
+    target_value     = 60.0
+    disable_scale_in = false
+  }
+}
+
+resource "aws_autoscaling_policy" "request_count" {
+  name                   = "${var.project}-${var.environment}-request-count"
+  autoscaling_group_name = aws_autoscaling_group.api.name
+  policy_type            = "TargetTrackingScaling"
+
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label         = "${var.alb_arn_suffix}/${var.target_group_arn_suffix}"
+    }
+
+    target_value = 1000.0
+  }
+}
+```
+
+Two scaling policies:
+
+1. **CPU utilization target at 60%.** When average CPU across instances exceeds 60%, the ASG launches new instances. When it drops below, it terminates extras (after a cooldown period).
+2. **Request count per target at 1000.** When each instance handles more than 1000 requests per minute, the ASG adds capacity. This catches scenarios where CPU is low but connection count is high (common with I/O-heavy APIs).
+
+### Cooldown and Stabilization
+
+The ASG does not scale instantly. After a scale-out event, there is a cooldown period (default 300 seconds) before another scale-out can happen. This prevents thrashing, where the ASG launches 10 instances because of a 30-second spike, then terminates 9 of them a minute later.
+
+For scale-in (removing instances), the stabilization period is longer (default 15 minutes). The ASG waits to confirm that reduced traffic is sustained before terminating instances. Removing instances too quickly means you re-launch them when the next request burst arrives.
+
+:::note
+You will tune these values in [Part 34](/blog/aws-for-startups/34-k6-human-judgment) after running load tests. The defaults are conservative, which is correct for a startup. Being slow to scale is cheaper than being fast to over-provision.
+:::
+
+---
+
+## ALB + ASG: Automatic Health Recovery
+
+The connection between your ALB and ASG creates automatic health recovery:
+
+:::steps
+1. ALB health check hits `/health` on each registered instance every 30 seconds
+2. If an instance fails 3 consecutive health checks, the ALB marks it `unhealthy`
+3. The ASG (with `health_check_type = "ELB"`) sees the unhealthy status
+4. The ASG terminates the unhealthy instance
+5. The ASG launches a replacement using the launch template
+6. The new instance runs user data, starts the application
+7. The ALB detects the new instance, begins health checks
+8. After 3 consecutive successful health checks, the ALB marks it `healthy`
+9. Traffic flows to the new instance
+:::
+
+This entire cycle happens without human intervention. At 3 AM, when your application crashes on one instance, the recovery takes approximately 5-7 minutes (terminate + launch + bootstrap + health check). Compare that to the 30-60 minutes it takes you to notice an alert, open your laptop, SSH in, diagnose, and fix.
+
+---
+
+## Cost Awareness
+
+Running costs with different capacity settings on `t3.micro` ($7.50/month):
+
+| Configuration | Min/Desired/Max | Monthly Cost | Use Case |
+|---------------|-----------------|--------------|----------|
+| Minimal | 1/1/4 | $7.50 base | Dev, early production |
+| Available | 2/2/6 | $15 base | Production with redundancy |
+| Scaled | 1/1/10 | $7.50-$75 | Variable traffic |
+
+Start with `1/1/4`. When your traffic justifies it (measured by load tests, not by agent suggestions), move to `2/2/6` for redundancy across availability zones.
+
+---
+
+## Verify the Setup
+
+After applying the Terraform module:
+
+```bash terminal
+aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names your-project-dev-api-asg \
+  --query 'AutoScalingGroups[0].{Min:MinSize,Max:MaxSize,Desired:DesiredCapacity,Instances:Instances[*].{Id:InstanceId,Health:HealthStatus,AZ:AvailabilityZone}}'
+```
+
+<TerminalOutput title="ASG Status">
+
+```json
+{
+  "Min": 1,
+  "Max": 4,
+  "Desired": 1,
+  "Instances": [
+    {
+      "Id": "i-0abc123def456",
+      "Health": "Healthy",
+      "AZ": "ap-south-1a"
+    }
+  ]
+}
+```
+
+</TerminalOutput>
+
+One healthy instance. The ASG is managing it. If you terminate this instance manually (`aws ec2 terminate-instances --instance-ids i-0abc123def456`), the ASG launches a replacement within minutes. Try it. Breaking things intentionally is how you build confidence that the recovery works.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Single EC2 instance, no ASG, no health check recovery. When the instance dies at 3 AM, your phone rings. When traffic spikes, your users wait. You are the scaling mechanism, and you need sleep. |
+| ✅ **Right** | ASG with launch template, min=1/desired=1/max=4, target tracking on CPU (60%), ALB health checks for automatic replacement. Instances are replaceable. You are not in the loop for routine scaling or recovery. |
+| ❌ **Over** | Predictive scaling, scheduled actions, warm pools, multiple instance types with mixed instances policy, before you have any traffic patterns to predict. You are building auto-scaling for traffic you do not have, based on patterns you cannot observe. |
+| 🤖 **Agent Trap** | Agent sets minimum capacity to 3 "for high availability" when 1 is fine for your current traffic. Three `t3.micro` instances cost $22.50/month instead of $7.50/month. For a `t3.medium`, the difference is $90/month versus $30/month. The agent optimizes for availability metrics from its training data, not for your bank account. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 34: K6 Load Testing, Human Judgment Required**, you generate real traffic against your backends and establish performance baselines. K6 tests hit your ALB, traces flow through SigNoz, and you see how your ASG responds to load. This is also where you encounter Recalibration Checkpoint 2 and the Agent Delegation Matrix, the framework for deciding what agents handle versus what requires your judgment.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Auto Scaling Group",
+    tasks: [
+      { text: "Launch template created with correct AMI and instance type", syncKey: "part-33-launch-template" },
+      { text: "ASG running with min=1, desired=1, max=4", syncKey: "part-33-asg-running" },
+      { text: "Health check type set to ELB (not EC2)", syncKey: "part-33-elb-health" },
+      { text: "Health check grace period set (300 seconds)", syncKey: "part-33-grace-period" }
+    ]
+  },
+  {
+    category: "Scaling",
+    tasks: [
+      { text: "Target tracking policy configured for CPU utilization", syncKey: "part-33-cpu-scaling" },
+      { text: "ASG registers instances with ALB target group", syncKey: "part-33-alb-registration" },
+      { text: "Instance refresh configured for rolling updates", syncKey: "part-33-instance-refresh" }
+    ]
+  },
+  {
+    category: "Recovery",
+    tasks: [
+      { text: "Manually terminated instance replaced by ASG automatically", syncKey: "part-33-recovery-test" },
+      { text: "New instance passes ALB health check after launch", syncKey: "part-33-new-instance-healthy" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Auto Scaling Groups replace manual instance management. Instances are cattle, not pets. When one dies, the ASG replaces it. When traffic grows, the ASG adds capacity. You sleep through both events.
+2. Start with `min=1, desired=1, max=4`. Scale based on actual data from load tests, not based on an agent's "high availability" defaults that triple your bill.
+3. Set `health_check_type = "ELB"`, not `EC2`. The EC2 health check only confirms the instance is running. The ELB health check confirms your application is responding. A running-but-crashed application fools EC2 health checks but not ELB health checks.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

@@ -1,0 +1,401 @@
+---
+title: "Backend on EC2: Python FastAPI with Traces"
+description: "Deploy a Python FastAPI backend on EC2 with OpenTelemetry. Same infrastructure, different language, proving your pipeline is language-agnostic."
+excerpt: "Python FastAPI with traces. Same EC2, same ALB, same SigNoz. Different language, same deployment pipeline."
+date: "2026-05-04"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ec2", "backend", "opentelemetry"]
+series: "AWS From Zero to Production"
+seriesPart: 31
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+You deployed a Bun.js API in [Part 29](/blog/aws-for-startups/29-backend-bun-signoz). Now deploy the same API in Python. Same VPC. Same ALB. Same SigNoz. Different language, same Terraform, same operational story. If your infrastructure only works with one runtime, it is not infrastructure. It is a configuration file for a specific application.
+
+**Time:** About 45 minutes.
+
+**Outcome:** A Python FastAPI application running on EC2 behind the ALB, instrumented with OpenTelemetry, sending traces to SigNoz alongside your Bun.js traces. Two services visible on the SigNoz service map. One infrastructure pipeline serving two languages.
+
+---
+
+## Why This Matters
+
+Most startups start with one language and eventually need a second. A data-heavy microservice in Python. A performance-critical service in Go. A rapid-prototype API in TypeScript. If every language requires a different deployment pipeline, different monitoring setup, and different infrastructure pattern, you are building three platforms instead of one.
+
+The point of this part (and [Part 32](/blog/aws-for-startups/32-backend-go-api)) is to prove that your infrastructure is language-agnostic. The Terraform module from [Part 28](/blog/aws-for-startups/28-ec2-compute-fundamentals), the ALB from [Part 22](/blog/aws-for-startups/22-alb-load-balancer), and the SigNoz setup from [Part 5](/blog/aws-for-startups/05-observability-setup) do not care what runtime serves HTTP on port 3000. That is the whole point of well-designed infrastructure.
+
+FastAPI is the natural choice for Python backends. It is async by default, has built-in request validation with Pydantic, generates OpenAPI docs automatically, and has first-class OpenTelemetry support. It is also the framework agents know best, which means agent-generated FastAPI code is usually close to correct.
+
+---
+
+## What We're Building
+
+- A FastAPI application with async route handlers
+- Pydantic models for request/response validation
+- OpenTelemetry auto-instrumentation with manual spans
+- Deployment to EC2 with Gunicorn + Uvicorn
+- Python traces visible in SigNoz alongside Bun.js traces
+
+---
+
+## FastAPI Project Structure
+
+<FileTree>
+api-python/
+  app/
+    __init__.py
+    main.py
+    routes/
+      __init__.py
+      health.py
+      items.py
+    middleware/
+      __init__.py
+      auth.py
+      tracing.py
+    models/
+      __init__.py
+      items.py
+  instrumentation.py
+  requirements.txt
+  gunicorn.conf.py
+</FileTree>
+
+```text title="api-python/requirements.txt"
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+gunicorn==22.0.0
+pydantic==2.7.0
+httpx==0.27.0
+opentelemetry-api==1.25.0
+opentelemetry-sdk==1.25.0
+opentelemetry-instrumentation-fastapi==0.46b0
+opentelemetry-instrumentation-httpx==0.46b0
+opentelemetry-exporter-otlp==1.25.0
+```
+
+### Instrumentation
+
+Just like the Bun.js setup, OpenTelemetry must initialize before FastAPI loads:
+
+```python title="api-python/instrumentation.py"
+import os
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.semconv.resource import ResourceAttributes
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+def configure_telemetry():
+    resource = Resource.create({
+        ResourceAttributes.SERVICE_NAME: "api-python",
+        ResourceAttributes.SERVICE_VERSION: "1.0.0",
+        ResourceAttributes.DEPLOYMENT_ENVIRONMENT: os.getenv("ENVIRONMENT", "dev"),
+    })
+
+    provider = TracerProvider(resource=resource)
+
+    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
+    exporter = OTLPSpanExporter(endpoint=otlp_endpoint, insecure=True)
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+
+    trace.set_tracer_provider(provider)
+
+    # Auto-instrument httpx for outgoing HTTP calls
+    HTTPXClientInstrumentor().instrument()
+
+    print("OpenTelemetry instrumentation configured for api-python")
+```
+
+### Application Code
+
+```python title="api-python/app/main.py"
+from instrumentation import configure_telemetry
+configure_telemetry()
+
+from fastapi import FastAPI
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from app.routes import health, items
+
+app = FastAPI(title="API Python", version="1.0.0")
+
+app.include_router(health.router, prefix="/health", tags=["health"])
+app.include_router(items.router, prefix="/api/items", tags=["items"])
+
+# Instrument AFTER app is created
+FastAPIInstrumentor.instrument_app(app)
+```
+
+Notice the order: configure telemetry first, create the FastAPI app, then instrument it. FastAPI instrumentation requires the app instance, so the auto-instrumentation call comes after app creation. This is different from the Bun.js pattern where instrumentation runs before the import.
+
+```python title="api-python/app/models/items.py"
+from pydantic import BaseModel
+from datetime import datetime
+
+class ItemCreate(BaseModel):
+    name: str
+
+class ItemResponse(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+    created_by: str | None = None
+
+class ItemListResponse(BaseModel):
+    items: list[ItemResponse]
+    total: int
+```
+
+```python title="api-python/app/routes/health.py"
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "api-python",
+    }
+```
+
+```python title="api-python/app/routes/items.py"
+from fastapi import APIRouter, Depends
+from opentelemetry import trace
+from datetime import datetime
+import uuid
+
+from app.models.items import ItemCreate, ItemResponse, ItemListResponse
+
+router = APIRouter()
+tracer = trace.get_tracer("api-python", "1.0.0")
+
+@router.get("/", response_model=ItemListResponse)
+async def list_items():
+    with tracer.start_as_current_span("list-items") as span:
+        items = [
+            ItemResponse(
+                id="1",
+                name="Item One",
+                created_at=datetime(2026, 5, 4),
+            ),
+            ItemResponse(
+                id="2",
+                name="Item Two",
+                created_at=datetime(2026, 5, 4),
+            ),
+        ]
+        span.set_attribute("items.count", len(items))
+        return ItemListResponse(items=items, total=len(items))
+
+@router.post("/", response_model=ItemResponse, status_code=201)
+async def create_item(body: ItemCreate):
+    with tracer.start_as_current_span("create-item") as span:
+        span.set_attribute("item.name", body.name)
+        return ItemResponse(
+            id=str(uuid.uuid4()),
+            name=body.name,
+            created_at=datetime.now(),
+        )
+```
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate synchronous FastAPI handlers by default. They write `def list_items()` instead of `async def list_items()`. This defeats the entire purpose of FastAPI. Synchronous handlers block the event loop, which means one slow database query blocks every other request. FastAPI's main advantage over Flask is async support. If your handlers are synchronous, you should be using Flask.
+
+**What catches it:** Code review. Look for `def` instead of `async def` in every route handler. If the handler does any I/O (database, HTTP, file), it must be `async`.
+
+</Alert>
+
+### Pydantic Validation
+
+FastAPI validates request bodies against Pydantic models automatically. If someone sends `{"name": 123}` to the create endpoint, FastAPI returns a 422 with a clear error message before your handler code runs.
+
+This is free input validation that you do not have to write, test, or maintain. In the Bun.js version, you parsed `await c.req.json()` and hoped the body had the right shape. In FastAPI, the shape is enforced by the type system.
+
+---
+
+## Deploy to EC2
+
+The deployment pattern is identical to Bun.js from [Part 29](/blog/aws-for-startups/29-backend-bun-signoz), with Python-specific differences in the process manager.
+
+### Gunicorn Configuration
+
+Gunicorn is the production-grade WSGI/ASGI server for Python. It manages worker processes and handles graceful restarts. Uvicorn runs inside Gunicorn as the ASGI worker:
+
+```python title="api-python/gunicorn.conf.py"
+import multiprocessing
+import os
+
+# Bind to all interfaces on port 3000
+bind = f"0.0.0.0:{os.getenv('PORT', '3000')}"
+
+# Workers: 2x CPU cores + 1 is the standard formula
+# For t3.micro (2 vCPUs), this gives 5 workers
+workers = 2 * multiprocessing.cpu_count() + 1
+
+# Use Uvicorn workers for async support
+worker_class = "uvicorn.workers.UvicornWorker"
+
+# Timeout: kill workers that hang for 30 seconds
+timeout = 30
+
+# Graceful timeout: give workers 10 seconds to finish requests
+graceful_timeout = 10
+
+# Access log to stdout for CloudWatch
+accesslog = "-"
+errorlog = "-"
+loglevel = "info"
+```
+
+### Systemd Service
+
+```ini title="/etc/systemd/system/api-python.service"
+[Unit]
+Description=Python FastAPI Service
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/app-python
+Environment=PORT=3001
+Environment=ENVIRONMENT=dev
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=your-signoz-host:4317
+ExecStart=/opt/app-python/venv/bin/gunicorn app.main:app -c gunicorn.conf.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Note the port is `3001`, not `3000`. The Bun.js API is on port 3000. Each service gets its own port and its own ALB target group with path-based routing.
+
+### Setup on EC2
+
+```bash terminal
+# On the EC2 instance
+cd /opt/app-python
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+sudo systemctl daemon-reload
+sudo systemctl enable api-python
+sudo systemctl start api-python
+sudo systemctl status api-python
+```
+
+<TerminalOutput title="systemctl status api-python">
+
+```
+● api-python.service - Python FastAPI Service
+     Loaded: loaded (/etc/systemd/system/api-python.service; enabled)
+     Active: active (running) since Sun 2026-05-04 10:00:00 UTC
+   Main PID: 23456 (gunicorn)
+      Tasks: 12
+     Memory: 95.0M
+        CPU: 2.1s
+     CGroup: /system.slice/api-python.service
+             ├─23456 /opt/app-python/venv/bin/python /opt/app-python/venv/bin/gunicorn app.main:app
+             ├─23457 /opt/app-python/venv/bin/python /opt/app-python/venv/bin/gunicorn app.main:app
+             └─23458 /opt/app-python/venv/bin/python /opt/app-python/venv/bin/gunicorn app.main:app
+
+May 04 10:00:00 ip-10-0-3-45 systemd[1]: Started Python FastAPI Service.
+May 04 10:00:01 ip-10-0-3-45 gunicorn[23456]: OpenTelemetry instrumentation configured for api-python
+```
+
+</TerminalOutput>
+
+95 MB of memory. More than Bun's 28 MB, but still well within a `t3.micro` with 1 GB.
+
+---
+
+## SigNoz: Two Services
+
+Open SigNoz and navigate to **Services**. You now see two entries:
+
+- `api-bun` (from Part 29)
+- `api-python` (from this part)
+
+The service map shows both services as separate nodes. Click on `api-python` to see its latency distribution, request rate, and error rate, independent of the Bun.js metrics.
+
+Compare the p50 latency between the two services for the same `/api/items` endpoint. You will notice Python's first-request latency is higher (cold JIT compilation, worker startup) while subsequent requests converge. This comparison becomes useful in [Part 34](/blog/aws-for-startups/34-k6-human-judgment) when you run load tests across all three backends.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Different Terraform modules, different ALB configurations, different monitoring for Python versus Bun.js. Your "infrastructure" is actually two unrelated setups that happen to run on the same AWS account. |
+| ✅ **Right** | Same Terraform module, same ALB (path-based routing), same OTel pipeline, same SigNoz. Different runtime, identical operational experience. Adding a third language takes 30 minutes, not 3 days. |
+| ❌ **Over** | Python-specific infrastructure optimizations (custom AMI with pre-baked virtualenv, Lambda layers for dependencies, ECS task definitions with Python-tuned memory) before you have profiled the application under load. Optimize after you measure, not before. |
+| 🤖 **Agent Trap** | Agent generates synchronous FastAPI handlers (`def` instead of `async def`), defeating FastAPI's core advantage. Under concurrent load, synchronous handlers block the event loop and p95 latency spikes to seconds. The agent does not test under concurrency, so it never notices. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 32: Backend on EC2, Go API with Traces**, you deploy the third and final language on the same pipeline. Go's static binary makes deployment even simpler: one file, no runtime, no virtualenv. Three languages, one infrastructure, one observability surface.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Backend",
+    tasks: [
+      { text: "FastAPI running on EC2 with Gunicorn + Uvicorn", syncKey: "part-31-fastapi-running" },
+      { text: "API accessible through ALB on its path", syncKey: "part-31-alb-accessible" },
+      { text: "Health check endpoint passing", syncKey: "part-31-health-check" }
+    ]
+  },
+  {
+    category: "Observability",
+    tasks: [
+      { text: "Python traces visible in SigNoz", syncKey: "part-31-traces-visible" },
+      { text: "api-python appears on service map alongside api-bun", syncKey: "part-31-service-map" },
+      { text: "Manual spans on business-critical routes", syncKey: "part-31-manual-spans" }
+    ]
+  },
+  {
+    category: "Code Quality",
+    tasks: [
+      { text: "All route handlers use async def (not def)", syncKey: "part-31-async-handlers" },
+      { text: "Pydantic models for request/response validation", syncKey: "part-31-pydantic" },
+      { text: "Same Terraform module reused (no Python-specific infra)", syncKey: "part-31-same-terraform" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Same infrastructure pattern, different language. Your Terraform module, ALB, and SigNoz pipeline do not care whether the runtime is Bun, Python, or Go. That is the mark of well-designed infrastructure.
+2. FastAPI's async support is its main advantage. Agents generate synchronous handlers by default because `def` is simpler than `async def`. Always check.
+3. SigNoz shows Bun and Python traces side by side. You can compare latency characteristics across runtimes before you even run formal load tests.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

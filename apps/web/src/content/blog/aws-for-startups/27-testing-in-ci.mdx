@@ -1,0 +1,755 @@
+---
+title: "Testing in CI: Agents in Your Pipeline"
+description: "Complete CI pipeline with agent-assisted triage, monthly model evaluation in GitHub Actions, and MCP tools replacing raw CLI commands for structured verification."
+excerpt: "Agents in your pipeline. CI with agent-assisted failure triage, monthly model evaluation, and MCP tools for structured verification output."
+date: "2026-04-18"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ci-cd", "ai-agents", "mcp", "model-eval"]
+series: "AWS From Zero to Production"
+seriesPart: 27
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+CI fails. Red X on the PR. You open the logs, scroll through 200 lines of output, find the error, realize it is a missing environment variable. Fifteen minutes wasted on a two-second fix. Now imagine an agent that reads the CI failure, identifies the root cause, and tells you: "Missing `DATABASE_URL` in the test environment. Add it to `.github/workflows/ci.yml` line 47." That is what you build today.
+
+**Time:** About 1 hour.
+
+**Outcome:** A complete CI pipeline running unit, integration, and E2E tests on every PR. Agent-assisted failure triage that reads logs and identifies root causes. A monthly model evaluation workflow in GitHub Actions that catches regressions. MCP tools replacing raw CLI commands in CI for structured verification output. Three new Scorecard panels (12-14) tracking CI pass rate, agent triage accuracy, and model eval trends.
+
+---
+
+## Why This Matters
+
+You have tests. Unit tests with mocks from [Part 25](/blog/aws-for-startups/25-mocking-external-services). E2E tests from [Part 26](/blog/aws-for-startups/26-e2e-testing-playwright). Validation schemas from [Part 24](/blog/aws-for-startups/24-request-validation-openapi). Pre-commit hooks from [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality). But all of these run locally. A developer (or agent) can skip them by committing with `--no-verify`. A CI pipeline cannot be skipped.
+
+CI is the final quality gate before code reaches `main`. If it is green, the code has passed every automated check you have. If it is red, the code does not merge. No exceptions. No "I'll fix it in the next commit." The branch protection from [Part 7](/blog/aws-for-startups/07-branch-protection-pr) enforces this: required status checks must pass before merge.
+
+But CI has a hidden cost: failure triage. When CI fails, someone has to figure out why. They open the logs. They scroll. They parse error messages. They context-switch from their current task. The average CI failure takes 10-15 minutes to triage, and most failures have obvious root causes: a missing env var, a forgotten dependency, a test that depends on execution order.
+
+This is exactly the kind of task agents handle well. The error is in text. The fix is mechanical. The agent does not need to understand your business logic. It needs to match patterns: "error: MODULE_NOT_FOUND" means a missing dependency. "`ECONNREFUSED 127.0.0.1:5432`" means the database is not running.
+
+---
+
+## What We're Building
+
+- Complete CI pipeline: lint, typecheck, unit tests, integration tests, E2E tests
+- Agent-assisted CI failure triage
+- Monthly model evaluation in GitHub Actions
+- MCP tools running headlessly in CI
+- Scorecard panels 12-14: CI pass rate, agent triage accuracy, model eval trend
+
+---
+
+## The Complete CI Pipeline
+
+Here is the full CI workflow. It runs on every pull request targeting `main`.
+
+```yaml title=".github/workflows/ci.yml"
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+  BUN_VERSION: '1.1'
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run typecheck
+
+  unit-tests:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun test --coverage
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Run E2E tests
+        run: npx playwright test
+        env:
+          CI: true
+      - name: Upload test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'infrastructure') ||
+      contains(join(github.event.pull_request.changed_files.*.filename, ','), 'infra/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.7'
+      - name: Terraform Init
+        run: terraform init -backend=false
+        working-directory: infra/
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: infra/
+      - name: TFLint
+        uses: terraform-linters/setup-tflint@v4
+      - run: tflint --recursive
+        working-directory: infra/
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/
+          framework: terraform
+          output_format: sarif
+          download_external_modules: true
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Pipeline Architecture
+
+The pipeline runs in stages. Lint and typecheck run first. If they fail, nothing else runs (saves CI minutes). Unit tests, E2E tests, and security scans run in parallel after lint passes.
+
+```
+┌────────────────────┐
+│  Lint & Typecheck   │
+└────────┬───────────┘
+         │ (must pass)
+    ┌────┴────┬──────────┐
+    │         │          │
+    ▼         ▼          ▼
+┌────────┐ ┌──────┐ ┌────────┐
+│  Unit  │ │ E2E  │ │Security│
+│ Tests  │ │Tests │ │  Scan  │
+└────────┘ └──────┘ └────────┘
+```
+
+:::tip
+Use `concurrency` with `cancel-in-progress: true`. When you push a new commit to a PR, the previous CI run is cancelled. Without this, stale runs consume CI minutes and block the queue.
+:::
+
+### Capturing Artifacts
+
+Two artifact uploads in the workflow:
+
+1. **Coverage report** uploads on every run (`if: always()`). You can track coverage trends over time.
+2. **Playwright report** uploads only on failure (`if: failure()`). This includes traces, screenshots, and videos from failed tests. Download these artifacts, run `npx playwright show-report`, and see exactly what went wrong.
+
+---
+
+## Agent-Assisted CI Triage
+
+When CI fails, an agent reads the logs and identifies the root cause. This is not magic. It is pattern matching on structured text output.
+
+### The Triage Script
+
+```bash title="scripts/ci/triage-failure.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Extract the failed step's log output
+FAILED_LOG="$1"
+
+# Common failure patterns and their fixes
+triage_failure() {
+  local log="$1"
+
+  # Missing environment variable
+  if echo "$log" | grep -q "ENOENT\|MODULE_NOT_FOUND"; then
+    echo "ROOT CAUSE: Missing dependency"
+    echo "FIX: Run 'bun install' or check that the package is in package.json"
+    return 0
+  fi
+
+  # Database connection
+  if echo "$log" | grep -q "ECONNREFUSED.*5432\|connection refused.*postgres"; then
+    echo "ROOT CAUSE: Database not available"
+    echo "FIX: Add a PostgreSQL service container to the CI job"
+    return 0
+  fi
+
+  # Missing env var
+  if echo "$log" | grep -qP "(?:undefined|missing).*(?:env|environment|variable)|process\.env\.\w+ is undefined"; then
+    echo "ROOT CAUSE: Missing environment variable"
+    echo "FIX: Check .env.example and add missing vars to CI workflow env section"
+    return 0
+  fi
+
+  # Playwright browser not installed
+  if echo "$log" | grep -q "browserType.launch\|Executable doesn't exist"; then
+    echo "ROOT CAUSE: Playwright browsers not installed"
+    echo "FIX: Add 'npx playwright install --with-deps' step before E2E tests"
+    return 0
+  fi
+
+  # Terraform state lock
+  if echo "$log" | grep -q "Error acquiring the state lock"; then
+    echo "ROOT CAUSE: Terraform state is locked"
+    echo "FIX: Another apply is running, or a previous run crashed. Run 'terraform force-unlock <ID>'"
+    return 0
+  fi
+
+  # Out of disk space
+  if echo "$log" | grep -q "No space left on device\|ENOSPC"; then
+    echo "ROOT CAUSE: CI runner out of disk space"
+    echo "FIX: Add a cleanup step or use a larger runner"
+    return 0
+  fi
+
+  echo "ROOT CAUSE: Unknown — manual investigation required"
+  echo "SUGGESTION: Search for 'error', 'Error', 'FAILED' in the log output"
+  return 1
+}
+
+triage_failure "$(cat "$FAILED_LOG")"
+```
+
+This script is deterministic. It matches known patterns against log output. It does not hallucinate. It does not guess. It either matches a known pattern and gives a specific fix, or it says "unknown" and tells you where to look manually.
+
+### Integrating Triage into CI
+
+Add a triage step that runs when any previous step fails:
+
+```yaml title=".github/workflows/ci.yml (add to each job)"
+  - name: Triage failure
+    if: failure()
+    run: |
+      # Capture the step log
+      echo "${{ toJSON(steps) }}" > /tmp/step-output.json
+      # Run triage
+      bash scripts/ci/triage-failure.sh /tmp/step-output.json | tee /tmp/triage-result.txt
+
+      # Post triage result as PR comment
+      if [ -f /tmp/triage-result.txt ]; then
+        BODY=$(cat /tmp/triage-result.txt)
+        gh pr comment "${{ github.event.pull_request.number }}" \
+          --body "## CI Triage 🔍
+
+      \`\`\`
+      $BODY
+      \`\`\`
+
+      *Automated triage by CI agent*"
+      fi
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+When CI fails, the triage step runs, posts a comment on the PR with the root cause and fix suggestion. The developer sees the comment, fixes the issue, and pushes. No log scrolling required.
+
+### Tracking Triage Accuracy
+
+Not every triage result is correct. Track accuracy:
+
+```bash title="scripts/ci/log-triage.sh"
+#!/usr/bin/env bash
+# Log triage result for accuracy tracking
+# Fields: timestamp, pr_number, triage_result, was_correct (filled manually later)
+
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$1,$2,pending" >> ci-triage-log.csv
+```
+
+Over time, you review the triage log and mark whether each result was correct. This feeds into Scorecard panel 13 (Agent triage accuracy). If accuracy drops below 80%, you need more patterns in the triage script.
+
+---
+
+## Monthly Model Evaluation in CI
+
+In [Part 9](/blog/aws-for-startups/09-monorepo-context-evals), you built `eval-models.sh` to evaluate which AI models generate the best infrastructure code. That script runs manually. Now it runs automatically, every month, in GitHub Actions.
+
+```yaml title=".github/workflows/model-eval.yml"
+name: Monthly Model Evaluation
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'  # First day of every month at 6 AM UTC
+  workflow_dispatch:       # Manual trigger for testing
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  evaluate:
+    name: Evaluate Models
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.1'
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.7'
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          npm install -g @terraform-linters/tflint
+
+      - name: Run model evaluation
+        run: bash scripts/eval/eval-models.sh
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        timeout-minutes: 45
+
+      - name: Compare with previous results
+        id: compare
+        run: |
+          # Load previous results
+          PREV="eval-results/previous.json"
+          CURR="eval-results/latest.json"
+
+          if [ -f "$PREV" ]; then
+            REGRESSION=$(python3 scripts/eval/compare-results.py "$PREV" "$CURR")
+            echo "regression=$REGRESSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "regression=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Archive results
+        run: |
+          cp eval-results/latest.json "eval-results/$(date +%Y-%m).json"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-eval-${{ github.run_id }}
+          path: eval-results/
+
+      - name: Alert on regression
+        if: steps.compare.outputs.regression == 'true'
+        run: |
+          gh issue create \
+            --title "Model Eval Regression Detected - $(date +%Y-%m)" \
+            --body "$(cat eval-results/regression-report.md)" \
+            --label "model-eval,regression"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### What the Eval Checks
+
+The evaluation script from Part 9 runs each model through standardized prompts and grades the output:
+
+| Check | What It Measures |
+|-------|-----------------|
+| `terraform fmt` | Does the output follow formatting standards? |
+| `terraform validate` | Is the output syntactically valid? |
+| `tflint` | Does it follow best practices? |
+| `checkov` | Are there security issues? |
+| Instruction compliance | Does it follow AGENT-INSTRUCTIONS.md rules? |
+| Time to completion | How long does each model take? |
+
+### Regression Detection
+
+The comparison script checks whether any model's score dropped by more than 10% from the previous month. Models update constantly. A model that scored 92% last month might score 78% this month because the provider shipped a regression. Monthly evaluation catches this before it affects your workflow.
+
+```python title="scripts/eval/compare-results.py"
+import json
+import sys
+
+def compare(prev_path: str, curr_path: str) -> bool:
+    with open(prev_path) as f:
+        prev = json.load(f)
+    with open(curr_path) as f:
+        curr = json.load(f)
+
+    regressions = []
+    for model in curr["models"]:
+        model_name = model["name"]
+        prev_model = next((m for m in prev["models"] if m["name"] == model_name), None)
+        if prev_model is None:
+            continue
+
+        prev_score = prev_model["overall_score"]
+        curr_score = model["overall_score"]
+        drop = (prev_score - curr_score) / prev_score * 100
+
+        if drop > 10:
+            regressions.append({
+                "model": model_name,
+                "previous": prev_score,
+                "current": curr_score,
+                "drop_pct": round(drop, 1),
+            })
+
+    if regressions:
+        report = "# Model Evaluation Regression Report\n\n"
+        report += "| Model | Previous | Current | Drop |\n"
+        report += "|-------|----------|---------|------|\n"
+        for r in regressions:
+            report += f"| {r['model']} | {r['previous']} | {r['current']} | {r['drop_pct']}% |\n"
+
+        with open("eval-results/regression-report.md", "w") as f:
+            f.write(report)
+
+        print("true")  # regression detected
+    else:
+        print("false")  # no regression
+
+if __name__ == "__main__":
+    compare(sys.argv[1], sys.argv[2])
+```
+
+When a regression is detected, the workflow creates a GitHub issue automatically. You review the issue, check the detailed results, and decide whether to swap models, adjust prompts, or wait for the provider to fix the regression.
+
+---
+
+## MCP in CI
+
+In [Part 19](/blog/aws-for-startups/19-preview-environments), you built `terraform-mcp`, a Model Context Protocol server that wraps Terraform commands in structured tool calls. Until now, it runs locally. Now it runs in CI.
+
+### Why MCP in CI?
+
+Raw CLI output is unstructured text. Parsing `terraform plan` output with grep and awk is brittle. The output format changes between Terraform versions. Edge cases break your parsing.
+
+MCP tools return structured JSON. `terraform-plan` returns a JSON object with `resources_to_add`, `resources_to_change`, `resources_to_destroy`, and `estimated_cost`. No parsing. No regex. The Scorecard consumes this JSON directly.
+
+### Running MCP Headlessly
+
+MCP servers typically run as stdio processes that communicate with an AI agent. In CI, there is no agent. You call the MCP tools directly via a thin wrapper script:
+
+```bash title="scripts/ci/mcp-verify.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run terraform-mcp tools headlessly
+# Usage: mcp-verify.sh <tool-name> <json-args>
+
+TOOL="$1"
+ARGS="$2"
+
+# Start the MCP server and send a single tool call
+echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$TOOL\",\"arguments\":$ARGS}}" \
+  | node scripts/mcp/terraform-mcp/index.js \
+  | jq '.result'
+```
+
+Use it in CI:
+
+```yaml title=".github/workflows/ci.yml (terraform-validate job, revised)"
+  terraform-validate:
+    name: Terraform Validate (MCP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.7'
+
+      - name: Install MCP server deps
+        run: cd scripts/mcp/terraform-mcp && npm ci
+
+      - name: Run terraform-validate via MCP
+        id: validate
+        run: |
+          RESULT=$(bash scripts/ci/mcp-verify.sh "terraform-validate" '{"directory":"infra/"}')
+          echo "$RESULT" > /tmp/validate-result.json
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+
+          # Check for failures
+          VALID=$(echo "$RESULT" | jq -r '.valid')
+          if [ "$VALID" != "true" ]; then
+            echo "Terraform validation failed"
+            echo "$RESULT" | jq '.errors'
+            exit 1
+          fi
+
+      - name: Run compliance-check via MCP
+        id: compliance
+        run: |
+          RESULT=$(bash scripts/ci/mcp-verify.sh "compliance-check" '{"directory":"infra/"}')
+          echo "$RESULT" > /tmp/compliance-result.json
+
+          FINDINGS=$(echo "$RESULT" | jq '.findings_count')
+          echo "Compliance check: $FINDINGS findings"
+
+          if [ "$FINDINGS" -gt 0 ]; then
+            echo "$RESULT" | jq '.findings'
+            exit 1
+          fi
+
+      - name: Upload MCP results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-results
+          path: /tmp/*-result.json
+```
+
+The MCP results are structured JSON. The Scorecard can ingest them directly without parsing text output. Every CI run produces a standardized verification report.
+
+<Alert type="caution" title="Agent Trap">
+
+Agent triage suggests the wrong root cause when errors span multiple services. The real error is a database connection failure that causes 5 test failures, but the triage script matches the first pattern it sees (a test assertion error) and suggests fixing the test. The root cause is the database, not the test. Multi-service failures need a triage hierarchy: check infrastructure first (database, network, disk), then dependencies, then tests.
+
+**What catches it:** Track triage accuracy in the Scorecard. When accuracy drops below 80%, review the failure patterns and add hierarchy to the triage script.
+
+</Alert>
+
+---
+
+## Scorecard: Panels 12-14
+
+Three new panels join the Agent Scorecard. After this addition, the Scorecard has 14 panels.
+
+### Panel 12: CI Pass Rate (Agent vs Human)
+
+Track the CI pass rate for PRs authored by agents versus PRs authored by humans.
+
+```yaml title="Scorecard Panel 12 — CI Pass Rate"
+query: |
+  SELECT
+    CASE
+      WHEN pr_labels LIKE '%agent-generated%' THEN 'agent'
+      WHEN pr_labels LIKE '%agent-assisted%' THEN 'agent-assisted'
+      ELSE 'human'
+    END as author_type,
+    COUNT(CASE WHEN ci_status = 'pass' THEN 1 END) * 100.0 / COUNT(*) as pass_rate,
+    COUNT(*) as total_prs
+  FROM ci_runs
+  WHERE created_at > NOW() - INTERVAL '30 days'
+  GROUP BY author_type
+```
+
+This panel answers the question: "Are agent-generated PRs more or less likely to pass CI than human PRs?" If agent PRs have a significantly lower pass rate, your AGENT-INSTRUCTIONS.md needs more rules or your agent prompts need better context.
+
+### Panel 13: Agent Triage Accuracy
+
+Track how often the CI triage agent correctly identifies the root cause.
+
+```yaml title="Scorecard Panel 13 — Triage Accuracy"
+data_source: ci-triage-log.csv
+metric: |
+  correct_count / total_count * 100
+  Target: > 80%
+display: gauge with 80% threshold line
+```
+
+Review triage results weekly. Mark each one as correct or incorrect. If accuracy is below 80%, add more patterns to the triage script. If it is above 90%, the script is working well and you can consider expanding it to more failure modes.
+
+### Panel 14: Model Eval Trend
+
+Track model evaluation scores over time.
+
+```yaml title="Scorecard Panel 14 — Model Eval Trend"
+data_source: eval-results/*.json (monthly files)
+metric: |
+  Per-model overall_score over time
+  Regression threshold: 10% drop from previous month
+display: line chart with one line per model, threshold band at -10%
+```
+
+This panel shows whether your models are getting better or worse over time. A sudden drop triggers investigation. A gradual improvement confirms your prompt engineering is working.
+
+---
+
+## Putting It Together
+
+Here is the complete CI landscape after this part:
+
+```
+┌───────────────────────────────────────────────────┐
+│                  Every PR                          │
+│  ┌─────────────────────────────────────────────┐  │
+│  │  ci.yml                                      │  │
+│  │  Lint → Typecheck → Unit Tests               │  │
+│  │                   → E2E Tests                │  │
+│  │                   → Security Scan            │  │
+│  │                   → Terraform Validate (MCP) │  │
+│  │                   → Triage on failure         │  │
+│  └─────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────┐
+│                  Monthly                           │
+│  ┌─────────────────────────────────────────────┐  │
+│  │  model-eval.yml                              │  │
+│  │  Run eval-models.sh → Compare → Alert        │  │
+│  └─────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────┐
+│                  Scorecard                          │
+│  Panels 1-11 (existing)                            │
+│  Panel 12: CI pass rate (agent vs human)           │
+│  Panel 13: Agent triage accuracy                   │
+│  Panel 14: Model eval trend                        │
+└───────────────────────────────────────────────────┘
+```
+
+<FileTree>
+.github/
+  workflows/
+    ci.yml
+    model-eval.yml
+    web-preview.yml
+    web-production.yml
+scripts/
+  ci/
+    triage-failure.sh
+    mcp-verify.sh
+    log-triage.sh
+  eval/
+    eval-models.sh
+    compare-results.py
+  mcp/
+    terraform-mcp/
+      index.js
+      package.json
+eval-results/
+  previous.json
+  latest.json
+</FileTree>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No CI. Manual testing. Deploy without checks. Discover bugs when users report them. CI failures take 15 minutes to triage because nobody reads the logs. |
+| ✅ **Right** | Full CI pipeline (lint, typecheck, unit, E2E, security) on every PR. Agent-assisted triage posts root cause as PR comment. Monthly model eval catches regressions. MCP tools provide structured verification output. Scorecard panels 12-14 track CI health, triage accuracy, and model trends. |
+| ❌ **Over** | AI agent that auto-fixes CI failures and auto-merges the fix without human review. Auto-rollback based on agent triage. Fully autonomous CI where no human sees the pipeline output. |
+| 🤖 **Agent Trap** | Agent triage suggests the wrong root cause when a CI failure spans multiple services. Five tests fail. The triage script matches the first test failure and suggests "fix the assertion." The real root cause is a database container that did not start. Fix this by triaging infrastructure failures (database, network, disk) before test failures. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 28: EC2 Compute Fundamentals**, you deploy your first backend service on EC2. The ALB from [Part 22](/blog/aws-for-startups/22-alb-load-balancer) gets a target. The API contract from [Part 23](/blog/aws-for-startups/23-api-design-rest) gets a runtime. The CI pipeline you just built validates every change before it reaches the instance.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "CI Pipeline",
+    tasks: [
+      { text: "CI workflow runs lint, typecheck, unit tests, and E2E tests", syncKey: "part-27-ci-pipeline" },
+      { text: "E2E test artifacts (traces, screenshots) uploaded on failure", syncKey: "part-27-e2e-artifacts" },
+      { text: "Security scan (Checkov, Gitleaks) runs on every PR", syncKey: "part-27-security-scan" },
+      { text: "Concurrency with cancel-in-progress enabled", syncKey: "part-27-concurrency" }
+    ]
+  },
+  {
+    category: "Agent Triage",
+    tasks: [
+      { text: "Triage script identifies common failure patterns", syncKey: "part-27-triage-script" },
+      { text: "Triage result posted as PR comment on failure", syncKey: "part-27-triage-comment" },
+      { text: "Triage accuracy logging configured", syncKey: "part-27-triage-logging" }
+    ]
+  },
+  {
+    category: "Model Eval",
+    tasks: [
+      { text: "Monthly model eval workflow configured (model-eval.yml)", syncKey: "part-27-model-eval-workflow" },
+      { text: "Regression detection compares against previous month", syncKey: "part-27-regression-detection" },
+      { text: "GitHub issue created automatically on regression", syncKey: "part-27-regression-alert" }
+    ]
+  },
+  {
+    category: "MCP in CI",
+    tasks: [
+      { text: "terraform-mcp tools callable headlessly in CI", syncKey: "part-27-mcp-headless" },
+      { text: "MCP results saved as JSON artifacts", syncKey: "part-27-mcp-artifacts" }
+    ]
+  },
+  {
+    category: "Scorecard",
+    tasks: [
+      { text: "Panel 12: CI pass rate (agent vs human) configured", syncKey: "part-27-scorecard-12" },
+      { text: "Panel 13: Agent triage accuracy configured", syncKey: "part-27-scorecard-13" },
+      { text: "Panel 14: Model eval trend configured", syncKey: "part-27-scorecard-14" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Agent-assisted CI triage turns 15-minute debugging sessions into 30-second root cause identification. The triage script is pattern matching, not AI magic. It works because CI failures follow predictable patterns.
+2. Monthly model evaluation in CI catches regressions before they hit your daily workflow. Models change. Your standards should not. A 10% score drop triggers an alert, not a silent quality degradation.
+3. MCP in CI replaces raw CLI parsing with structured tool calls. `terraform-validate` returns `{valid: true}` instead of text you have to grep. The Scorecard gets clean data directly.
+4. Track CI pass rate by author type (agent vs human). The data tells you whether agents are improving your code quality or creating more work. If agent PRs fail 40% more often, your AGENT-INSTRUCTIONS.md needs stronger rules.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
