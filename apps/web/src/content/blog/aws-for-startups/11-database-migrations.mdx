@@ -1,0 +1,724 @@
+---
+title: "Database Migrations: Schema Changes Without the 3 AM Panic"
+description: "Set up database migrations with Prisma, Alembic, and golang-migrate. Learn what agents miss: down migrations, data backfill, and zero-downtime patterns."
+excerpt: "Schema changes without the 3 AM panic. Migrations with Prisma, Alembic, and golang-migrate — and the critical patterns agents always miss."
+date: "2026-02-16"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "database"]
+series: "AWS From Zero to Production"
+seriesPart: 11
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import PanelSwitcher from '../../../components/blog/code/PanelSwitcher.astro';
+import Panel from '../../../components/blog/code/Panel.astro';
+
+You need to add a `role` column to your users table. Your agent generates `ALTER TABLE users ADD COLUMN role VARCHAR(50)`. You deploy it to staging. Works fine on 500 rows. In production, the table has 2 million rows and the `ALTER` locks the table for 45 seconds. Your API returns 500 errors. Users see a blank screen. Your Slack fills up with "is the site down?" messages while PostgreSQL rewrites every row in the table, holding an ACCESS EXCLUSIVE lock the entire time. The agent did not know about zero-downtime migrations because its training data is full of tutorials that run on empty databases.
+
+**Time:** About 45 minutes.
+
+**Outcome:** Migration workflows in your language of choice (Prisma for TypeScript, Alembic for Python, golang-migrate for Go), with the patterns agents consistently miss: down migrations, data backfill, and zero-downtime strategies for tables with real data.
+
+---
+
+## Why This Matters
+
+Schema changes are the most dangerous routine operation in software. Not the most dangerous overall (that honor goes to deleting production data). But the most dangerous thing you do regularly, sometimes multiple times a week, as your product evolves.
+
+Every feature you ship touches the database. New user roles, payment statuses, notification preferences, audit logs. Each one means a schema change. And each schema change is a point where your application can go from "running fine" to "returning 500 errors to every user" in the time it takes PostgreSQL to acquire a lock.
+
+The gap between "add a column" and "safely add a column to a table with millions of rows" is where production incidents live. Agents generate migrations that work perfectly in development, where your users table has 5 rows and the longest lock is imperceptible. They do not think about table size, lock duration, replication lag, or rollback strategies because those concepts do not exist in tutorial databases.
+
+Three specific problems show up repeatedly in agent-generated migrations:
+
+1. **No rollback path.** The agent creates the up migration and skips the down migration entirely. When the deploy breaks, you have no automated way to undo the schema change. You are writing SQL by hand in a production terminal while your CTO watches over your shoulder.
+2. **No data awareness.** Adding a `NOT NULL` column to a table with existing rows requires a backfill step. The agent generates a single `ALTER TABLE` that either fails outright or locks the table while rewriting every row.
+3. **No size awareness.** Operations that are instant on small tables lock large tables for seconds or minutes. The agent has no concept of "this table has 2 million rows, so this ALTER will take a while." It tested against a database with zero rows and called it done.
+
+None of these are theoretical. They are the top three causes of database-related outages at early-stage startups, and they all stem from the same root cause: migrations tested only against empty or tiny databases.
+
+---
+
+## What We're Building
+
+- A migration tool configured for your primary language (Prisma, Alembic, or golang-migrate)
+- A first migration created and applied to your local database from [Part 10](/blog/aws-for-startups/10-docker-compose-local)
+- Down migrations that actually roll back schema changes
+- The expand-contract pattern for safe schema changes on live data
+- Migration integration with Docker Compose so migrations run on container startup
+
+---
+
+## Migration Tools by Language
+
+Every language ecosystem has a migration tool. Pick the one that matches your stack. If you are working in multiple languages, pick one as your primary and commit to it. Running two migration tools against the same database is a recipe for conflicts.
+
+All three tools follow the same core pattern: numbered migration files, applied in order, tracked in a metadata table so the tool knows which migrations have already run. The metadata table (`_prisma_migrations`, `alembic_version`, or `schema_migrations`) is sacred. Never modify it by hand. If you think you need to manually update the migration tracking table, something has gone wrong and you need to fix the root cause, not the symptom.
+
+<PanelSwitcher defaultActive="typescript">
+  <Panel label="Bun / TypeScript" value="typescript">
+
+### Prisma Setup
+
+Prisma is the most popular TypeScript ORM and includes a built-in migration system. If you are using Bun, Deno, or Node.js with TypeScript, this is the default choice.
+
+Install Prisma:
+
+```bash terminal
+bun add prisma @prisma/client
+bunx prisma init
+```
+
+This creates a `prisma/` directory with a `schema.prisma` file. Update the datasource to point at your Docker Compose PostgreSQL from [Part 10](/blog/aws-for-startups/10-docker-compose-local):
+
+```prisma title="prisma/schema.prisma"
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+```
+
+Set the database URL in your `.env` file:
+
+```text title=".env"
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/app?schema=public"
+```
+
+Create and apply your first migration:
+
+```bash terminal
+bunx prisma migrate dev --name init
+```
+
+This does three things: generates a SQL migration file in `prisma/migrations/`, applies it to your database, and regenerates the Prisma client. The migration file is plain SQL that you can (and should) read:
+
+```sql title="prisma/migrations/20260216120000_init/migration.sql"
+CREATE TABLE "User" (
+    "id" SERIAL NOT NULL,
+    "email" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+);
+
+CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
+```
+
+**Prisma's advantage for down migrations:** Prisma tracks the full schema history and can generate rollback SQL automatically with `bunx prisma migrate diff`. You do not need to write down migrations by hand, but you do need to test that rollbacks work before relying on them in production. More on this in the down migrations section.
+
+  </Panel>
+  <Panel label="Python" value="python">
+
+### Alembic Setup
+
+Alembic is the standard migration tool for Python projects, built by the SQLAlchemy team. If you are using FastAPI, Flask, or Django (though Django has its own migration system), Alembic is the right choice.
+
+Install Alembic:
+
+```bash terminal
+pip install alembic sqlalchemy psycopg2-binary
+alembic init alembic
+```
+
+This creates an `alembic/` directory with configuration files. Update `alembic.ini` with your database URL:
+
+```ini title="alembic.ini"
+sqlalchemy.url = postgresql://postgres:postgres@localhost:5432/app
+```
+
+Define your model in your application code:
+
+```python title="app/models.py"
+from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy.orm import declarative_base
+from datetime import datetime, timezone
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True, nullable=False)
+    name = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+```
+
+Update `alembic/env.py` to import your models so autogenerate works:
+
+```python title="alembic/env.py"
+from app.models import Base
+target_metadata = Base.metadata
+```
+
+Generate your first migration:
+
+```bash terminal
+alembic revision --autogenerate -m "create users table"
+```
+
+This creates a migration file in `alembic/versions/`. The file has both `upgrade()` and `downgrade()` functions:
+
+```python title="alembic/versions/001_create_users_table.py"
+def upgrade():
+    op.create_table(
+        "users",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("email", sa.String(), nullable=False),
+        sa.Column("name", sa.String(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=True),
+        sa.Column("updated_at", sa.DateTime(), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("email"),
+    )
+
+def downgrade():
+    op.drop_table("users")
+```
+
+Apply the migration:
+
+```bash terminal
+alembic upgrade head
+```
+
+  </Panel>
+  <Panel label="Go" value="go">
+
+### golang-migrate Setup
+
+golang-migrate is the most widely used migration tool in the Go ecosystem. Unlike Prisma and Alembic, it uses raw SQL files instead of an ORM schema. This gives you full control over every statement.
+
+Install the CLI:
+
+```bash terminal
+go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+```
+
+Create your migrations directory and first migration:
+
+```bash terminal
+mkdir -p migrations
+migrate create -ext sql -dir migrations -seq create_users_table
+```
+
+This creates two files: an up migration and a down migration. You write the SQL for both:
+
+```sql title="migrations/000001_create_users_table.up.sql"
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_users_email ON users(email);
+```
+
+```sql title="migrations/000001_create_users_table.down.sql"
+DROP INDEX IF EXISTS idx_users_email;
+DROP TABLE IF EXISTS users;
+```
+
+Apply the migration:
+
+```bash terminal
+migrate -path migrations -database "postgresql://postgres:postgres@localhost:5432/app?sslmode=disable" up
+```
+
+**golang-migrate's advantage:** The two-file convention (`.up.sql` and `.down.sql`) makes it impossible to forget down migrations. The tool will not apply a migration unless both files exist. This is a structural guardrail that catches what agents miss by default.
+
+  </Panel>
+</PanelSwitcher>
+
+---
+
+## What Agents Miss: Down Migrations
+
+Every up migration needs a corresponding down migration. This is not optional. It is not a nice-to-have. It is the difference between a 5-minute rollback and a 2-hour incident.
+
+When a deploy breaks in production, you need the ability to roll back the schema change without writing SQL under pressure at 3 AM. Down migrations give you that ability. They are pre-written, pre-tested rollback scripts that reverse exactly what the up migration did. You write them when you are calm, thinking clearly, and have access to a test database. You run them when your pager is going off and your production database is in an inconsistent state.
+
+Agents almost never generate down migrations. When you ask an agent to "add a status column to the users table," it creates the up migration and either skips the down migration entirely or fills it with a placeholder. The agent views the task as "add a column" and considers it complete once the column exists. The concept of reversibility is not part of its default reasoning.
+
+Here is what agent output typically looks like for Alembic:
+
+```python title="alembic/versions/002_add_status_column.py (agent-generated)"
+def upgrade():
+    op.add_column("users", sa.Column("status", sa.String(50), nullable=False, server_default="active"))
+
+def downgrade():
+    pass
+```
+
+That `pass` in `downgrade()` means you cannot roll back this migration. If the deploy breaks, your only option is to write a manual SQL script, test it against a copy of production, and run it by hand. At 3 AM.
+
+Here is what the migration should look like:
+
+```python title="alembic/versions/002_add_status_column.py (corrected)"
+def upgrade():
+    op.add_column("users", sa.Column("status", sa.String(50), nullable=False, server_default="active"))
+
+def downgrade():
+    op.drop_column("users", "status")
+```
+
+For golang-migrate, the failure mode is even more visible. The agent creates the `.up.sql` file but writes the `.down.sql` file with a comment instead of real SQL:
+
+:::code-switcher
+```sql title="migrations/000002_add_status.up.sql"
+ALTER TABLE users ADD COLUMN status VARCHAR(50) NOT NULL DEFAULT 'active';
+```
+
+```sql title="migrations/000002_add_status.down.sql (agent-generated)"
+-- TODO: add rollback logic
+```
+:::
+
+The corrected down migration:
+
+```sql title="migrations/000002_add_status.down.sql (corrected)"
+ALTER TABLE users DROP COLUMN IF EXISTS status;
+```
+
+Prisma handles this better than the other two. Because Prisma generates migrations from the schema diff, it can automatically compute the rollback. But you still need to verify: run `bunx prisma migrate reset` in a test environment to confirm the full up-down cycle works.
+
+**The rule:** Before committing any migration file, check that the down migration exists and actually reverses the up migration. This takes 30 seconds and saves hours of incident response.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate migrations without down/rollback logic. When asked to "add a status column," the agent creates the up migration but skips the down migration entirely. In Alembic, the `downgrade()` function is an empty `pass`. In golang-migrate, the `.down.sql` file contains `-- TODO`. Your pre-commit hooks from [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality) should include a check: if a migration file exists without a corresponding rollback, the commit is blocked. A simple shell script that scans for `pass` in `downgrade()` functions or empty `.down.sql` files catches this every time.
+
+</Alert>
+
+---
+
+## What Agents Miss: Data Backfill
+
+Adding a column is easy. Adding a `NOT NULL` column to a table that already has rows is where things break. And it breaks in a way that is invisible during development, because your dev database has either zero rows or a handful of seed data.
+
+The problem is simple: if you add a `NOT NULL` constraint to a column, every existing row must have a value for that column. If even one row has `NULL`, the constraint fails and the migration rolls back (or worse, partially applies). Agents treat this as a single-step operation. It is not.
+
+Here is what an agent generates when you ask for a `role` column with a default value:
+
+```sql title="Agent-generated migration"
+ALTER TABLE users ADD COLUMN role VARCHAR(50) NOT NULL DEFAULT 'user';
+```
+
+On PostgreSQL 11+, this is actually safe for the `DEFAULT` part. PostgreSQL stores the default in the catalog and does not rewrite existing rows. But there are two cases where this breaks:
+
+**Case 1: The default depends on other data.** You want the `role` column to be `'admin'` for users who signed up before a certain date and `'user'` for everyone else. A static `DEFAULT` does not handle this. You need a backfill step.
+
+**Case 2: You are not on PostgreSQL 11+ (or you are on MySQL).** On older PostgreSQL versions and MySQL, `ADD COLUMN ... NOT NULL DEFAULT` rewrites every row in the table. On a table with 2 million rows, that means a full table rewrite with an exclusive lock.
+
+The safe pattern for adding a `NOT NULL` column to an existing table is always three steps:
+
+:::steps
+1. **Add the column as nullable** (no lock on existing rows)
+2. **Backfill existing rows** (done in batches to avoid long-running transactions)
+3. **Add the NOT NULL constraint** (instant on PostgreSQL 12+, requires a full table scan on older versions)
+:::
+
+Here is what this looks like in practice:
+
+```sql title="migrations/000003_add_role_step1.up.sql"
+-- Step 1: Add nullable column (instant, no lock)
+ALTER TABLE users ADD COLUMN role VARCHAR(50);
+```
+
+```sql title="migrations/000004_backfill_role.up.sql"
+-- Step 2: Backfill in batches of 10,000
+-- Run this migration during low-traffic periods
+UPDATE users SET role = 'user' WHERE role IS NULL AND id BETWEEN 1 AND 10000;
+UPDATE users SET role = 'user' WHERE role IS NULL AND id BETWEEN 10001 AND 20000;
+-- Continue until all rows are filled
+-- For large tables, use a script instead of a migration:
+-- DO $$
+-- DECLARE batch_size INT := 10000; min_id INT; max_id INT;
+-- BEGIN
+--   SELECT MIN(id), MAX(id) INTO min_id, max_id FROM users WHERE role IS NULL;
+--   WHILE min_id <= max_id LOOP
+--     UPDATE users SET role = 'user'
+--       WHERE role IS NULL AND id >= min_id AND id < min_id + batch_size;
+--     min_id := min_id + batch_size;
+--     COMMIT;
+--   END LOOP;
+-- END $$;
+```
+
+```sql title="migrations/000005_add_role_not_null.up.sql"
+-- Step 3: Add NOT NULL constraint (after confirming all rows are filled)
+ALTER TABLE users ALTER COLUMN role SET NOT NULL;
+```
+
+Three migration files instead of one. That is the cost of doing it safely. The alternative is a production outage while your table is locked for a full rewrite.
+
+Why batched updates instead of a single `UPDATE users SET role = 'user' WHERE role IS NULL`? Because a single UPDATE on 2 million rows creates a single transaction that holds row-level locks on every row it touches. It generates massive WAL (write-ahead log) entries. It can cause replication lag if you have read replicas. And if it fails halfway through, the entire operation rolls back and you start over. Batching limits the blast radius of each individual update and lets other queries interleave between batches.
+
+:::tip
+For tables with fewer than 10,000 rows, the single-statement approach (`ADD COLUMN ... NOT NULL DEFAULT`) is fine. The expand-contract pattern matters when you have 100,000+ rows. Know your table sizes.
+:::
+
+---
+
+## What Agents Miss: Zero-Downtime Patterns
+
+The previous two sections covered what to do when agents skip steps. This section covers a subtler problem: when the migration itself is technically correct but operationally dangerous because of table size.
+
+Not every `ALTER TABLE` is dangerous. Some operations are instant on PostgreSQL regardless of table size. The key is understanding which operations modify metadata (instant) and which operations rewrite the entire table (slow, locked):
+
+| Operation | Lock Type | Duration on Large Tables |
+|-----------|-----------|--------------------------|
+| `ADD COLUMN` (nullable, no default) | ACCESS EXCLUSIVE | Instant (metadata only) |
+| `ADD COLUMN ... DEFAULT` (PG 11+) | ACCESS EXCLUSIVE | Instant (catalog default) |
+| `DROP COLUMN` | ACCESS EXCLUSIVE | Instant (marks column as dropped) |
+| `ALTER COLUMN SET NOT NULL` (PG 12+) | ACCESS EXCLUSIVE | Instant (if existing constraint validates it) |
+| `ADD COLUMN ... NOT NULL DEFAULT` (PG < 11) | ACCESS EXCLUSIVE | Full table rewrite |
+| `ALTER COLUMN TYPE` | ACCESS EXCLUSIVE | Full table rewrite |
+| `ADD INDEX` | SHARE lock | Full table scan |
+| `ADD INDEX CONCURRENTLY` | No lock | Full table scan, slower |
+
+The rule of thumb: if the table has more than 100,000 rows, think before you `ALTER`. Check the lock type. Check whether the operation rewrites the table or just updates metadata.
+
+### The Expand-Contract Pattern
+
+For operations that lock the table (type changes, adding indexes, complex constraints), the expand-contract pattern keeps your application running:
+
+**Expand phase:** Add the new structure alongside the old one. Both exist simultaneously. The application writes to both the old and new structures.
+
+**Contract phase:** After confirming the new structure is correct and fully populated, remove the old structure. The application now uses only the new structure.
+
+Example: renaming a column from `name` to `full_name`.
+
+An agent will generate:
+
+```sql title="Agent-generated (dangerous)"
+ALTER TABLE users RENAME COLUMN name TO full_name;
+```
+
+This is a single atomic operation, but your application code still references `name`. Every query that uses `name` breaks the instant this migration runs. If you deploy the migration and the code in a single deploy, there is a window during the rollout where old application instances are querying `name` on a table where the column is now called `full_name`.
+
+The expand-contract version:
+
+```sql title="migrations/000006_expand_full_name.up.sql"
+-- Expand: add new column, copy data, set up trigger
+ALTER TABLE users ADD COLUMN full_name VARCHAR(255);
+UPDATE users SET full_name = name WHERE full_name IS NULL;
+
+-- Trigger keeps both columns in sync during the transition
+CREATE OR REPLACE FUNCTION sync_name_columns()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+    IF NEW.full_name IS NULL THEN
+      NEW.full_name := NEW.name;
+    END IF;
+    IF NEW.name IS NULL THEN
+      NEW.name := NEW.full_name;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_sync_name
+BEFORE INSERT OR UPDATE ON users
+FOR EACH ROW EXECUTE FUNCTION sync_name_columns();
+```
+
+Deploy the application code to read from `full_name` instead of `name`. Once all instances are updated and the old column is no longer referenced:
+
+```sql title="migrations/000007_contract_name.up.sql"
+-- Contract: remove old column and sync trigger
+DROP TRIGGER IF EXISTS trg_sync_name ON users;
+DROP FUNCTION IF EXISTS sync_name_columns;
+ALTER TABLE users DROP COLUMN name;
+ALTER TABLE users ALTER COLUMN full_name SET NOT NULL;
+```
+
+Two deploys instead of one. More work, zero downtime. This pattern feels excessive when you have 500 users. It is essential when you have 50,000. Build the habit now so it is second nature when it matters.
+
+### Creating Indexes Without Downtime
+
+Adding an index to a large table is the other common zero-downtime trap. Agents add indexes freely because indexes make queries faster. What they do not consider is that `CREATE INDEX` holds a SHARE lock on the table, which blocks all writes (INSERT, UPDATE, DELETE) for the duration of the index build. On a table with millions of rows, that can take minutes. Minutes where your application cannot write to that table. Minutes where every API request that touches that table either queues up or times out.
+
+The fix is `CONCURRENTLY`:
+
+```sql title="migrations/000008_add_email_index.up.sql"
+-- CONCURRENTLY does not block writes, but takes longer
+CREATE INDEX CONCURRENTLY idx_users_email ON users(email);
+```
+
+One catch: `CREATE INDEX CONCURRENTLY` cannot run inside a transaction. Most migration tools wrap each migration in a transaction by default. For Alembic, you need to disable the transaction wrapper for this migration:
+
+```python title="alembic/versions/008_add_email_index.py"
+from alembic import op
+
+# Required: disable transaction for CONCURRENTLY
+def upgrade():
+    op.execute("COMMIT")  # End the auto-started transaction
+    op.create_index(
+        "idx_users_email",
+        "users",
+        ["email"],
+        postgresql_concurrently=True,
+    )
+
+def downgrade():
+    op.execute("COMMIT")
+    op.drop_index("idx_users_email", postgresql_concurrently=True)
+```
+
+For golang-migrate, set `x-migrations-table` and ensure your migration runner does not wrap individual files in transactions.
+
+:::note
+**Coming in Part 35:** When we set up RDS PostgreSQL in production, we will revisit zero-downtime migrations with real table sizes and production traffic. The patterns here apply directly.
+:::
+
+---
+
+## Running Migrations in Docker Compose
+
+In [Part 10](/blog/aws-for-startups/10-docker-compose-local), you set up Docker Compose with a PostgreSQL container. Now you need migrations to run automatically when you bring the stack up. Nobody should have to remember to run `prisma migrate` or `alembic upgrade` after `docker compose up`. Manual steps that people forget are steps that cause incidents.
+
+The pattern is a dedicated migration service: a container that depends on the database, runs all pending migrations, and exits. Your API service depends on the migration service completing successfully. If migrations fail, the API never starts. This ordering guarantee is the entire point.
+
+Without this pattern, you end up with a race condition: the API starts before the database schema is ready, queries fail, and you get a flood of errors in your logs. Or worse, the API starts, the old schema is close enough to work for most queries, and you do not notice the missing column until a user triggers the one code path that needs it.
+
+<PanelSwitcher defaultActive="typescript">
+  <Panel label="Bun / TypeScript" value="typescript">
+
+```yaml title="docker-compose.yml"
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    command: bunx prisma migrate deploy
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/app?schema=public"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    command: bun run src/index.ts
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/app?schema=public"
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./src:/app/src
+
+volumes:
+  pgdata:
+```
+
+  </Panel>
+  <Panel label="Python" value="python">
+
+```yaml title="docker-compose.yml"
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/app"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/app"
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./app:/app/app
+
+volumes:
+  pgdata:
+```
+
+  </Panel>
+  <Panel label="Go" value="go">
+
+```yaml title="docker-compose.yml"
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate:v4.17.0
+    command: ["-path", "/migrations", "-database", "postgresql://postgres:postgres@db:5432/app?sslmode=disable", "up"]
+    volumes:
+      - ./migrations:/migrations
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    command: ./server
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/app?sslmode=disable"
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+```
+
+  </Panel>
+</PanelSwitcher>
+
+The key details in all three configurations:
+
+- **`depends_on` with `service_healthy`** on the database. The migrate service waits until PostgreSQL is actually ready to accept connections, not just until the container starts. Without the health check, migrations fail with "connection refused" because PostgreSQL is still initializing.
+- **`condition: service_completed_successfully`** on the migrate service. The API service does not start until migrations finish. If a migration fails, the API never starts, which is exactly what you want. A running API with an inconsistent schema is worse than a stopped API.
+- **`restart: "no"`** on the migrate service. It runs once and exits. If it fails, Docker Compose does not retry it in a loop.
+
+Test the full cycle:
+
+```bash terminal
+docker compose down -v && docker compose up
+```
+
+The `-v` flag removes the volume, giving you a clean database. You should see the migrate service run, apply all migrations, exit with code 0, and then the API starts. If the migrate service exits with a non-zero code, the API stays stopped. That is the correct behavior.
+
+Run this test regularly. Every time you add a new migration, run `docker compose down -v && docker compose up` to verify the entire migration chain applies cleanly from scratch. This catches ordering bugs, missing dependencies between migrations, and migrations that assume data exists from a previous migration. Your CI pipeline should do this automatically (we will set that up in later parts), but the local test is your first line of defense.
+
+One common mistake: using `prisma migrate dev` in the Docker Compose command instead of `prisma migrate deploy`. The `dev` command is interactive, generates new migrations, and prompts for confirmation. The `deploy` command applies existing migrations non-interactively, which is what you want in an automated environment. The same distinction applies across tools: use the non-interactive, production-safe command in Docker Compose.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Manual SQL scripts pasted into production. No migration history. No rollback capability. You hope you remember what you changed last Tuesday. |
+| ✅ **Right** | Migration tool per language stack. Every up has a down. Data backfill as a separate step. Zero-downtime awareness for tables over 100K rows. Migrations tested in Docker Compose before touching any real database. |
+| ❌ **Over** | Custom migration framework with automatic conflict resolution, AI-generated rollback plans, and a separate migration review board. You have 3 tables. |
+| 🤖 **Agent Trap** | Agent generates `ALTER TABLE users ADD COLUMN role VARCHAR(50) NOT NULL DEFAULT 'user'` as a single statement. On PostgreSQL with 2M rows, this rewrites every row in the table and holds an ACCESS EXCLUSIVE lock. The agent's training data comes from tutorials with empty databases. Always check table size before applying agent-generated ALTER TABLE statements. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 12: Secrets & Agent Security**, we secure the credentials your database needs. dotenv patterns, AWS Secrets Manager, and the four levels of agent sandboxing that keep your agents helpful without being dangerous.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Migrations",
+    tasks: [
+      { text: "Migration tool configured for primary language (Prisma, Alembic, or golang-migrate)", syncKey: "part-11-tool-configured" },
+      { text: "First migration created and applied to local database", syncKey: "part-11-first-migration" },
+      { text: "Down migration tested (rollback works without errors)", syncKey: "part-11-down-tested" },
+      { text: "Migrations run in Docker Compose on startup (service_completed_successfully)", syncKey: "part-11-docker-compose" }
+    ]
+  },
+  {
+    category: "Patterns",
+    tasks: [
+      { text: "Zero-downtime migration pattern documented (expand-contract)", syncKey: "part-11-zero-downtime" },
+      { text: "Data backfill pattern (add nullable, backfill, constrain) understood and tested", syncKey: "part-11-backfill" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Every up migration needs a down migration. Agents almost never generate these, so check every migration file before committing.
+2. Migrations that work on an empty dev database can lock production tables with millions of rows. Always consider table size before applying `ALTER TABLE` statements.
+3. The expand-contract pattern (add nullable, backfill, add constraint) is the safe path for schema changes on live data.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

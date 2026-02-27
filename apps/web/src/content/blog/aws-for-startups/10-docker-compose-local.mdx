@@ -1,0 +1,570 @@
+---
+title: "Docker Compose: Because Localhost Isn't Production"
+description: "Build a complete local development environment with Docker Compose. Agent-generated configs with health checks, volume mounts, and networking that mirrors production."
+excerpt: "Because localhost isn't production. Build a complete local dev stack with Docker Compose: agent-generated, human-reviewed, production-mirroring."
+date: "2026-02-12"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "docker"]
+series: "AWS From Zero to Production"
+seriesPart: 10
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+"It works on my machine." The most expensive sentence in software. Your API connects to localhost PostgreSQL with trust authentication. Your teammate's connects to a Docker container with password auth. Production uses RDS with IAM authentication. Three environments, three behaviors, three sets of bugs. A customer reports data not saving. You cannot reproduce it because your local PostgreSQL uses a different collation than production. You spend four hours chasing a bug that only exists because your environment does not match what runs in AWS.
+
+**Time:** About 45 minutes.
+
+**Outcome:** A Docker Compose stack that mirrors production: PostgreSQL, Redis, and your API, with health checks that prevent the "service started but not ready" race condition. Every developer on your team runs `docker compose up` and gets the same environment in 30 seconds.
+
+---
+
+## Why This Matters
+
+Local development without containers is a game of "spot the difference" between your machine and production. You install PostgreSQL 16 from Homebrew. Your teammate installed PostgreSQL 15 six months ago and forgot about it. Production runs PostgreSQL 16.4 on RDS with specific parameter group settings. Each environment has a subtly different behavior around JSONB indexing, and nobody discovers the mismatch until data is corrupted in production.
+
+Docker Compose solves this by running every dependency in a container with a pinned version, a defined configuration, and a reproducible startup sequence. Your local stack becomes a miniature version of your AWS infrastructure. PostgreSQL runs the same version as RDS. Redis runs the same version as ElastiCache. Your API connects to them the same way it connects in production, through environment variables with the same names.
+
+There is a second benefit that people underestimate: onboarding time. Without Docker Compose, onboarding a new developer means a wiki page with 47 steps, half of which are outdated, three of which conflict with each other, and one of which installs a globally-scoped dependency that breaks something else on the machine. With Docker Compose, onboarding is: clone the repo, copy `.env.example` to `.env`, run `docker compose up`. Thirty seconds. Done.
+
+The DGVE pipeline applies here. You ask an agent to generate `docker-compose.yml`. The agent produces something that looks reasonable at first glance. Then you verify. And the verification is where this part earns its keep, because agents get Docker Compose wrong in specific, predictable ways that will waste your morning if you do not catch them.
+
+---
+
+## What We're Building
+
+- A `docker-compose.yml` with PostgreSQL 16, Redis 7, and a Node.js API service
+- Health checks on every dependency so services start in the correct order
+- Named volumes for database persistence across container restarts
+- Bind mounts for application code hot-reloading during development
+- A custom Docker network that mirrors VPC networking concepts
+- A `.env` file with production-like variable names for local overrides
+
+---
+
+## Agent Generates docker-compose.yml
+
+Here is the prompt you give your agent. Notice that it references the AGENT-INSTRUCTIONS.md you built in [Part 9](/blog/aws-for-startups/09-monorepo-context-evals), which contains your project conventions:
+
+```text title="Prompt to agent"
+Generate a docker-compose.yml for local development with these services:
+- PostgreSQL database
+- Redis cache
+- Node.js API that connects to both
+
+The API should use environment variables for all connection strings.
+Use the conventions in AGENT-INSTRUCTIONS.md.
+```
+
+Here is what the agent produces (unedited):
+
+```yaml title="docker-compose.yml (agent output, unedited)"
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:latest
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: myapp
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql://admin:password@postgres:5432/myapp
+      REDIS_URL: redis://redis:6379
+```
+
+At first glance, this looks fine. The services are correct. The ports are mapped. The environment variables reference container hostnames. The `depends_on` ensures ordering. If you are in a hurry, you run `docker compose up`, it mostly works, and you move on.
+
+Do not move on. There are five problems in this file.
+
+**What the agent got right:**
+
+- Service definitions for all three components
+- Port mappings for host access
+- Environment variables using container names for service discovery
+- `depends_on` for startup ordering
+- `DATABASE_URL` connection string format
+
+**What the agent got wrong:**
+
+1. **`image: postgres:latest`** and **`image: redis:latest`**. The `:latest` tag is a moving target. Today you build your containers and get PostgreSQL 16.4. Tomorrow a teammate rebuilds and gets PostgreSQL 17.0. Your migrations break and neither of you knows why.
+
+2. **No health checks.** The `depends_on` directive only waits for the container to start, not for the service inside to be ready. PostgreSQL takes 2-5 seconds to initialize. Your API starts, tries to connect, and crashes with "connection refused." You add a retry loop to your API code to work around a Docker Compose configuration problem.
+
+3. **No volumes.** Every time you run `docker compose down`, your database is wiped. Every time. You re-run migrations, re-seed data, and waste 10 minutes that should have cost zero.
+
+4. **No custom network.** All services land on the default bridge network. This works for three services but teaches you nothing about network isolation, and it will not translate to VPC concepts when you reach [Part 20](/blog/aws-for-startups/20-vpc-from-scratch).
+
+5. **`version: "3.8"` is obsolete.** Docker Compose V2 ignores the `version` field entirely. It is a no-op that adds visual noise.
+
+Let's fix each one.
+
+---
+
+## Health Checks
+
+Health checks are the single most important thing agents forget in Docker Compose files. Without them, `depends_on` is a lie.
+
+Here is what happens without health checks:
+
+:::steps
+1. You run `docker compose up`
+2. Docker starts the PostgreSQL container
+3. Docker sees PostgreSQL container is "running" (the process started)
+4. Docker starts the API container because `depends_on: postgres` is satisfied
+5. The API tries to connect to PostgreSQL
+6. PostgreSQL is still initializing (creating system tables, running init scripts)
+7. The API gets "connection refused" and crashes
+8. You add `sleep 5` to your API entrypoint and hate yourself a little
+:::
+
+The fix is not a sleep. The fix is telling Docker Compose what "ready" actually means for each service.
+
+**PostgreSQL health check:** PostgreSQL ships with `pg_isready`, a utility that returns 0 only when the database is accepting connections.
+
+```yaml title="docker-compose.yml (PostgreSQL health check)"
+services:
+  postgres:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-app}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+```
+
+**Redis health check:** Redis provides `redis-cli ping`, which returns "PONG" when the server is ready.
+
+```yaml title="docker-compose.yml (Redis health check)"
+services:
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+```
+
+**API depends_on with conditions:** Now you change `depends_on` from a simple list to a conditional block.
+
+```yaml title="docker-compose.yml (conditional depends_on)"
+services:
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+```
+
+With this configuration, Docker Compose will not start the API container until both PostgreSQL and Redis report healthy. No sleep hacks. No retry loops in your application code. No race conditions. The orchestrator handles readiness, which is what orchestrators are for.
+
+The `start_period` on PostgreSQL is important. It gives the database time to initialize before Docker starts counting health check failures. Without it, PostgreSQL's first 10 seconds of initialization count as failures, and Docker might restart the container before it ever finishes starting up.
+
+Each health check parameter has a specific job:
+
+| Parameter | Value | Purpose |
+|---|---|---|
+| `interval` | `5s` | How often Docker runs the health check command |
+| `timeout` | `5s` | How long Docker waits for the command to respond before counting it as a failure |
+| `retries` | `5` | How many consecutive failures before the container is marked "unhealthy" |
+| `start_period` | `10s` | Grace period after container start during which failures do not count toward retries |
+
+Get `retries` and `start_period` wrong, and Docker restarts your database container in a loop. Five retries at 5-second intervals with no start period means Docker gives PostgreSQL 25 seconds total. If your database has a large init script or runs on a slow machine, 25 seconds is not enough. The container flaps between "starting" and "unhealthy" until you intervene. A 10-second start period buys time for initialization before the health check clock starts ticking.
+
+---
+
+## Volume Mounts
+
+There are two types of volume mounts, and they solve different problems.
+
+**Named volumes** persist data across container restarts. When you run `docker compose down` and then `docker compose up` again, your database still has its data. Without named volumes, you lose everything every time you stop your containers.
+
+```yaml title="docker-compose.yml (named volumes)"
+services:
+  postgres:
+    image: postgres:16
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    volumes:
+      - redis-data:/data
+
+volumes:
+  pgdata:
+  redis-data:
+```
+
+Named volumes are managed by Docker. They live in Docker's storage directory, not in your project folder. You do not commit them to git. You do not back them up (this is local development, not production). They just persist between restarts so you stop wasting time re-seeding your database every morning.
+
+**Bind mounts** map a directory from your host machine into the container. This is how you get hot-reloading. When you edit a file on your host, the change is immediately visible inside the container.
+
+```yaml title="docker-compose.yml (bind mount for hot-reload)"
+services:
+  api:
+    build: .
+    volumes:
+      - ./src:/app/src
+      - /app/node_modules
+```
+
+Two things to notice here. First, `./src:/app/src` maps your local `src` directory into the container. When you save a file, your API server (running inside the container with something like nodemon or tsx watch) picks up the change and restarts.
+
+Second, `/app/node_modules` is a volume without a host path. This is an anonymous volume that prevents your host's `node_modules` from overwriting the container's `node_modules`. This matters because your host might be macOS and the container runs Linux. Native modules compiled for macOS will not work inside the Linux container. The anonymous volume keeps the container's Linux-compiled `node_modules` intact.
+
+| Volume Type | Syntax | Persistence | Use Case |
+|---|---|---|---|
+| Named volume | `pgdata:/var/lib/postgresql/data` | Survives `docker compose down` | Database data, cache data |
+| Bind mount | `./src:/app/src` | Real-time sync with host | Application code, hot-reload |
+| Anonymous volume | `/app/node_modules` | Survives container restart only | Isolating OS-specific dependencies |
+
+:::tip
+Run `docker compose down` to stop and remove containers while keeping named volumes. Run `docker compose down -v` to also remove named volumes (when you want a truly clean start). Know the difference before you type the command.
+:::
+
+---
+
+## Networking
+
+By default, Docker Compose creates a single default network for all services. Everything can talk to everything. This works, but it teaches you nothing about the network isolation that production demands.
+
+In production on AWS, your services live in different subnets within a VPC. Your API sits in a private subnet. Your database sits in a separate private subnet. A load balancer in a public subnet routes traffic to the API. Security groups control which services can communicate with which others.
+
+You cannot fully replicate this locally with Docker Compose (and you should not try). But you can create a custom network that establishes the habit of thinking about network boundaries.
+
+```yaml title="docker-compose.yml (custom network)"
+networks:
+  app-network:
+    driver: bridge
+
+services:
+  postgres:
+    networks:
+      - app-network
+
+  redis:
+    networks:
+      - app-network
+
+  api:
+    networks:
+      - app-network
+```
+
+With a custom network, service discovery works via container names. Your API connects to `postgres:5432` and `redis:6379` using the service names defined in your Compose file. Docker's built-in DNS resolves these names to the correct container IP addresses.
+
+This matters because it mirrors how services find each other in production. In AWS, your API does not connect to `10.0.3.47:5432`. It connects to an RDS endpoint like `myapp-db.cluster-abc123.ap-south-1.rds.amazonaws.com`. The principle is the same: use a name, not an IP. Docker Compose's service discovery is your local version of AWS service endpoints.
+
+:::note
+**Coming in Part 20:** When you build your VPC, you will see the same concepts at a larger scale: private subnets isolating databases, security groups controlling access, and DNS-based service discovery through Route 53 and RDS endpoints.
+:::
+
+Why not the default bridge network? The default bridge network does not provide automatic DNS resolution between containers. You have to use `--link` (deprecated) or IP addresses. Custom networks give you DNS for free and let you add network-level isolation later if your stack grows.
+
+As your stack grows, custom networks let you segment services. You could create an `app-network` for the API and Redis, and a `data-network` for the API and PostgreSQL. The API sits on both networks. Redis cannot reach PostgreSQL directly. This is the Docker equivalent of security group rules, and it builds the mental model you need when you design VPC security groups in production.
+
+---
+
+## Environment Variables
+
+Your Docker Compose file should use the same environment variable names that production uses. This is not a cosmetic choice. When your API code reads `DATABASE_URL` locally and reads `DATABASE_URL` in production, you eliminate an entire class of "it works locally" bugs caused by environment-specific configuration code paths.
+
+Create a `.env` file at the root of your project:
+
+```bash title=".env"
+# Database
+POSTGRES_USER=app
+POSTGRES_PASSWORD=localdev123
+POSTGRES_DB=app
+
+# Connection strings (used by API)
+DATABASE_URL=postgresql://app:localdev123@postgres:5432/app
+REDIS_URL=redis://redis:6379
+
+# API
+NODE_ENV=development
+PORT=3000
+```
+
+Docker Compose automatically reads `.env` from the same directory as your `docker-compose.yml`. You can reference these variables in your Compose file with `${VARIABLE_NAME}` syntax.
+
+```yaml title="docker-compose.yml (environment variable interpolation)"
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+
+  api:
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      NODE_ENV: ${NODE_ENV}
+      PORT: ${PORT}
+```
+
+Three rules for environment variables in Docker Compose:
+
+1. **Match production names exactly.** If production uses `DATABASE_URL`, use `DATABASE_URL` locally. Not `DB_URL`, not `PG_CONNECTION_STRING`, not `LOCAL_DB`. Same name, different value.
+
+2. **Never commit real credentials.** Your `.env` file uses `localdev123` as the password. Your `.gitignore` excludes `.env`. Provide a `.env.example` with placeholder values so new developers know which variables to set.
+
+3. **Use variable interpolation in Compose, not hardcoded values.** This makes it easy to override a single variable without editing the Compose file. A teammate who runs PostgreSQL on a non-standard port changes one line in `.env`, not the entire Compose configuration. This also means your `docker-compose.yml` can be committed to git without containing any credentials, even local ones.
+
+```bash title=".env.example"
+# Copy this file to .env and fill in values
+# cp .env.example .env
+
+POSTGRES_USER=app
+POSTGRES_PASSWORD=changeme
+POSTGRES_DB=app
+DATABASE_URL=postgresql://app:changeme@postgres:5432/app
+REDIS_URL=redis://redis:6379
+NODE_ENV=development
+PORT=3000
+```
+
+:::note
+**Coming in Part 12:** We cover secrets management in depth, including how production environment variables are handled with AWS SSM Parameter Store and Secrets Manager. The `.env` pattern you set up here carries forward.
+:::
+
+---
+
+## The Complete docker-compose.yml
+
+Here is the final, verified version with all fixes applied. Every problem from the agent's original output is resolved.
+
+```yaml title="docker-compose.yml"
+services:
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-app}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - app-network
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: ${PORT:-3000}
+    volumes:
+      - ./src:/app/src
+      - /app/node_modules
+    networks:
+      - app-network
+
+volumes:
+  pgdata:
+  redis-data:
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+<FileTree>
+project-root/
+  docker-compose.yml
+  Dockerfile
+  .env
+  .env.example
+  .gitignore
+  src/
+    index.ts
+</FileTree>
+
+Compare this to the agent's original output. Five changes:
+
+| Problem | Agent's Version | Fixed Version |
+|---|---|---|
+| Image tags | `postgres:latest`, `redis:latest` | `postgres:16`, `redis:7` |
+| Health checks | None | `pg_isready`, `redis-cli ping` |
+| Startup order | `depends_on` (container started) | `depends_on` with `condition: service_healthy` |
+| Data persistence | No volumes | Named volumes for both databases |
+| Networking | Default bridge | Custom `app-network` with DNS |
+
+Run it:
+
+```bash terminal
+docker compose up
+```
+
+<TerminalOutput title="docker compose up">
+
+```
+[+] Running 4/4
+ ✔ Network project_app-network  Created
+ ✔ Volume "project_pgdata"      Created
+ ✔ Volume "project_redis-data"  Created
+ ✔ Container project-postgres-1 Healthy
+ ✔ Container project-redis-1    Healthy
+ ✔ Container project-api-1      Started
+```
+
+</TerminalOutput>
+
+Notice the "Healthy" status on PostgreSQL and Redis. That is your health checks working. The API container did not start until both dependencies reported healthy. No race condition. No retry loop. No sleep hack.
+
+Verify the health checks are passing:
+
+```bash terminal
+docker compose ps
+```
+
+<TerminalOutput title="docker compose ps">
+
+```
+NAME                  STATUS                  PORTS
+project-api-1        Up 12 seconds            0.0.0.0:3000->3000/tcp
+project-postgres-1   Up 18 seconds (healthy)  0.0.0.0:5432->5432/tcp
+project-redis-1      Up 18 seconds (healthy)  0.0.0.0:6379->6379/tcp
+```
+
+</TerminalOutput>
+
+The "(healthy)" marker confirms that PostgreSQL and Redis are not just running, but ready to accept connections.
+
+Test persistence by inserting data, stopping the stack, and restarting:
+
+```bash terminal
+docker compose down && docker compose up -d
+```
+
+Connect to PostgreSQL and verify your data is still there. If it is, your named volumes are working. If the database is empty, you forgot the `volumes` section or accidentally ran `docker compose down -v` (which removes volumes). This is worth testing once so you do not discover the distinction at 6 PM on a Friday when you lose a day's worth of seed data.
+
+---
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate `image: postgres:latest` instead of a pinned version like `postgres:16`. The `:latest` tag means your local environment silently upgrades when you pull or rebuild, potentially breaking migrations or introducing behavior changes between PostgreSQL major versions.
+
+Your AGENT-INSTRUCTIONS.md from [Part 9](/blog/aws-for-startups/09-monorepo-context-evals) should ban `:latest` tags. The pre-commit hook from [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality) (`check-docker-latest.sh`) catches this automatically. But agents pull `:latest` from training data where it is the default in every Docker tutorial. Expect to see it every time you ask an agent to generate a Compose file. Every time.
+
+**What catches it:** The `check-docker-latest.sh` pre-commit hook greps for `:latest` in Dockerfiles and Compose files and blocks the commit.
+
+</Alert>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No containers. Raw localhost services with different versions, different configs, different behavior. "It works on my machine" is your team's catchphrase. You spend 2 hours onboarding every new developer because setup instructions are a 47-step wiki page that is always outdated. |
+| ✅ **Right** | Docker Compose with health checks, named volumes for persistence, bind mounts for hot-reload, internal networking, and environment variables matching production names. `docker compose up` and you are working in 30 seconds. |
+| ❌ **Over** | Kubernetes locally (minikube, kind, k3d) for a 3-service stack. Service mesh. Local load balancer. You spend more time configuring your local cluster than writing features. |
+| 🤖 **Agent Trap** | Agent generates docker-compose.yml without health checks on database services. Your API container starts, tries to connect to PostgreSQL, and crashes because PostgreSQL is still initializing. The agent's `depends_on` only checks if the container started, not if the service inside is ready. Add `condition: service_healthy` and proper health check commands. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 11: Database Migrations**, we add schema management to the database you just containerized. Prisma, Alembic, and golang-migrate, with the patterns agents consistently miss: down migrations, data backfill, and zero-downtime strategies. The PostgreSQL container from this part becomes the target for your migration workflow.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Docker Compose",
+    tasks: [
+      { text: "All services start with docker compose up", syncKey: "part-10-compose-up" },
+      { text: "Health checks passing for PostgreSQL (healthy status in docker compose ps)", syncKey: "part-10-pg-health" },
+      { text: "Health checks passing for Redis (healthy status in docker compose ps)", syncKey: "part-10-redis-health" },
+      { text: "API waits for healthy dependencies before starting", syncKey: "part-10-api-waits" },
+      { text: "Named volumes persist data across docker compose down and docker compose up", syncKey: "part-10-volumes-persist" }
+    ]
+  },
+  {
+    category: "Development",
+    tasks: [
+      { text: "Hot-reload working for application code via bind mount", syncKey: "part-10-hot-reload" },
+      { text: "Services accessible from host machine (localhost:3000, localhost:5432, localhost:6379)", syncKey: "part-10-host-access" },
+      { text: ".env file configured with local overrides", syncKey: "part-10-env-file" },
+      { text: ".env.example committed to git with placeholder values", syncKey: "part-10-env-example" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Docker Compose bridges the gap between "works on my machine" and production: every service runs the same version, same configuration, same way, on every developer's machine.
+2. Health checks with `condition: service_healthy` are the single most important thing agents forget in docker-compose files. Without them, `depends_on` only checks that a container started, not that the service inside is ready.
+3. Your local Docker Compose stack should mirror your AWS architecture: same services, same networking concepts, same environment variable names. The closer local matches production, the fewer bugs survive to deployment.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
