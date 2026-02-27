@@ -1,0 +1,583 @@
+---
+title: "RDS PostgreSQL: Managed Database Done Right"
+description: "Deploy RDS PostgreSQL with Terraform. Instance sizing, parameter groups, backups, and the agent mistakes that double your database bill."
+excerpt: "Managed database done right. RDS PostgreSQL with proper sizing, backups, and security, plus the agent mistakes that double your bill."
+date: "2026-05-20"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "rds", "database", "terraform"]
+series: "aws-for-startups"
+seriesPart: 35
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your application stores data in SQLite because "it's just a prototype." Six months later, you have 40,000 users, the database file lives on a single EC2 instance with no backups, and your deploy process includes "pray the EBS volume doesn't corrupt." Last Tuesday the instance failed a health check and Auto Scaling replaced it. The new instance started clean. Your data is gone.
+
+**Time:** About 45 minutes.
+
+**Outcome:** A production-ready RDS PostgreSQL instance in a private subnet with encryption at rest, automated daily backups with 7-day retention, a tuned parameter group, and Terraform that deploys separate configurations for dev and production.
+
+---
+
+## Why This Matters
+
+Databases are different from every other piece of infrastructure you have built so far. Stateless services recover from failure by restarting. Databases do not. When your EC2 instance fails, Auto Scaling launches a replacement in minutes. When your self-managed database fails, you are restoring from a backup you hope exists, hoping the last write made it to disk, and explaining to your users why their data is missing.
+
+RDS takes the operational burden off your plate: automated backups, point-in-time recovery, OS patching, minor version upgrades, failover to a standby replica. You pay more per hour than running PostgreSQL on EC2. You pay far less in 3 AM incidents, lost data, and manual patching.
+
+The real risk in this part is not deploying RDS. It is deploying RDS with agent-generated defaults that double your bill. Agents treat every environment like production. They enable Multi-AZ in dev (an extra $50-200/month depending on instance size), provision db.r6g.large when db.t3.micro is enough for your current traffic, and skip cost-aware instance sizing entirely.
+
+---
+
+## What We're Building
+
+- An RDS PostgreSQL instance deployed to the private subnets from [Part 20](/blog/aws-for-startups/20-vpc-fundamentals)
+- A DB subnet group spanning two availability zones
+- A custom parameter group with connection limits tuned for your instance size
+- A security group allowing PostgreSQL traffic only from your application subnets
+- Encryption at rest with the default AWS-managed KMS key
+- Automated backups with 7-day retention
+- Separate Terraform variable files for dev and production sizing
+
+---
+
+## Instance Sizing: Start Small
+
+This is where agents cause the most financial damage. Ask an agent to "set up a production PostgreSQL database" and it provisions db.r6g.large or db.m6g.xlarge. These are $280-560/month instances designed for workloads with thousands of concurrent connections and terabytes of data. Your startup has neither.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["db.t3.micro", "db.t3.small", "db.t3.medium", "db.r6g.large"]} />
+  <ComparisonRow feature="vCPU" db_t3_micro="2" db_t3_small="2" db_t3_medium="2" db_r6g_large="2" />
+  <ComparisonRow feature="RAM" db_t3_micro="1 GB" db_t3_small="2 GB" db_t3_medium="4 GB" db_r6g_large="16 GB" />
+  <ComparisonRow feature="Max Connections" db_t3_micro="~60" db_t3_small="~120" db_t3_medium="~240" db_r6g_large="~1600" />
+  <ComparisonRow feature="Monthly Cost" db_t3_micro="~$15 (Best)" db_t3_small="~$29" db_t3_medium="~$58" db_r6g_large="~$280" />
+  <ComparisonRow feature="Use Case" db_t3_micro="Dev/staging" db_t3_small="Production start" db_t3_medium="Growing app" db_r6g_large="High traffic" />
+</ComparisonTable>
+
+**The right starting point:** db.t3.micro for dev and staging, db.t3.small for production. The t3 family uses burstable performance, which means you get a baseline of CPU and can burst above it when needed. For a startup with under 1,000 concurrent users, burstable is correct. You are not running analytical queries 24/7.
+
+When CPU credit balance consistently hits zero, or Performance Insights shows CPU wait times above 20%, move to db.t3.medium. When you outgrow t3 entirely, move to db.r6g (Graviton, better price-performance). That decision is months away.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents default to db.r6g.large or db.m6g.xlarge because their training data skews toward enterprise deployments. When you prompt "create a production RDS instance," the agent interprets "production" as "high availability, high performance" and provisions accordingly. The fix: specify instance class in your prompt or, better, in AGENT-INSTRUCTIONS.md.
+
+Your AGENT-INSTRUCTIONS.md already includes Performance rules from [Part 34](/blog/aws-for-startups/34-k6-human-judgment). Add this: "RDS instance sizing: db.t3.micro for dev/staging, db.t3.small for production. Never provision r6g or m6g without explicit approval."
+
+</Alert>
+
+---
+
+## Terraform Module Structure
+
+Organize the RDS module alongside your existing infrastructure:
+
+<FileTree>
+infra/
+  modules/
+    rds/
+      main.tf
+      variables.tf
+      outputs.tf
+      parameter-group.tf
+  environments/
+    dev/
+      main.tf
+      terraform.tfvars
+    prod/
+      main.tf
+      terraform.tfvars
+</FileTree>
+
+---
+
+## DB Subnet Group
+
+RDS requires a DB subnet group: a collection of subnets across at least two availability zones where RDS can place instances. Use the private subnets you created in [Part 20](/blog/aws-for-startups/20-vpc-fundamentals).
+
+```hcl title="infra/modules/rds/main.tf"
+resource "aws_db_subnet_group" "main" {
+  name       = "${var.project}-${var.environment}-db-subnet"
+  subnet_ids = var.private_subnet_ids
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-db-subnet"
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+```
+
+Never put databases in public subnets. This is already in your AGENT-INSTRUCTIONS.md networking rules from [Part 20](/blog/aws-for-startups/20-vpc-fundamentals): "NEVER put databases in public subnets." RDS in a public subnet means your database is directly addressable from the internet, one security group misconfiguration away from exposure.
+
+---
+
+## Security Group
+
+The database security group allows PostgreSQL traffic (port 5432) only from your application's security group. Not from the entire VPC CIDR. Not from 0.0.0.0/0. From the specific security group attached to your application instances.
+
+```hcl title="infra/modules/rds/main.tf"
+resource "aws_security_group" "rds" {
+  name_prefix = "${var.project}-${var.environment}-rds-"
+  vpc_id      = var.vpc_id
+  description = "Security group for RDS PostgreSQL"
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-rds"
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_security_group_rule" "rds_ingress" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  source_security_group_id = var.app_security_group_id
+  security_group_id        = aws_security_group.rds.id
+  description              = "PostgreSQL from application instances"
+}
+
+resource "aws_security_group_rule" "rds_egress" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.rds.id
+  description       = "Allow all outbound"
+}
+```
+
+Using `source_security_group_id` instead of a CIDR block means that any instance with the application security group can connect, regardless of its IP address. When Auto Scaling adds instances, they automatically get access. No manual security group updates required.
+
+---
+
+## Parameter Group
+
+The default parameter group works, but you cannot modify it. Create a custom parameter group so you can tune settings as your workload evolves.
+
+```hcl title="infra/modules/rds/parameter-group.tf"
+resource "aws_db_parameter_group" "postgres" {
+  name_prefix = "${var.project}-${var.environment}-pg16-"
+  family      = "postgres16"
+  description = "Custom parameter group for ${var.project} ${var.environment}"
+
+  parameter {
+    name  = "log_min_duration_statement"
+    value = "1000"
+  }
+
+  parameter {
+    name  = "log_connections"
+    value = "1"
+  }
+
+  parameter {
+    name  = "log_disconnections"
+    value = "1"
+  }
+
+  parameter {
+    name         = "shared_preload_libraries"
+    value        = "pg_stat_statements"
+    apply_method = "pending-reboot"
+  }
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-pg16"
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+What these parameters do:
+
+- **log_min_duration_statement = 1000**: Log any query taking longer than 1 second. This is your first line of defense against slow queries. You will see them in CloudWatch Logs without enabling full query logging (which generates enormous log volumes).
+- **log_connections / log_disconnections**: Track connection churn. If you see hundreds of connections opening and closing per minute, your application is not using connection pooling.
+- **shared_preload_libraries = pg_stat_statements**: Enables the pg_stat_statements extension, which tracks execution statistics for all SQL queries. This powers Performance Insights and is essential for finding your slowest queries.
+
+The `lifecycle.create_before_destroy` block prevents downtime when you change parameter group settings. Terraform creates the new parameter group before destroying the old one.
+
+---
+
+## The RDS Instance
+
+```hcl title="infra/modules/rds/main.tf"
+resource "aws_db_instance" "main" {
+  identifier = "${var.project}-${var.environment}-postgres"
+
+  engine         = "postgres"
+  engine_version = "16.4"
+  instance_class = var.instance_class
+
+  allocated_storage     = var.allocated_storage
+  max_allocated_storage = var.max_allocated_storage
+  storage_type          = "gp3"
+  storage_encrypted     = true
+
+  db_name  = var.db_name
+  username = var.db_username
+  password = var.db_password
+
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+  parameter_group_name   = aws_db_parameter_group.postgres.name
+
+  multi_az            = var.multi_az
+  publicly_accessible = false
+
+  backup_retention_period = var.backup_retention_days
+  backup_window           = "03:00-04:00"
+  maintenance_window      = "sun:04:00-sun:05:00"
+
+  auto_minor_version_upgrade = true
+  deletion_protection        = var.environment == "prod"
+
+  performance_insights_enabled          = true
+  performance_insights_retention_period = 7
+
+  enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
+
+  skip_final_snapshot       = var.environment != "prod"
+  final_snapshot_identifier = var.environment == "prod" ? "${var.project}-${var.environment}-final-${formatdate("YYYY-MM-DD", timestamp())}" : null
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-postgres"
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+```
+
+Key decisions in this configuration:
+
+**storage_type = "gp3"**: GP3 is the default and correct choice. It provides 3,000 IOPS and 125 MiB/s throughput baseline at no extra cost. GP2 scales IOPS with volume size, which tempts agents to over-provision storage just to get more IOPS. With GP3, IOPS and throughput are independent of storage size.
+
+**storage_encrypted = true**: Encryption at rest using the default AWS-managed KMS key. Zero performance impact, zero additional cost, and it satisfies compliance requirements. There is no reason to leave this off.
+
+**publicly_accessible = false**: The database is in a private subnet and not accessible from the internet. Your application connects through the VPC. For local development access, use an SSH tunnel through a bastion host or AWS Session Manager.
+
+**multi_az**: Controlled by a variable. True in production (automatic failover to a standby replica in another AZ). False in dev and staging (saves 50-100% of the instance cost).
+
+**performance_insights_enabled = true**: Free for 7-day retention. Shows you which queries consume the most CPU, which sessions are blocking, and where wait events occur. Enable this in every environment.
+
+**deletion_protection**: True in production only. Prevents accidental deletion via Terraform or the console. In dev, you want the ability to tear down and recreate quickly.
+
+**skip_final_snapshot**: False in production (creates a final snapshot before deletion). True in dev (skips the snapshot, which would otherwise block deletion).
+
+---
+
+## Variables and Environment-Specific Sizing
+
+```hcl title="infra/modules/rds/variables.tf"
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "VPC ID where the database will be deployed"
+  type        = string
+}
+
+variable "private_subnet_ids" {
+  description = "List of private subnet IDs for the DB subnet group"
+  type        = list(string)
+}
+
+variable "app_security_group_id" {
+  description = "Security group ID of the application instances"
+  type        = string
+}
+
+variable "instance_class" {
+  description = "RDS instance class"
+  type        = string
+  default     = "db.t3.micro"
+}
+
+variable "allocated_storage" {
+  description = "Initial allocated storage in GB"
+  type        = number
+  default     = 20
+}
+
+variable "max_allocated_storage" {
+  description = "Maximum storage for autoscaling in GB"
+  type        = number
+  default     = 100
+}
+
+variable "db_name" {
+  description = "Name of the default database"
+  type        = string
+  default     = "app"
+}
+
+variable "db_username" {
+  description = "Master username for the database"
+  type        = string
+  default     = "app_admin"
+  sensitive   = true
+}
+
+variable "db_password" {
+  description = "Master password for the database"
+  type        = string
+  sensitive   = true
+}
+
+variable "multi_az" {
+  description = "Enable Multi-AZ deployment"
+  type        = bool
+  default     = false
+}
+
+variable "backup_retention_days" {
+  description = "Number of days to retain automated backups"
+  type        = number
+  default     = 7
+}
+```
+
+```hcl title="infra/modules/rds/outputs.tf"
+output "endpoint" {
+  description = "RDS instance endpoint"
+  value       = aws_db_instance.main.endpoint
+}
+
+output "address" {
+  description = "RDS instance hostname (without port)"
+  value       = aws_db_instance.main.address
+}
+
+output "port" {
+  description = "RDS instance port"
+  value       = aws_db_instance.main.port
+}
+
+output "db_name" {
+  description = "Name of the default database"
+  value       = aws_db_instance.main.db_name
+}
+
+output "security_group_id" {
+  description = "Security group ID for the RDS instance"
+  value       = aws_security_group.rds.id
+}
+```
+
+Now the environment-specific configurations:
+
+```hcl title="infra/environments/dev/terraform.tfvars"
+# RDS Configuration - Dev
+rds_instance_class      = "db.t3.micro"
+rds_allocated_storage   = 20
+rds_max_storage         = 50
+rds_multi_az            = false
+rds_backup_retention    = 3
+```
+
+```hcl title="infra/environments/prod/terraform.tfvars"
+# RDS Configuration - Production
+rds_instance_class      = "db.t3.small"
+rds_allocated_storage   = 20
+rds_max_storage         = 100
+rds_multi_az            = true
+rds_backup_retention    = 7
+```
+
+The cost difference is significant:
+
+| Configuration | Dev (db.t3.micro) | Prod (db.t3.small + Multi-AZ) |
+|---|---|---|
+| Instance | ~$15/mo | ~$58/mo |
+| Storage (20 GB gp3) | ~$2.30/mo | ~$2.30/mo |
+| Backups (beyond free) | ~$0 | ~$2/mo |
+| **Total** | **~$17/mo** | **~$62/mo** |
+
+An agent that defaults to db.r6g.large with Multi-AZ in all environments would cost $560/month in dev alone. That is $543/month of waste for a database serving test data.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents set `skip_final_snapshot = false` and `deletion_protection = true` in every environment, including dev. This means you cannot `terraform destroy` your dev environment without first manually disabling deletion protection in the console, then waiting for a final snapshot to complete. The agent is being "safe," but it makes dev environment teardown a 15-minute manual process instead of a single command.
+
+The fix: make these settings environment-conditional as shown above. Dev environments need fast teardown. Production environments need protection.
+
+</Alert>
+
+---
+
+## Connecting from Your Application
+
+Your application connects to the RDS endpoint using the hostname, port, database name, username, and password. The endpoint is available as a Terraform output.
+
+```bash terminal
+terraform output -raw rds_endpoint
+```
+
+<TerminalOutput title="terraform output">
+
+```
+shipfast-prod-postgres.abc123xyz.us-east-1.rds.amazonaws.com:5432
+```
+
+</TerminalOutput>
+
+The connection string for PostgreSQL follows this format:
+
+```text title="Connection string format"
+postgresql://{username}:{password}@{endpoint}/{db_name}?sslmode=require
+```
+
+Always use `sslmode=require` (or `sslmode=verify-full` if you configure custom CA certificates). RDS supports SSL by default. Enforcing it in the connection string ensures data in transit is encrypted, even if someone misconfigures the parameter group.
+
+:::note
+**Coming in Part 37:** We will move the database password into AWS Secrets Manager with automatic rotation. For now, the password lives in terraform.tfvars (which is gitignored) and passed as a variable. This is temporary. Hardcoded credentials, even in gitignored files, are a liability.
+:::
+
+---
+
+## Verifying the Deployment
+
+After `terraform apply` completes, verify the instance is running and accessible:
+
+```bash terminal
+aws rds describe-db-instances \
+  --db-instance-identifier shipfast-dev-postgres \
+  --query 'DBInstances[0].{Status:DBInstanceStatus,Endpoint:Endpoint.Address,MultiAZ:MultiAZ,StorageEncrypted:StorageEncrypted,BackupRetention:BackupRetentionPeriod}' \
+  --output table
+```
+
+<TerminalOutput title="aws rds describe-db-instances">
+
+```
+---------------------------------------------------------------------
+|                        DescribeDBInstances                        |
++-----------------+-------------------------------------------------+
+| BackupRetention | 3                                               |
+| Endpoint        | shipfast-dev-postgres.abc123.us-east-1.rds...   |
+| MultiAZ         | False                                           |
+| Status          | available                                       |
+| StorageEncrypted| True                                            |
++-----------------+-------------------------------------------------+
+```
+
+</TerminalOutput>
+
+Check the security group allows connections only from your application:
+
+```bash terminal
+aws ec2 describe-security-groups \
+  --group-ids sg-0abc123 \
+  --query 'SecurityGroups[0].IpPermissions' \
+  --output json
+```
+
+You should see a single ingress rule referencing your application's security group ID, not a CIDR block.
+
+To test connectivity from an EC2 instance in the application subnet:
+
+```bash terminal
+psql "postgresql://app_admin:PASSWORD@shipfast-dev-postgres.abc123.us-east-1.rds.amazonaws.com:5432/app?sslmode=require"
+```
+
+If the connection times out, check three things in order: the security group allows port 5432 from the source, the DB subnet group uses the correct private subnets, and the route tables for those subnets have a route to the NAT Gateway (though RDS does not need outbound internet access, your application instances do).
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | PostgreSQL on EC2 with no backups, no encryption, in a public subnet. You lose data when the instance fails and spend weekends patching. |
+| ✅ **Right** | RDS in private subnets, db.t3.micro for dev, db.t3.small for prod with Multi-AZ. Automated backups, encryption at rest, Performance Insights enabled. Custom parameter group for slow query logging. |
+| ❌ **Over** | db.r6g.2xlarge with Multi-AZ in every environment, provisioned IOPS (io1), read replicas, cross-region replication, and a dedicated KMS key for a startup with 500 users. $800+/month before you have product-market fit. |
+| 🤖 **Agent Trap** | Agent enables Multi-AZ in all environments because "it is production best practice." Multi-AZ doubles instance cost. In dev and staging, it adds $15-280/month per environment with zero benefit. Checkov catches publicly accessible databases. Your cost review in the PR template catches instance over-provisioning. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 36: Database Operations**, we set up the monitoring and maintenance practices that keep this database healthy. Performance Insights to find slow queries, CloudWatch alarms for connection count and storage, maintenance windows that do not interrupt peak hours, and a backup restore test to prove your backups actually work.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Infrastructure",
+    tasks: [
+      { text: "RDS PostgreSQL instance deployed and status is 'available'", syncKey: "part-35-rds-deployed" },
+      { text: "DB subnet group uses private subnets across 2 AZs", syncKey: "part-35-subnet-group" },
+      { text: "Security group allows port 5432 only from application security group", syncKey: "part-35-security-group" },
+      { text: "Custom parameter group attached with pg_stat_statements enabled", syncKey: "part-35-parameter-group" }
+    ]
+  },
+  {
+    category: "Security",
+    tasks: [
+      { text: "Storage encryption enabled (StorageEncrypted: true)", syncKey: "part-35-encryption" },
+      { text: "publicly_accessible set to false", syncKey: "part-35-not-public" },
+      { text: "Deletion protection enabled in production", syncKey: "part-35-deletion-protection" },
+      { text: "SSL enforced in application connection string (sslmode=require)", syncKey: "part-35-ssl" }
+    ]
+  },
+  {
+    category: "Cost Management",
+    tasks: [
+      { text: "Dev environment uses db.t3.micro (not r6g or m6g)", syncKey: "part-35-dev-sizing" },
+      { text: "Multi-AZ disabled in dev/staging environments", syncKey: "part-35-multi-az-dev" },
+      { text: "Production uses db.t3.small with Multi-AZ", syncKey: "part-35-prod-sizing" }
+    ]
+  },
+  {
+    category: "Backups",
+    tasks: [
+      { text: "Automated backups enabled with appropriate retention period", syncKey: "part-35-backups" },
+      { text: "Performance Insights enabled (7-day free retention)", syncKey: "part-35-perf-insights" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. RDS manages what you do not want to manage: patching, backups, failover. Pay for the service, not the ops burden.
+2. Start with db.t3.micro in dev and db.t3.small in production. Agents over-provision by 2-4x because their training data skews toward enterprise workloads.
+3. Multi-AZ is for production high availability. In dev and staging, it doubles cost for zero benefit, and agents enable it everywhere by default.
+4. Encryption at rest and SSL in transit are free (with the default KMS key) and have no performance impact. There is no reason to skip them.
+5. Your database password is still in terraform.tfvars. That changes in Part 37 when Secrets Manager takes over credential management.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

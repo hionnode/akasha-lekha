@@ -1,0 +1,1330 @@
+---
+title: "Full-Stack Preview: The Complete Pipeline"
+date: "2026-06-20"
+excerpt: "The complete pipeline. Full-stack preview environments, multi-agent parallel generation, unified MCP verification, and the discovery that changes how you think about model selection."
+description: "Complete preview environments with ECS, the full multi-agent Generate, Verify, Explain pipeline with parallel generation, unified MCP verification, and pipeline model evaluation."
+series: "aws-for-startups"
+seriesPart: 43
+featured: true
+draft: true
+tags: ["aws", "devops", "startup", "ecs", "ai-agents", "mcp", "docker"]
+author: "Chinmay"
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your teammate opens a PR. The frontend preview deploys automatically (you built that in [Part 19](/blog/aws-for-startups/19-preview-environments)). But the PR also changes the API. The frontend preview calls production APIs because there is no backend preview. Your reviewer clicks around the preview URL, sees the old API behavior, approves the PR, merges it. The new frontend hits the new API in production for the first time. It breaks. The full-stack interaction was never tested because the preview was only half the stack.
+
+**Time:** About 90 minutes.
+
+**Outcome:** Full-stack preview environments that spin up frontend, backend, and database per PR. The complete multi-agent Generate, Verify, Explain pipeline with parallel generation using git worktrees, a unified MCP verification server, and pipeline model evaluation that reveals which model combinations produce the best results at the lowest cost.
+
+---
+
+## Why This Matters
+
+Since Part 8, you have been building a pipeline piece by piece. Pre-commit hooks. Manual verification. Scripted verification in Part 19. Domain-specific checks across Parts 20-42. Each post added capabilities to the same progression: generate infrastructure, verify it is correct, explain what happened, and let a human decide.
+
+This post brings it all together.
+
+The first half solves an infrastructure problem: full-stack preview environments. The frontend preview from Part 19 is only useful when the frontend is the entire application. The moment you have APIs behind it, a frontend-only preview lies to your reviewer. It shows UI that works against the wrong backend.
+
+The second half solves a workflow problem: the pipeline has been growing organically. Multiple scripts, multiple tools, manual orchestration. This post consolidates everything into `full-pipeline.sh`, a single entry point that runs the complete Design, Generate, Verify, Explain cycle with configurable models, parallel generation, and unified verification.
+
+The connection between the two halves: the full-stack preview environment is the first real test of the full pipeline. It generates infrastructure for three services, a database schema, and a frontend deployment. It verifies all of them. It produces a single report. If the pipeline works for this, it works for anything you will build.
+
+---
+
+## What We're Building
+
+- Full-stack preview environments: ECS services + database schema + frontend per PR
+- `scripts/pipeline/full-pipeline.sh` with configurable generator, verifier, and explainer models
+- Parallel generation using git worktrees
+- `infra-verify-mcp` unified MCP server (plan + validate + checkov + infracost + compliance in one call)
+- Pipeline model evaluation framework (`scripts/eval/pipeline-eval.sh`)
+- Scorecard panels 18-21: pipeline time, iterations-to-clean, merge conflict rate, model combination effectiveness
+
+---
+
+## Design: Full-Stack Preview Architecture
+
+A full-stack preview environment for PR #42 looks like this:
+
+<Alert type="important" title="Full-Stack Preview Architecture">
+
+```
+PR #42 opens
+  │
+  ├── Frontend: pr-42.preview.works-on-my.cloud
+  │   (Cloudflare Pages preview, already exists from Part 19)
+  │
+  ├── Backend: pr-42-api.preview.works-on-my.cloud
+  │   ├── ECS Service: shipfast-preview-pr42-bun-api
+  │   ├── ECS Service: shipfast-preview-pr42-python-api
+  │   └── ECS Service: shipfast-preview-pr42-go-api
+  │   (All behind a shared ALB with host-based routing)
+  │
+  └── Database: shipfast_preview_pr42 (schema)
+      (Shared RDS instance, isolated schema per PR)
+```
+
+</Alert>
+
+Key architecture decisions:
+
+**Shared RDS instance, isolated schemas.** Creating a new RDS instance per PR costs $15-50/month and takes 5-10 minutes to provision. Instead, we create a schema (PostgreSQL namespace) per PR on the existing dev RDS instance from [Part 35](/blog/aws-for-startups/35-rds-postgres). Schemas provide data isolation without the cost and latency of separate instances.
+
+**Shared ALB, host-based routing.** Each preview gets a subdomain: `pr-42-api.preview.works-on-my.cloud`. The ALB routes based on the `Host` header. This reuses the ALB from [Part 22](/blog/aws-for-startups/22-alb-load-balancer) instead of creating one per PR.
+
+**Shared ECS cluster, separate services.** Preview services run in the same ECS cluster but as separate services with unique names. Fargate handles the compute isolation.
+
+**Automatic cleanup.** When the PR is closed or merged, a GitHub Actions workflow tears down the preview ECS services, removes the ALB rules, and drops the database schema.
+
+---
+
+## Terraform: Preview Environment Module
+
+```hcl title="infra/modules/preview-env/main.tf"
+variable "pr_number" {
+  description = "Pull request number"
+  type        = number
+}
+
+variable "project" {
+  description = "Project name"
+  type        = string
+}
+
+variable "services" {
+  description = "Map of service names to image URIs"
+  type        = map(object({
+    image_uri      = string
+    container_port = number
+    path_pattern   = string
+    cpu            = optional(number, 256)
+    memory         = optional(number, 512)
+  }))
+}
+
+locals {
+  env_name   = "pr${var.pr_number}"
+  name_prefix = "${var.project}-preview-${local.env_name}"
+}
+```
+
+```hcl title="infra/modules/preview-env/ecs.tf"
+resource "aws_ecs_task_definition" "service" {
+  for_each = var.services
+
+  family                   = "${local.name_prefix}-${each.key}"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = each.value.cpu
+  memory                   = each.value.memory
+  execution_role_arn       = var.execution_role_arn
+  task_role_arn            = var.task_role_arn
+
+  container_definitions = jsonencode([
+    {
+      name      = each.key
+      image     = each.value.image_uri
+      essential = true
+
+      portMappings = [{
+        containerPort = each.value.container_port
+        protocol      = "tcp"
+      }]
+
+      environment = [
+        { name = "ENVIRONMENT", value = "preview" },
+        { name = "PR_NUMBER", value = tostring(var.pr_number) },
+        { name = "DATABASE_SCHEMA", value = "${var.project}_preview_pr${var.pr_number}" }
+      ]
+
+      secrets = [
+        {
+          name      = "DATABASE_URL"
+          valueFrom = var.database_url_secret_arn
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = "/ecs/${local.name_prefix}"
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = each.key
+          "awslogs-create-group"  = "true"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Environment = "preview"
+    PR          = var.pr_number
+    Service     = each.key
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_ecs_service" "service" {
+  for_each = var.services
+
+  name            = "${local.name_prefix}-${each.key}"
+  cluster         = var.ecs_cluster_id
+  task_definition = aws_ecs_task_definition.service[each.key].arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  network_configuration {
+    subnets          = var.private_subnet_ids
+    security_groups  = [var.ecs_security_group_id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.service[each.key].arn
+    container_name   = each.key
+    container_port   = each.value.container_port
+  }
+
+  tags = {
+    Environment = "preview"
+    PR          = var.pr_number
+    Service     = each.key
+  }
+}
+```
+
+Preview services use `desired_count = 1`. No auto-scaling, no redundancy. Preview environments are for testing, not production traffic. One task per service keeps costs at roughly $9/month per service, and the environment only lives as long as the PR is open.
+
+```hcl title="infra/modules/preview-env/alb.tf"
+resource "aws_lb_target_group" "service" {
+  for_each = var.services
+
+  name        = "${local.name_prefix}-${each.key}"
+  port        = each.value.container_port
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    path                = "/health"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+    matcher             = "200"
+  }
+
+  deregistration_delay = 10
+
+  tags = {
+    Environment = "preview"
+    PR          = var.pr_number
+  }
+}
+
+resource "aws_lb_listener_rule" "service" {
+  for_each = var.services
+
+  listener_arn = var.alb_listener_arn
+  priority     = 1000 + (var.pr_number * 10) + index(keys(var.services), each.key)
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.service[each.key].arn
+  }
+
+  condition {
+    host_header {
+      values = ["${local.env_name}-api.preview.${var.domain}"]
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = [each.value.path_pattern]
+    }
+  }
+}
+```
+
+The listener rule priority uses a formula: `1000 + (PR number * 10) + service index`. This guarantees unique priorities across PRs without manual coordination.
+
+---
+
+## Database Schema Isolation
+
+Each preview environment gets its own PostgreSQL schema:
+
+```bash title="scripts/preview/create-schema.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+PR_NUMBER=$1
+SCHEMA_NAME="shipfast_preview_pr${PR_NUMBER}"
+
+echo "Creating schema ${SCHEMA_NAME}..."
+
+psql "${DATABASE_URL}" <<SQL
+CREATE SCHEMA IF NOT EXISTS "${SCHEMA_NAME}";
+GRANT ALL PRIVILEGES ON SCHEMA "${SCHEMA_NAME}" TO app_user;
+SQL
+
+echo "Running migrations on schema ${SCHEMA_NAME}..."
+
+DATABASE_URL="${DATABASE_URL}?options=-c%20search_path%3D${SCHEMA_NAME}" \
+  bun run migrate
+
+echo "Schema ${SCHEMA_NAME} ready."
+```
+
+```bash title="scripts/preview/destroy-schema.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+PR_NUMBER=$1
+SCHEMA_NAME="shipfast_preview_pr${PR_NUMBER}"
+
+echo "Dropping schema ${SCHEMA_NAME}..."
+
+psql "${DATABASE_URL}" <<SQL
+DROP SCHEMA IF EXISTS "${SCHEMA_NAME}" CASCADE;
+SQL
+
+echo "Schema ${SCHEMA_NAME} destroyed."
+```
+
+The application connects to the shared RDS instance but sets `search_path` to the PR-specific schema via the `DATABASE_SCHEMA` environment variable. Each PR's data is isolated without the cost of separate database instances.
+
+---
+
+## The Full Pipeline
+
+Since [Part 19](/blog/aws-for-startups/19-preview-environments), you have had `scripts/pipeline/verify.sh` and `scripts/pipeline/explain.sh`. Those scripts handle single-model verification with iterative fix loops. The full pipeline consolidates everything and adds parallel generation and model configuration.
+
+### Pipeline Architecture
+
+```
+full-pipeline.sh
+  │
+  ├── Design Phase (human input: spec file or PR diff)
+  │
+  ├── Generate Phase (parallel, configurable model)
+  │   ├── Worktree A: Generator Model 1
+  │   ├── Worktree B: Generator Model 2
+  │   └── Worktree C: Generator Model 3
+  │
+  ├── Verify Phase (unified MCP, configurable model)
+  │   └── infra-verify-mcp: plan + validate + checkov + infracost + compliance
+  │       ├── Iteration 1: check → find issues → fix
+  │       ├── Iteration 2: check → find issues → fix
+  │       └── Iteration 3: check → clean (or fail)
+  │
+  ├── Explain Phase (configurable model)
+  │   └── Summary of what was generated, what was flagged, what to review
+  │
+  └── Output
+      ├── Generated files (from best worktree)
+      ├── Verification report (structured JSON)
+      ├── Explanation (markdown)
+      └── Metrics (logged to Scorecard)
+```
+
+### full-pipeline.sh
+
+```bash title="scripts/pipeline/full-pipeline.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Configuration
+GENERATOR_MODEL="${GENERATOR_MODEL:-claude-sonnet-4-20250514}"
+VERIFIER_MODEL="${VERIFIER_MODEL:-claude-sonnet-4-20250514}"
+EXPLAINER_MODEL="${EXPLAINER_MODEL:-claude-haiku-4-20250514}"
+MAX_ITERATIONS="${MAX_ITERATIONS:-3}"
+PARALLEL_GENERATORS="${PARALLEL_GENERATORS:-1}"
+SPEC_FILE="${1:?Usage: full-pipeline.sh <spec-file>}"
+
+PIPELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "${PIPELINE_DIR}/../.." && pwd)"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+OUTPUT_DIR="${PROJECT_ROOT}/.pipeline-runs/${TIMESTAMP}"
+METRICS_FILE="${OUTPUT_DIR}/metrics.json"
+
+mkdir -p "${OUTPUT_DIR}"
+
+echo "=== Full Pipeline ==="
+echo "Generator:  ${GENERATOR_MODEL}"
+echo "Verifier:   ${VERIFIER_MODEL}"
+echo "Explainer:  ${EXPLAINER_MODEL}"
+echo "Iterations: ${MAX_ITERATIONS}"
+echo "Parallel:   ${PARALLEL_GENERATORS}"
+echo "Spec:       ${SPEC_FILE}"
+echo "Output:     ${OUTPUT_DIR}"
+echo "===================="
+
+START_TIME=$(date +%s)
+
+# Phase 1: Design (read spec)
+echo ""
+echo "--- Phase 1: Design ---"
+SPEC_CONTENT=$(cat "${SPEC_FILE}")
+AGENT_INSTRUCTIONS=$(cat "${PROJECT_ROOT}/AGENT-INSTRUCTIONS.md")
+echo "Spec loaded: $(wc -l < "${SPEC_FILE}") lines"
+echo "Agent instructions: $(wc -l < "${PROJECT_ROOT}/AGENT-INSTRUCTIONS.md") lines"
+
+# Phase 2: Generate (parallel worktrees)
+echo ""
+echo "--- Phase 2: Generate ---"
+
+generate_in_worktree() {
+  local worktree_name=$1
+  local model=$2
+  local worktree_path="${PROJECT_ROOT}/.claude/worktrees/${worktree_name}"
+
+  git worktree add "${worktree_path}" -b "pipeline/${worktree_name}" HEAD 2>/dev/null
+
+  echo "Generating in worktree: ${worktree_name} (model: ${model})"
+
+  # Run generation with the specified model
+  cd "${worktree_path}"
+  "${PIPELINE_DIR}/generate.sh" \
+    --model "${model}" \
+    --spec "${SPEC_FILE}" \
+    --agent-instructions "${PROJECT_ROOT}/AGENT-INSTRUCTIONS.md" \
+    --output "${OUTPUT_DIR}/generated-${worktree_name}" \
+    2>&1 | tee "${OUTPUT_DIR}/generate-${worktree_name}.log"
+
+  cd "${PROJECT_ROOT}"
+  echo "Generation complete: ${worktree_name}"
+}
+
+WORKTREE_PIDS=()
+for i in $(seq 1 "${PARALLEL_GENERATORS}"); do
+  WORKTREE_NAME="gen-${TIMESTAMP}-${i}"
+  generate_in_worktree "${WORKTREE_NAME}" "${GENERATOR_MODEL}" &
+  WORKTREE_PIDS+=($!)
+done
+
+# Wait for all generators
+GENERATE_FAILURES=0
+for pid in "${WORKTREE_PIDS[@]}"; do
+  if ! wait "${pid}"; then
+    GENERATE_FAILURES=$((GENERATE_FAILURES + 1))
+  fi
+done
+
+echo "Generation complete. Failures: ${GENERATE_FAILURES}/${PARALLEL_GENERATORS}"
+
+# Phase 3: Verify (unified MCP)
+echo ""
+echo "--- Phase 3: Verify ---"
+
+BEST_WORKTREE=""
+BEST_SCORE=0
+TOTAL_ITERATIONS=0
+
+for i in $(seq 1 "${PARALLEL_GENERATORS}"); do
+  WORKTREE_NAME="gen-${TIMESTAMP}-${i}"
+  WORKTREE_PATH="${PROJECT_ROOT}/.claude/worktrees/${WORKTREE_NAME}"
+  ITERATION=0
+  CLEAN=false
+
+  while [ "${ITERATION}" -lt "${MAX_ITERATIONS}" ] && [ "${CLEAN}" = "false" ]; do
+    ITERATION=$((ITERATION + 1))
+    echo "Verifying ${WORKTREE_NAME}, iteration ${ITERATION}/${MAX_ITERATIONS}..."
+
+    # Call unified MCP verification
+    VERIFY_RESULT=$("${PIPELINE_DIR}/verify-mcp.sh" \
+      --model "${VERIFIER_MODEL}" \
+      --worktree "${WORKTREE_PATH}" \
+      --output "${OUTPUT_DIR}/verify-${WORKTREE_NAME}-iter${ITERATION}.json" \
+      2>&1)
+
+    FINDINGS=$(echo "${VERIFY_RESULT}" | jq -r '.findings_count // 0')
+    SCORE=$(echo "${VERIFY_RESULT}" | jq -r '.score // 0')
+
+    if [ "${FINDINGS}" -eq 0 ]; then
+      CLEAN=true
+      echo "Clean on iteration ${ITERATION}"
+    else
+      echo "Findings: ${FINDINGS}. Fixing..."
+      "${PIPELINE_DIR}/fix.sh" \
+        --model "${GENERATOR_MODEL}" \
+        --worktree "${WORKTREE_PATH}" \
+        --findings "${OUTPUT_DIR}/verify-${WORKTREE_NAME}-iter${ITERATION}.json"
+    fi
+  done
+
+  TOTAL_ITERATIONS=$((TOTAL_ITERATIONS + ITERATION))
+
+  if [ "${SCORE}" -gt "${BEST_SCORE}" ]; then
+    BEST_SCORE="${SCORE}"
+    BEST_WORKTREE="${WORKTREE_NAME}"
+  fi
+done
+
+echo "Best worktree: ${BEST_WORKTREE} (score: ${BEST_SCORE})"
+
+# Phase 4: Explain
+echo ""
+echo "--- Phase 4: Explain ---"
+
+"${PIPELINE_DIR}/explain.sh" \
+  --model "${EXPLAINER_MODEL}" \
+  --worktree "${PROJECT_ROOT}/.claude/worktrees/${BEST_WORKTREE}" \
+  --verify-results "${OUTPUT_DIR}" \
+  --output "${OUTPUT_DIR}/explanation.md"
+
+# Metrics
+END_TIME=$(date +%s)
+PIPELINE_TIME=$((END_TIME - START_TIME))
+AVG_ITERATIONS=$(echo "scale=1; ${TOTAL_ITERATIONS} / ${PARALLEL_GENERATORS}" | bc)
+
+cat > "${METRICS_FILE}" <<EOF
+{
+  "timestamp": "${TIMESTAMP}",
+  "pipeline_time_seconds": ${PIPELINE_TIME},
+  "generator_model": "${GENERATOR_MODEL}",
+  "verifier_model": "${VERIFIER_MODEL}",
+  "explainer_model": "${EXPLAINER_MODEL}",
+  "parallel_generators": ${PARALLEL_GENERATORS},
+  "max_iterations": ${MAX_ITERATIONS},
+  "total_iterations": ${TOTAL_ITERATIONS},
+  "avg_iterations_to_clean": ${AVG_ITERATIONS},
+  "best_worktree": "${BEST_WORKTREE}",
+  "best_score": ${BEST_SCORE},
+  "generate_failures": ${GENERATE_FAILURES}
+}
+EOF
+
+echo ""
+echo "=== Pipeline Complete ==="
+echo "Time:          ${PIPELINE_TIME}s"
+echo "Iterations:    ${TOTAL_ITERATIONS} total (${AVG_ITERATIONS} avg)"
+echo "Best worktree: ${BEST_WORKTREE}"
+echo "Best score:    ${BEST_SCORE}"
+echo "Output:        ${OUTPUT_DIR}"
+echo "========================="
+
+# Cleanup worktrees
+for i in $(seq 1 "${PARALLEL_GENERATORS}"); do
+  WORKTREE_NAME="gen-${TIMESTAMP}-${i}"
+  git worktree remove "${PROJECT_ROOT}/.claude/worktrees/${WORKTREE_NAME}" --force 2>/dev/null || true
+  git branch -D "pipeline/${WORKTREE_NAME}" 2>/dev/null || true
+done
+```
+
+The script is long, but the structure is clean: four phases, each delegating to a sub-script, with metrics logged at the end.
+
+### Key Design Decisions
+
+**Configurable models per phase.** The generator, verifier, and explainer can each use a different model. The explainer uses a smaller, cheaper model (Haiku) because summarization does not require the same capability as generation or verification.
+
+**Parallel generators with worktrees.** Multiple generators work on the same spec simultaneously in isolated git worktrees. Each produces a candidate solution. The verifier scores each one. The best candidate wins. This is not about speed (though it is faster). It is about coverage: different generation runs produce different solutions, and the verifier picks the best one.
+
+**Iterative fix loop (max 3).** When verification finds issues, the generator fixes them. Up to three iterations. If it is not clean after three iterations, the current output is used as-is with the findings report attached. The human reviewer gets both the output and the list of unresolved findings.
+
+**Automatic cleanup.** Worktrees and temporary branches are removed after the pipeline completes. No leftover state.
+
+---
+
+## Parallel Generation with Git Worktrees
+
+The key to parallel generation is git worktrees. Each generator runs in its own copy of the repository, making changes independently. No merge conflicts during generation because each worktree is isolated.
+
+```bash title="scripts/pipeline/generate.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODEL=""
+SPEC=""
+AGENT_INSTRUCTIONS=""
+OUTPUT=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --model) MODEL="$2"; shift 2 ;;
+    --spec) SPEC="$2"; shift 2 ;;
+    --agent-instructions) AGENT_INSTRUCTIONS="$2"; shift 2 ;;
+    --output) OUTPUT="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
+  esac
+done
+
+SPEC_CONTENT=$(cat "${SPEC}")
+INSTRUCTIONS=$(cat "${AGENT_INSTRUCTIONS}")
+
+PROMPT=$(cat <<PROMPT_EOF
+You are generating infrastructure code. Follow AGENT-INSTRUCTIONS.md exactly.
+
+## AGENT-INSTRUCTIONS.md
+${INSTRUCTIONS}
+
+## Specification
+${SPEC_CONTENT}
+
+## Rules
+- Generate all files specified in the spec
+- Follow naming conventions from AGENT-INSTRUCTIONS.md
+- Include all required tags
+- Use least-privilege IAM policies
+- Pin all versions (providers, images, modules)
+
+Generate the files now. Output each file with its full path.
+PROMPT_EOF
+)
+
+# Call the model API and parse output into files
+echo "${PROMPT}" | claude --model "${MODEL}" --output-dir "${OUTPUT}"
+```
+
+The actual model invocation depends on your CLI setup. The important pattern is that each worktree runs independently. When `PARALLEL_GENERATORS=3`, you get three different solutions from the same spec, each in its own worktree.
+
+<Alert type="caution" title="Agent Trap">
+
+Parallel generators create conflicting Terraform resource names when they don't have unique naming context. Two generators working on the same spec both create `aws_ecs_service.api` with the same name. When you try to merge the best worktree back, Terraform state conflicts arise.
+
+**What catches it:** The generate script injects the worktree name into the generation context. Each generator uses a unique prefix for resources it creates. The verify step checks for naming conflicts across worktrees before selecting the best one.
+
+</Alert>
+
+---
+
+## Unified Verify MCP Server
+
+The verification step has grown across the series. In Part 19, it was `terraform validate` + `tflint`. By Part 34, it included `checkov`, `infracost`, and compliance checks. Each tool required separate invocation, output parsing, and result aggregation.
+
+The `infra-verify-mcp` server unifies all verification into a single MCP tool call.
+
+### MCP Server Structure
+
+```typescript title="mcp-servers/infra-verify/src/index.ts"
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
+const server = new Server(
+  { name: "infra-verify-mcp", version: "1.0.0" },
+  { capabilities: { tools: {} } }
+);
+
+server.setRequestHandler("tools/list", async () => ({
+  tools: [
+    {
+      name: "verify_infrastructure",
+      description: "Run all verification checks on infrastructure code",
+      inputSchema: {
+        type: "object",
+        properties: {
+          workdir: {
+            type: "string",
+            description: "Working directory containing Terraform code"
+          },
+          checks: {
+            type: "array",
+            items: { type: "string" },
+            description: "Checks to run: plan, validate, tflint, checkov, infracost, compliance",
+            default: ["plan", "validate", "tflint", "checkov", "infracost", "compliance"]
+          }
+        },
+        required: ["workdir"]
+      }
+    }
+  ]
+}));
+
+server.setRequestHandler("tools/call", async (request) => {
+  if (request.params.name === "verify_infrastructure") {
+    const { workdir, checks } = request.params.arguments as {
+      workdir: string;
+      checks?: string[];
+    };
+
+    const selectedChecks = checks || [
+      "plan", "validate", "tflint", "checkov", "infracost", "compliance"
+    ];
+
+    const results = await runChecks(workdir, selectedChecks);
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(results, null, 2)
+      }]
+    };
+  }
+  throw new Error(`Unknown tool: ${request.params.name}`);
+});
+
+async function runChecks(
+  workdir: string,
+  checks: string[]
+): Promise<VerificationReport> {
+  const results: CheckResult[] = [];
+  let totalFindings = 0;
+  let score = 100;
+
+  for (const check of checks) {
+    const result = await runCheck(check, workdir);
+    results.push(result);
+    totalFindings += result.findings.length;
+    score -= result.findings.reduce((acc, f) => acc + severityPenalty(f.severity), 0);
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    workdir,
+    checks_run: checks,
+    results,
+    summary: {
+      total_findings: totalFindings,
+      critical: results.flatMap(r => r.findings).filter(f => f.severity === "critical").length,
+      high: results.flatMap(r => r.findings).filter(f => f.severity === "high").length,
+      medium: results.flatMap(r => r.findings).filter(f => f.severity === "medium").length,
+      low: results.flatMap(r => r.findings).filter(f => f.severity === "low").length,
+      score: Math.max(0, score),
+      pass: totalFindings === 0
+    }
+  };
+}
+
+interface CheckResult {
+  check: string;
+  status: "pass" | "fail" | "error";
+  duration_ms: number;
+  findings: Finding[];
+}
+
+interface Finding {
+  check: string;
+  severity: "critical" | "high" | "medium" | "low";
+  resource: string;
+  message: string;
+  fix_suggestion?: string;
+}
+
+interface VerificationReport {
+  timestamp: string;
+  workdir: string;
+  checks_run: string[];
+  results: CheckResult[];
+  summary: {
+    total_findings: number;
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    score: number;
+    pass: boolean;
+  };
+}
+
+function severityPenalty(severity: string): number {
+  switch (severity) {
+    case "critical": return 25;
+    case "high": return 15;
+    case "medium": return 5;
+    case "low": return 1;
+    default: return 0;
+  }
+}
+
+async function runCheck(check: string, workdir: string): Promise<CheckResult> {
+  const start = Date.now();
+
+  switch (check) {
+    case "plan":
+      return runTerraformPlan(workdir, start);
+    case "validate":
+      return runTerraformValidate(workdir, start);
+    case "tflint":
+      return runTflint(workdir, start);
+    case "checkov":
+      return runCheckov(workdir, start);
+    case "infracost":
+      return runInfracost(workdir, start);
+    case "compliance":
+      return runCompliance(workdir, start);
+    default:
+      return {
+        check,
+        status: "error",
+        duration_ms: Date.now() - start,
+        findings: [{ check, severity: "low", resource: "", message: `Unknown check: ${check}` }]
+      };
+  }
+}
+
+// Individual check implementations
+async function runTerraformPlan(workdir: string, start: number): Promise<CheckResult> {
+  // Run terraform plan and parse output
+  // Returns findings for any resource changes that violate rules
+  return { check: "plan", status: "pass", duration_ms: Date.now() - start, findings: [] };
+}
+
+async function runTerraformValidate(workdir: string, start: number): Promise<CheckResult> {
+  return { check: "validate", status: "pass", duration_ms: Date.now() - start, findings: [] };
+}
+
+async function runTflint(workdir: string, start: number): Promise<CheckResult> {
+  return { check: "tflint", status: "pass", duration_ms: Date.now() - start, findings: [] };
+}
+
+async function runCheckov(workdir: string, start: number): Promise<CheckResult> {
+  return { check: "checkov", status: "pass", duration_ms: Date.now() - start, findings: [] };
+}
+
+async function runInfracost(workdir: string, start: number): Promise<CheckResult> {
+  return { check: "infracost", status: "pass", duration_ms: Date.now() - start, findings: [] };
+}
+
+async function runCompliance(workdir: string, start: number): Promise<CheckResult> {
+  return { check: "compliance", status: "pass", duration_ms: Date.now() - start, findings: [] };
+}
+
+// Start server
+const transport = new StdioServerTransport();
+await server.connect(transport);
+```
+
+### Why Unified MCP
+
+Before this server, verification looked like this:
+
+```bash title="Old approach: multiple tool calls"
+terraform plan -out=tfplan
+terraform validate
+tflint
+checkov -d .
+infracost breakdown --path .
+./scripts/compliance-check.sh
+# Parse 6 different output formats
+# Aggregate results manually
+# Hope nothing was missed
+```
+
+With the unified MCP server, verification is one tool call:
+
+```json title="MCP tool call"
+{
+  "name": "verify_infrastructure",
+  "arguments": {
+    "workdir": "/path/to/terraform",
+    "checks": ["plan", "validate", "tflint", "checkov", "infracost", "compliance"]
+  }
+}
+```
+
+The response is a structured JSON report with a score, findings by severity, and fix suggestions. The verifier model reads this report and knows exactly what to fix. No output parsing. No format mismatches. No missed checks.
+
+### MCP Server File Structure
+
+<FileTree>
+mcp-servers/
+  infra-verify/
+    src/
+      index.ts
+      checks/
+        terraform-plan.ts
+        terraform-validate.ts
+        tflint.ts
+        checkov.ts
+        infracost.ts
+        compliance.ts
+    package.json
+    tsconfig.json
+</FileTree>
+
+---
+
+## Pipeline Model Evaluation
+
+This is the part that changes how you think about model selection.
+
+Until now, you have evaluated models individually: "Which model generates the best Terraform?" That is the wrong question. The right question is: "Which model combination, generator plus verifier, produces the best results at the lowest cost?"
+
+### pipeline-eval.sh
+
+```bash title="scripts/eval/pipeline-eval.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "${EVAL_DIR}/../.." && pwd)"
+RESULTS_DIR="${PROJECT_ROOT}/.eval-results/pipeline/$(date +%Y%m%d_%H%M%S)"
+
+# Model combinations to test
+GENERATORS=("claude-sonnet-4-20250514" "claude-haiku-4-20250514" "gpt-4o")
+VERIFIERS=("claude-sonnet-4-20250514" "claude-haiku-4-20250514")
+EXPLAINER="claude-haiku-4-20250514"
+
+# Standard eval prompts (same prompts used since Part 9)
+EVAL_PROMPTS_DIR="${EVAL_DIR}/prompts"
+
+mkdir -p "${RESULTS_DIR}"
+
+echo "=== Pipeline Evaluation ==="
+echo "Generators: ${GENERATORS[*]}"
+echo "Verifiers:  ${VERIFIERS[*]}"
+echo "Prompts:    $(ls "${EVAL_PROMPTS_DIR}" | wc -l) prompts"
+echo "==========================="
+
+# Run every combination
+for gen in "${GENERATORS[@]}"; do
+  for ver in "${VERIFIERS[@]}"; do
+    COMBO_NAME="${gen}+${ver}"
+    COMBO_DIR="${RESULTS_DIR}/${COMBO_NAME}"
+    mkdir -p "${COMBO_DIR}"
+
+    echo ""
+    echo "--- Testing: ${COMBO_NAME} ---"
+
+    COMBO_SCORE=0
+    COMBO_TIME=0
+    COMBO_COST=0
+    PROMPT_COUNT=0
+
+    for prompt_file in "${EVAL_PROMPTS_DIR}"/*.md; do
+      PROMPT_COUNT=$((PROMPT_COUNT + 1))
+      prompt_name=$(basename "${prompt_file}" .md)
+
+      GENERATOR_MODEL="${gen}" \
+      VERIFIER_MODEL="${ver}" \
+      EXPLAINER_MODEL="${EXPLAINER}" \
+      "${PROJECT_ROOT}/scripts/pipeline/full-pipeline.sh" "${prompt_file}" \
+        > "${COMBO_DIR}/${prompt_name}.log" 2>&1
+
+      # Extract metrics
+      METRICS_FILE=$(find "${PROJECT_ROOT}/.pipeline-runs" -name "metrics.json" -newer "${prompt_file}" | tail -1)
+      if [ -n "${METRICS_FILE}" ]; then
+        SCORE=$(jq -r '.best_score' "${METRICS_FILE}")
+        TIME=$(jq -r '.pipeline_time_seconds' "${METRICS_FILE}")
+        COMBO_SCORE=$((COMBO_SCORE + SCORE))
+        COMBO_TIME=$((COMBO_TIME + TIME))
+      fi
+    done
+
+    AVG_SCORE=$((COMBO_SCORE / PROMPT_COUNT))
+    AVG_TIME=$((COMBO_TIME / PROMPT_COUNT))
+
+    echo "  Avg score: ${AVG_SCORE}"
+    echo "  Avg time:  ${AVG_TIME}s"
+
+    # Save combination results
+    cat > "${COMBO_DIR}/summary.json" <<EOF
+{
+  "generator": "${gen}",
+  "verifier": "${ver}",
+  "prompts_tested": ${PROMPT_COUNT},
+  "avg_score": ${AVG_SCORE},
+  "avg_time_seconds": ${AVG_TIME},
+  "total_cost_estimate": ${COMBO_COST}
+}
+EOF
+  done
+done
+
+# Generate comparison report
+echo ""
+echo "=== Results ==="
+find "${RESULTS_DIR}" -name "summary.json" -exec cat {} \; | \
+  jq -s 'sort_by(-.avg_score) | .[] | "\(.generator) + \(.verifier): score=\(.avg_score) time=\(.avg_time_seconds)s"' -r
+```
+
+### The Discovery
+
+When you run pipeline-eval.sh, you find something counterintuitive:
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Score", "Time", "Cost/Run"]} />
+  <ComparisonRow feature="Sonnet + Sonnet" Score="94" Time="120s" Cost_Run="$0.12" />
+  <ComparisonRow feature="Haiku + Sonnet" Score="91 (Best value)" Time="85s" Cost_Run="$0.05 (Best)" />
+  <ComparisonRow feature="Sonnet + Haiku" Score="78" Time="95s" Cost_Run="$0.08" />
+  <ComparisonRow feature="Haiku + Haiku" Score="72" Time="60s" Cost_Run="$0.02" />
+</ComparisonTable>
+
+**Haiku (cheap generator) + Sonnet (strong verifier) scores 91, at less than half the cost of Sonnet + Sonnet.**
+
+This is the discovery: a cheaper generator paired with a strong verifier produces nearly the same quality as an expensive generator with the same verifier. The verifier catches what the cheaper generator misses and instructs it to fix the issues. The fix loop does the work that a more expensive generator would have done upfront.
+
+The math: Sonnet + Sonnet costs $0.12 per run and produces a score of 94. Haiku + Sonnet costs $0.05 per run and produces a score of 91. Over 100 pipeline runs per month, that is $12 versus $5. The 3-point score difference does not justify the 140% cost increase.
+
+The insight extends beyond cost. The verifier matters more than the generator because:
+
+1. The verifier has structured tools (MCP) that give it precise, machine-readable feedback
+2. The generator works from natural language specs, which are inherently ambiguous
+3. The fix loop corrects generator mistakes iteratively, converging on correct output regardless of starting quality
+
+**Your AGENT-INSTRUCTIONS.md, Scorecard, and MCP server invest in the verifier side of the pipeline.** That investment pays off by making the generator interchangeable.
+
+:::note
+The exact scores depend on your prompts, your infrastructure complexity, and current model capabilities. Run the eval yourself. The pattern (strong verifier compensates for weaker generator) is consistent, but the specific numbers will be yours.
+:::
+
+---
+
+## Scorecard: Panels 18-21
+
+Four new Grafana panels bring the Scorecard to 21 panels total.
+
+### Panel 18: Pipeline Completion Time
+
+```json title="grafana/panels/18-pipeline-time.json"
+{
+  "title": "Pipeline Completion Time",
+  "type": "timeseries",
+  "datasource": "Loki",
+  "targets": [{
+    "expr": "{job=\"pipeline\"} |= \"Pipeline Complete\" | regexp \"Time:\\\\s+(?P<time>\\\\d+)s\"",
+    "legendFormat": "Pipeline time (seconds)"
+  }],
+  "fieldConfig": {
+    "defaults": {
+      "unit": "s",
+      "thresholds": {
+        "steps": [
+          { "value": 0, "color": "green" },
+          { "value": 120, "color": "yellow" },
+          { "value": 300, "color": "red" }
+        ]
+      }
+    }
+  }
+}
+```
+
+Target: under 120 seconds for a standard generation task. If the pipeline consistently takes more than 5 minutes, investigate which phase is the bottleneck.
+
+### Panel 19: Iterations-to-Clean
+
+```json title="grafana/panels/19-iterations-to-clean.json"
+{
+  "title": "Iterations to Clean",
+  "type": "stat",
+  "datasource": "Loki",
+  "targets": [{
+    "expr": "{job=\"pipeline\"} |= \"avg_iterations_to_clean\" | json | avg_iterations_to_clean > 0"
+  }],
+  "options": {
+    "reduceOptions": { "calcs": ["mean"] },
+    "colorMode": "background",
+    "thresholds": {
+      "steps": [
+        { "value": 0, "color": "green" },
+        { "value": 2, "color": "yellow" },
+        { "value": 3, "color": "red" }
+      ]
+    }
+  }
+}
+```
+
+This is the single most important pipeline metric. Consistently 1 iteration means the generator produces clean output (reduce verification intensity). Consistently 3+ means the generator needs better prompts or the AGENT-INSTRUCTIONS.md rules need refinement.
+
+### Panel 20: Merge Conflict Rate
+
+```json title="grafana/panels/20-merge-conflict-rate.json"
+{
+  "title": "Parallel Generation Merge Conflicts",
+  "type": "gauge",
+  "datasource": "Loki",
+  "targets": [{
+    "expr": "rate({job=\"pipeline\"} |= \"conflict\" [7d])"
+  }],
+  "options": {
+    "thresholds": {
+      "steps": [
+        { "value": 0, "color": "green" },
+        { "value": 0.1, "color": "yellow" },
+        { "value": 0.3, "color": "red" }
+      ]
+    }
+  }
+}
+```
+
+When parallel generators produce conflicting changes, merging the best worktree back causes conflicts. A high conflict rate means the generators need more specific resource naming or scope constraints.
+
+### Panel 21: Model Combination Effectiveness
+
+```json title="grafana/panels/21-model-combinations.json"
+{
+  "title": "Model Combination Scores",
+  "type": "barchart",
+  "datasource": "Loki",
+  "targets": [{
+    "expr": "{job=\"pipeline-eval\"} | json | line_format \"{{.generator}}+{{.verifier}}: {{.avg_score}}\""
+  }],
+  "options": {
+    "orientation": "horizontal",
+    "showValue": "always"
+  }
+}
+```
+
+This panel shows the pipeline eval results: which generator + verifier combinations produce the best scores. Over time, you track model capability drift. If a model update causes scores to drop, you see it here before it affects production.
+
+---
+
+## GitHub Actions: Preview Lifecycle
+
+```yaml title=".github/workflows/preview-fullstack.yml"
+name: Full-Stack Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  deploy-preview:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          for service in bun-api python-api go-api; do
+            docker build \
+              -t "${ECR_REGISTRY}/shipfast-preview-${service}:pr${PR_NUMBER}" \
+              -f "services/${service}/Dockerfile" \
+              "services/${service}/"
+            docker push "${ECR_REGISTRY}/shipfast-preview-${service}:pr${PR_NUMBER}"
+          done
+
+      - name: Create database schema
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: ./scripts/preview/create-schema.sh "${PR_NUMBER}"
+
+      - name: Deploy preview environment
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          cd infra/environments/preview
+          terraform init
+          terraform apply -auto-approve \
+            -var="pr_number=${PR_NUMBER}" \
+            -var="bun_image=${ECR_REGISTRY}/shipfast-preview-bun-api:pr${PR_NUMBER}" \
+            -var="python_image=${ECR_REGISTRY}/shipfast-preview-python-api:pr${PR_NUMBER}" \
+            -var="go_image=${ECR_REGISTRY}/shipfast-preview-go-api:pr${PR_NUMBER}"
+
+      - name: Comment preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const body = `## Preview Environment
+
+            | Component | URL |
+            |-----------|-----|
+            | Frontend | https://pr-${prNumber}.preview.works-on-my.cloud |
+            | API | https://pr${prNumber}-api.preview.works-on-my.cloud |
+
+            Preview will be destroyed when this PR is closed.`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body
+            });
+
+  destroy-preview:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Destroy preview environment
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          cd infra/environments/preview
+          terraform init
+          terraform destroy -auto-approve -var="pr_number=${PR_NUMBER}"
+
+      - name: Destroy database schema
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: ./scripts/preview/destroy-schema.sh "${PR_NUMBER}"
+```
+
+The workflow creates preview environments on PR open and destroys them on PR close. No orphaned resources. No growing costs from forgotten previews.
+
+---
+
+## File Structure
+
+<FileTree>
+scripts/
+  pipeline/
+    full-pipeline.sh
+    generate.sh
+    verify-mcp.sh
+    fix.sh
+    explain.sh
+  preview/
+    create-schema.sh
+    destroy-schema.sh
+  eval/
+    pipeline-eval.sh
+    prompts/
+      01-ecs-service.md
+      02-vpc-module.md
+      03-iam-policy.md
+mcp-servers/
+  infra-verify/
+    src/
+      index.ts
+      checks/
+    package.json
+    tsconfig.json
+grafana/
+  panels/
+    18-pipeline-time.json
+    19-iterations-to-clean.json
+    20-merge-conflict-rate.json
+    21-model-combinations.json
+infra/
+  modules/
+    preview-env/
+      main.tf
+      ecs.tf
+      alb.tf
+  environments/
+    preview/
+      main.tf
+      variables.tf
+.github/
+  workflows/
+    preview-fullstack.yml
+</FileTree>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Single-agent, single-pass verification. One model generates, you manually review, no iterative fix loop. Errors that automated tools catch end up in your PR. Frontend previews with no backend, so reviewers test against stale APIs. |
+| ✅ **Right** | Multi-agent pipeline with parallel generation, unified MCP verify (plan + validate + checkov + infracost + compliance), iterative fix loop (max 3), pipeline eval for model combinations, full-stack previews per PR with automatic cleanup. |
+| ❌ **Over** | Auto-deploying from the pipeline to production without human review. Auto-merging PRs when the pipeline passes. Removing the human from the loop entirely. The pipeline's job is to reduce the reviewer's burden, not to replace the reviewer. |
+| 🤖 **Agent Trap** | Parallel generators create conflicting Terraform resource names because each generator operates without awareness of the others. Two generators both create `aws_ecs_service.api` with the same name, causing Terraform state conflicts when merging. The generate script injects worktree-specific context to prevent this. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 44: K6 Load Testing, Containers Under Pressure**, we load test the containerized services with K6. You will compare Fargate performance against the EC2 baselines from [Part 34](/blog/aws-for-startups/34-k6-human-judgment), identify container-specific bottlenecks, and test auto-scaling behavior under load.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Preview Environments",
+    tasks: [
+      { text: "Preview environment Terraform module created", syncKey: "part-43-preview-module" },
+      { text: "Database schema isolation working (create + destroy scripts)", syncKey: "part-43-schema-isolation" },
+      { text: "ALB host-based routing working for preview URLs", syncKey: "part-43-preview-routing" },
+      { text: "GitHub Actions workflow deploys preview on PR open", syncKey: "part-43-preview-deploy" },
+      { text: "GitHub Actions workflow destroys preview on PR close", syncKey: "part-43-preview-destroy" }
+    ]
+  },
+  {
+    category: "Pipeline",
+    tasks: [
+      { text: "full-pipeline.sh runs end-to-end with all four phases", syncKey: "part-43-full-pipeline" },
+      { text: "Parallel generation with git worktrees working", syncKey: "part-43-parallel-gen" },
+      { text: "Iterative fix loop completes (up to 3 iterations)", syncKey: "part-43-fix-loop" },
+      { text: "Metrics logged to .pipeline-runs/ after each run", syncKey: "part-43-metrics" }
+    ]
+  },
+  {
+    category: "MCP Server",
+    tasks: [
+      { text: "infra-verify-mcp server starts and responds to tool calls", syncKey: "part-43-mcp-server" },
+      { text: "All 6 checks run: plan, validate, tflint, checkov, infracost, compliance", syncKey: "part-43-mcp-checks" },
+      { text: "Structured JSON report with score and findings returned", syncKey: "part-43-mcp-report" }
+    ]
+  },
+  {
+    category: "Evaluation",
+    tasks: [
+      { text: "pipeline-eval.sh runs at least 2 model combinations", syncKey: "part-43-eval-combos" },
+      { text: "Combination results compared (score, time, cost)", syncKey: "part-43-eval-results" }
+    ]
+  },
+  {
+    category: "Scorecard",
+    tasks: [
+      { text: "Panel 18 (Pipeline time) added to Grafana", syncKey: "part-43-panel-18" },
+      { text: "Panel 19 (Iterations-to-clean) added to Grafana", syncKey: "part-43-panel-19" },
+      { text: "Panel 20 (Merge conflict rate) added to Grafana", syncKey: "part-43-panel-20" },
+      { text: "Panel 21 (Model combinations) added to Grafana", syncKey: "part-43-panel-21" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. The full pipeline automates what you have been building since Part 8: generate, verify in a fix loop, explain, and present to a human reviewer. Everything before this was building the parts. This is the assembled machine.
+2. Pipeline eval tests model combinations, not individual models. The verifier matters as much as the generator, and the data proves it.
+3. The discovery: a cheaper generator plus a strong verifier can match an expensive generator's output at half the cost. Your investment in verification infrastructure (MCP server, checkov rules, compliance checks) pays for itself by making the generator interchangeable.
+4. Unified MCP verification reduces the verify step from six separate tool calls with six output formats to one structured call returning a scored JSON report. Agents work better with structured data than parsed CLI output.
+5. Iterations-to-clean is the pipeline's single most important metric: consistently 1 means your prompts are good; consistently 3+ means improve the generator's context, not add more verification.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

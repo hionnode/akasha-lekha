@@ -1,0 +1,674 @@
+---
+title: "ElastiCache Redis: Caching and Sessions"
+description: "Deploy ElastiCache Redis for application caching and session storage. Terraform-managed, in private subnets, with proper connection patterns."
+excerpt: "Caching and sessions with Redis. ElastiCache in private subnets, because round-trips to RDS for session data should not be your bottleneck."
+date: "2026-06-01"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "elasticache", "database", "terraform"]
+series: "aws-for-startups"
+seriesPart: 38
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Every page load on your application runs the same three database queries: fetch the current user, fetch their permissions, and fetch the site configuration. These rows change once a week. Your database serves them 100,000 times a day. That is 300,000 identical queries hitting RDS, consuming connections, burning CPU credits on your t3.micro, and adding 5-15ms of latency to every request for data that has not changed since Tuesday.
+
+**Time:** About 40 minutes.
+
+**Outcome:** An ElastiCache Redis instance in your private subnet handling session storage and application caching, with Terraform configuration, connection pooling, TTL-based cache invalidation, and the cache-aside pattern implemented in your application code.
+
+---
+
+## Why This Matters
+
+Your RDS PostgreSQL instance from [Part 35](/blog/aws-for-startups/35-rds-postgres) handles all data access. That is fine at low scale. At 100 requests per second, every cacheable query that hits the database instead of a cache wastes database capacity. Databases are optimized for correctness (ACID transactions, consistency, durability). Caches are optimized for speed (in-memory, sub-millisecond reads).
+
+Redis solves three problems that all grow with traffic:
+
+1. **Repeated reads of static data.** User sessions, feature flags, permissions, site configuration. These change rarely but are read on every request. A single Redis GET returns in under 1ms. The same data from PostgreSQL takes 3-15ms (network round-trip, query parsing, disk read or buffer cache lookup).
+
+2. **Session storage across instances.** When you move to multiple application instances behind a load balancer (already configured in [Part 22](/blog/aws-for-startups/22-alb-load-balancer)), sessions stored in application memory break. User A authenticates on instance 1, their next request hits instance 2, and they are logged out. Redis-backed sessions work across all instances.
+
+3. **Rate limiting.** Redis INCR with TTL is the standard pattern for API rate limiting. Store a counter per API key with a 60-second expiry. Increment on each request. When the counter exceeds the limit, reject. PostgreSQL can do this, but it adds write load for something that should be ephemeral.
+
+---
+
+## What We're Building
+
+- An ElastiCache Redis instance (single-node, non-clustered) in private subnets
+- A subnet group spanning two availability zones
+- A security group allowing port 6379 only from application instances
+- A custom parameter group for memory management
+- Cache-aside pattern implementation in application code
+- Redis-backed session storage
+- Connection handling with retry and backoff
+
+---
+
+## Instance Sizing
+
+The same agent trap applies to Redis that applies to RDS. Ask an agent to "set up a production Redis cache" and it provisions cache.r6g.large (16 GB RAM, $250+/month). Your cache holds user sessions and a few hundred cached queries. That is under 100 MB of data. You need cache.t3.micro.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["cache.t3.micro", "cache.t3.small", "cache.t3.medium", "cache.r6g.large"]} />
+  <ComparisonRow feature="Memory" cache_t3_micro="0.5 GB" cache_t3_small="1.37 GB" cache_t3_medium="3.09 GB" cache_r6g_large="13.07 GB" />
+  <ComparisonRow feature="Network" cache_t3_micro="Up to 5 Gbps" cache_t3_small="Up to 5 Gbps" cache_t3_medium="Up to 5 Gbps" cache_r6g_large="Up to 10 Gbps" />
+  <ComparisonRow feature="Monthly Cost" cache_t3_micro="~$12 (Best)" cache_t3_small="~$25" cache_t3_medium="~$50" cache_r6g_large="~$250" />
+  <ComparisonRow feature="Use Case" cache_t3_micro="Dev, early prod" cache_t3_small="Growing app" cache_t3_medium="High cache volume" cache_r6g_large="Large datasets" />
+</ComparisonTable>
+
+**Start with cache.t3.micro.** At $12/month, it gives you 500 MB of cache space. With average key sizes of 1-5 KB, that is 100,000-500,000 cached items. If your startup has outgrown 500,000 cached items, congratulations. Move to cache.t3.small. That conversation is months away.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents provision cache.r6g.large ($250/month) or enable Redis Cluster mode with sharding across multiple nodes ($500+/month). The reasoning: "production caches need high availability and horizontal scaling." For a startup with under 10,000 daily active users, a single cache.t3.micro handles the load with headroom. Cluster mode adds operational complexity (hash slots, resharding, cross-node commands) that you do not need.
+
+Your cost review in the PR template from [Part 7](/blog/aws-for-startups/07-branch-protection-pr) catches this. If the monthly cost for a cache instance exceeds $50, it needs explicit justification.
+
+</Alert>
+
+---
+
+## Terraform Module
+
+<FileTree>
+infra/
+  modules/
+    elasticache/
+      main.tf
+      variables.tf
+      outputs.tf
+</FileTree>
+
+### Subnet Group
+
+```hcl title="infra/modules/elasticache/main.tf"
+resource "aws_elasticache_subnet_group" "main" {
+  name       = "${var.project}-${var.environment}-redis"
+  subnet_ids = var.private_subnet_ids
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-redis-subnet"
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+```
+
+Same principle as RDS: Redis lives in private subnets only. There is no reason for a cache to be publicly accessible.
+
+### Security Group
+
+```hcl title="infra/modules/elasticache/main.tf"
+resource "aws_security_group" "redis" {
+  name_prefix = "${var.project}-${var.environment}-redis-"
+  vpc_id      = var.vpc_id
+  description = "Security group for ElastiCache Redis"
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-redis"
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_security_group_rule" "redis_ingress" {
+  type                     = "ingress"
+  from_port                = 6379
+  to_port                  = 6379
+  protocol                 = "tcp"
+  source_security_group_id = var.app_security_group_id
+  security_group_id        = aws_security_group.redis.id
+  description              = "Redis from application instances"
+}
+
+resource "aws_security_group_rule" "redis_egress" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.redis.id
+  description       = "Allow all outbound"
+}
+```
+
+Port 6379, application security group only. The pattern is identical to the RDS security group from [Part 35](/blog/aws-for-startups/35-rds-postgres).
+
+### Parameter Group
+
+```hcl title="infra/modules/elasticache/main.tf"
+resource "aws_elasticache_parameter_group" "redis" {
+  name   = "${var.project}-${var.environment}-redis7"
+  family = "redis7"
+
+  parameter {
+    name  = "maxmemory-policy"
+    value = "allkeys-lru"
+  }
+
+  parameter {
+    name  = "notify-keyspace-events"
+    value = "Ex"
+  }
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-redis7"
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+```
+
+**maxmemory-policy = allkeys-lru**: When Redis runs out of memory, it evicts the least recently used key across all keys. This is the correct default for a cache. Without this, Redis rejects new writes when memory is full, and your application gets errors instead of cache misses.
+
+Other eviction policies exist (`volatile-lru`, `volatile-ttl`, `noeviction`), but `allkeys-lru` is the safest default. It treats the entire cache as expendable, which is exactly what a cache should be.
+
+**notify-keyspace-events = Ex**: Enables notifications when keys expire. Useful for session management: when a session expires in Redis, your application can receive a notification and clean up related resources.
+
+### Redis Instance
+
+```hcl title="infra/modules/elasticache/main.tf"
+resource "aws_elasticache_replication_group" "main" {
+  replication_group_id = "${var.project}-${var.environment}-redis"
+  description          = "Redis cache for ${var.project} ${var.environment}"
+
+  engine               = "redis"
+  engine_version       = "7.1"
+  node_type            = var.node_type
+  num_cache_clusters   = var.environment == "prod" ? 2 : 1
+  parameter_group_name = aws_elasticache_parameter_group.redis.name
+
+  port               = 6379
+  subnet_group_name  = aws_elasticache_subnet_group.main.name
+  security_group_ids = [aws_security_group.redis.id]
+
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = true
+  auth_token                 = var.auth_token
+
+  automatic_failover_enabled = var.environment == "prod" ? true : false
+  multi_az_enabled           = var.environment == "prod" ? true : false
+
+  snapshot_retention_limit = var.environment == "prod" ? 3 : 0
+  snapshot_window          = "03:00-04:00"
+  maintenance_window       = "sun:05:00-sun:06:00"
+
+  auto_minor_version_upgrade = true
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-redis"
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+
+  lifecycle {
+    ignore_changes = [num_cache_clusters]
+  }
+}
+```
+
+Key decisions:
+
+**replication_group instead of aws_elasticache_cluster:** The replication group resource supports read replicas and automatic failover. Even for a single node, start with a replication group. When you need a replica later, you add `num_cache_clusters = 2` instead of migrating to a different resource type.
+
+**num_cache_clusters:** 1 in dev (single node, no replication). 2 in production (primary + one replica with automatic failover). The replica adds approximately $12/month for cache.t3.micro.
+
+**transit_encryption_enabled = true:** Encrypts data between the application and Redis. Required when using an auth_token. Adds negligible latency (sub-millisecond for in-VPC traffic).
+
+**auth_token:** The Redis AUTH password. Store this in Secrets Manager alongside your database credentials (using the pattern from [Part 37](/blog/aws-for-startups/37-secrets-manager)).
+
+**snapshot_retention_limit:** 0 in dev (no snapshots, Redis is a cache). 3 in production (3-day retention for disaster recovery). If you are using Redis only as a cache (not as a primary data store), snapshots are optional in production too. But sessions stored in Redis have value, and a 3-day snapshot window costs nearly nothing.
+
+### Variables
+
+```hcl title="infra/modules/elasticache/variables.tf"
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "VPC ID"
+  type        = string
+}
+
+variable "private_subnet_ids" {
+  description = "Private subnet IDs for the subnet group"
+  type        = list(string)
+}
+
+variable "app_security_group_id" {
+  description = "Application security group ID"
+  type        = string
+}
+
+variable "node_type" {
+  description = "ElastiCache node type"
+  type        = string
+  default     = "cache.t3.micro"
+}
+
+variable "auth_token" {
+  description = "Redis AUTH token (store in Secrets Manager)"
+  type        = string
+  sensitive   = true
+}
+```
+
+### Outputs
+
+```hcl title="infra/modules/elasticache/outputs.tf"
+output "primary_endpoint" {
+  description = "Redis primary endpoint address"
+  value       = aws_elasticache_replication_group.main.primary_endpoint_address
+}
+
+output "reader_endpoint" {
+  description = "Redis reader endpoint address"
+  value       = aws_elasticache_replication_group.main.reader_endpoint_address
+}
+
+output "port" {
+  description = "Redis port"
+  value       = 6379
+}
+
+output "security_group_id" {
+  description = "Redis security group ID"
+  value       = aws_security_group.redis.id
+}
+```
+
+### Environment-Specific Configuration
+
+```hcl title="infra/environments/dev/terraform.tfvars"
+# ElastiCache Configuration - Dev
+redis_node_type = "cache.t3.micro"
+```
+
+```hcl title="infra/environments/prod/terraform.tfvars"
+# ElastiCache Configuration - Production
+redis_node_type = "cache.t3.micro"
+```
+
+Both environments use cache.t3.micro. The difference is production gets a replica node and automatic failover. Dev gets a single node.
+
+| Configuration | Dev (single node) | Prod (primary + replica) |
+|---|---|---|
+| Instance | ~$12/mo | ~$24/mo |
+| Snapshots | $0 | ~$0.10/mo |
+| **Total** | **~$12/mo** | **~$24/mo** |
+
+---
+
+## Caching Patterns
+
+### Cache-Aside (Lazy Loading)
+
+The most common caching pattern. The application checks Redis first. If the key exists (cache hit), return it. If not (cache miss), query the database, store the result in Redis with a TTL, and return it.
+
+```typescript title="src/lib/cache.ts"
+import { createClient, type RedisClientType } from 'redis';
+
+let client: RedisClientType;
+
+export async function getRedisClient(): Promise<RedisClientType> {
+  if (client && client.isReady) {
+    return client;
+  }
+
+  client = createClient({
+    url: `rediss://${process.env.REDIS_HOST}:6379`,
+    password: process.env.REDIS_AUTH_TOKEN,
+    socket: {
+      reconnectStrategy: (retries: number) => {
+        if (retries > 10) return new Error('Max retries reached');
+        return Math.min(retries * 100, 3000);
+      },
+      connectTimeout: 5000,
+    },
+  });
+
+  client.on('error', (err) => console.error('Redis error:', err));
+  await client.connect();
+
+  return client;
+}
+```
+
+The `rediss://` protocol (with double s) enables TLS, matching the `transit_encryption_enabled = true` setting. The reconnect strategy uses exponential backoff capped at 3 seconds. If Redis is down, your application falls back to the database (slower but functional).
+
+```typescript title="src/lib/cache-patterns.ts"
+import { getRedisClient } from './cache';
+
+const DEFAULT_TTL = 300; // 5 minutes
+
+export async function cacheAside<T>(
+  key: string,
+  fetchFn: () => Promise<T>,
+  ttlSeconds: number = DEFAULT_TTL
+): Promise<T> {
+  const redis = await getRedisClient();
+
+  // Check cache
+  const cached = await redis.get(key);
+  if (cached) {
+    return JSON.parse(cached) as T;
+  }
+
+  // Cache miss: fetch from database
+  const data = await fetchFn();
+
+  // Store in cache (do not await, fire-and-forget)
+  redis.set(key, JSON.stringify(data), { EX: ttlSeconds }).catch((err) =>
+    console.error('Cache set failed:', err)
+  );
+
+  return data;
+}
+```
+
+Usage in your application:
+
+```typescript title="src/routes/user.ts"
+import { cacheAside } from '../lib/cache-patterns';
+import { db } from '../lib/db';
+
+export async function getUser(userId: string) {
+  return cacheAside(
+    `user:${userId}`,
+    () => db.query('SELECT * FROM users WHERE id = $1', [userId]),
+    600 // 10-minute TTL for user data
+  );
+}
+
+export async function getSiteConfig() {
+  return cacheAside(
+    'config:site',
+    () => db.query('SELECT * FROM site_config LIMIT 1'),
+    3600 // 1-hour TTL for site config (rarely changes)
+  );
+}
+```
+
+### TTL Strategy
+
+Every cached key needs a TTL. No exceptions.
+
+| Data Type | TTL | Rationale |
+|---|---|---|
+| User session | 24 hours | Matches session timeout |
+| User profile | 10 minutes | Changes infrequently, stale data acceptable |
+| Site configuration | 1 hour | Admin changes propagate within 1 hour |
+| API rate limit counter | 60 seconds | Per-minute rate window |
+| Database query result | 5 minutes | Default for ad-hoc caching |
+
+<Alert type="caution" title="Agent Trap">
+
+Agents set cache keys without TTLs. The code looks clean: `redis.set(key, value)`. No TTL means the key lives forever. Over weeks and months, your cache fills with stale data. When memory is full, the `allkeys-lru` eviction policy starts evicting, but you now have a cache full of data that should have expired days ago competing with fresh data for limited memory.
+
+Every `redis.set` call must include an `EX` (seconds) or `PX` (milliseconds) parameter. If you see a `set` without expiry in agent-generated code, add one. Default to 300 seconds (5 minutes) if the right TTL is unclear.
+
+</Alert>
+
+### Cache Invalidation
+
+When data changes, invalidate the cache explicitly. Do not rely on TTL alone for data that the user just modified. If a user updates their profile and the cached version has a 10-minute TTL, they see stale data for up to 10 minutes after saving. That feels like a bug.
+
+```typescript title="src/lib/cache-patterns.ts"
+export async function invalidateCache(key: string): Promise<void> {
+  const redis = await getRedisClient();
+  await redis.del(key);
+}
+
+export async function invalidatePattern(pattern: string): Promise<void> {
+  const redis = await getRedisClient();
+  const keys = await redis.keys(pattern);
+  if (keys.length > 0) {
+    await redis.del(keys);
+  }
+}
+```
+
+```typescript title="src/routes/user.ts"
+import { invalidateCache } from '../lib/cache-patterns';
+
+export async function updateUser(userId: string, data: UserUpdate) {
+  await db.query('UPDATE users SET ... WHERE id = $1', [userId]);
+  await invalidateCache(`user:${userId}`);
+}
+```
+
+:::warning
+`redis.keys(pattern)` scans the entire keyspace and blocks Redis during the scan. For production caches with millions of keys, use `SCAN` instead. For startup-scale caches with under 100,000 keys, `KEYS` is fine. Revisit this if your cache grows large.
+:::
+
+---
+
+## Session Storage
+
+Redis-backed sessions solve the multi-instance problem. Every application instance reads and writes sessions to the same Redis. A user authenticated on instance 1 stays authenticated when their next request routes to instance 2.
+
+```typescript title="src/lib/session.ts"
+import { getRedisClient } from './cache';
+
+const SESSION_PREFIX = 'session:';
+const SESSION_TTL = 86400; // 24 hours
+
+export async function getSession(sessionId: string): Promise<Record<string, unknown> | null> {
+  const redis = await getRedisClient();
+  const data = await redis.get(`${SESSION_PREFIX}${sessionId}`);
+  if (!data) return null;
+
+  // Refresh TTL on access (sliding expiration)
+  await redis.expire(`${SESSION_PREFIX}${sessionId}`, SESSION_TTL);
+
+  return JSON.parse(data);
+}
+
+export async function setSession(
+  sessionId: string,
+  data: Record<string, unknown>
+): Promise<void> {
+  const redis = await getRedisClient();
+  await redis.set(
+    `${SESSION_PREFIX}${sessionId}`,
+    JSON.stringify(data),
+    { EX: SESSION_TTL }
+  );
+}
+
+export async function destroySession(sessionId: string): Promise<void> {
+  const redis = await getRedisClient();
+  await redis.del(`${SESSION_PREFIX}${sessionId}`);
+}
+```
+
+The sliding expiration (`expire` on each access) keeps active sessions alive while inactive sessions expire after 24 hours. Without sliding expiration, a user who logs in and uses the application continuously for 25 hours gets logged out at the 24-hour mark.
+
+---
+
+## Connection Handling
+
+Redis connections need the same care as database connections. Do not create a new connection per request. Use a single client instance shared across your application.
+
+The client created in `cache.ts` above is a singleton. It reconnects automatically on failure. The reconnect strategy uses exponential backoff: 100ms, 200ms, 300ms, up to 3 seconds. After 10 failed attempts, it gives up and your application falls back to database-only operation.
+
+### Graceful Degradation
+
+Redis is a cache, not a primary data store (for your use case). If Redis is down, your application should still work. Slower, but functional.
+
+```typescript title="src/lib/cache-patterns.ts"
+export async function cacheAsideWithFallback<T>(
+  key: string,
+  fetchFn: () => Promise<T>,
+  ttlSeconds: number = DEFAULT_TTL
+): Promise<T> {
+  try {
+    const redis = await getRedisClient();
+    const cached = await redis.get(key);
+    if (cached) {
+      return JSON.parse(cached) as T;
+    }
+  } catch (err) {
+    // Redis is down, skip cache, fall back to database
+    console.warn('Redis unavailable, falling back to database:', err);
+  }
+
+  const data = await fetchFn();
+
+  // Try to populate cache, but do not fail if Redis is down
+  try {
+    const redis = await getRedisClient();
+    await redis.set(key, JSON.stringify(data), { EX: ttlSeconds });
+  } catch {
+    // Cache population failed, data still returned from database
+  }
+
+  return data;
+}
+```
+
+This pattern wraps every Redis operation in a try-catch. The application never fails because Redis is unavailable. It just gets slower.
+
+---
+
+## Verifying the Deployment
+
+After `terraform apply`, verify the Redis instance is running:
+
+```bash terminal
+aws elasticache describe-replication-groups \
+  --replication-group-id shipfast-dev-redis \
+  --query 'ReplicationGroups[0].{Status:Status,Endpoint:NodeGroups[0].PrimaryEndpoint.Address,Encryption:AtRestEncryptionEnabled,TransitEncryption:TransitEncryptionEnabled}' \
+  --output table
+```
+
+<TerminalOutput title="aws elasticache describe-replication-groups">
+
+```
+--------------------------------------------------------------------
+|                    DescribeReplicationGroups                      |
++-------------------+----------------------------------------------+
+| Encryption        | True                                         |
+| Endpoint          | shipfast-dev-redis.abc123.0001.use1.cache...  |
+| Status            | available                                    |
+| TransitEncryption | True                                         |
++-------------------+----------------------------------------------+
+```
+
+</TerminalOutput>
+
+Test connectivity from an EC2 instance in the application subnet:
+
+```bash terminal
+redis-cli -h shipfast-dev-redis.abc123.0001.use1.cache.amazonaws.com \
+  -p 6379 \
+  --tls \
+  -a YOUR_AUTH_TOKEN \
+  ping
+```
+
+<TerminalOutput title="redis-cli ping">
+
+```
+PONG
+```
+
+</TerminalOutput>
+
+If you get `PONG`, Redis is accessible. If the connection times out, check the security group allows port 6379 from the instance's security group and the subnet group uses the correct private subnets.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No caching layer. Every request hits RDS for session data, user profiles, and site config. Database connection count grows linearly with traffic. At 200 concurrent users, your db.t3.micro hits its connection limit and starts rejecting requests. |
+| ✅ **Right** | ElastiCache Redis (cache.t3.micro, $12/month) in private subnets. Cache-aside pattern for read-heavy data. Redis-backed sessions for multi-instance support. TTL on every key. Graceful fallback when Redis is unavailable. |
+| ❌ **Over** | Redis Cluster with 3 shards and 2 replicas per shard ($200+/month). Memcached alongside Redis "for different caching needs." A dedicated cache invalidation microservice. DAX for DynamoDB you are not using. All this for an application with 50 daily active users. |
+| 🤖 **Agent Trap** | Agent provisions cache.r6g.large ($250/month) because the prompt said "production." It also enables Redis Cluster mode with `num_node_groups = 3`, creating a sharded cluster that adds operational complexity (hash slot management, cross-node commands) your team does not need. The PR template cost impact section catches the instance sizing. The cluster mode requires explicit justification your traffic does not support. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 39: Docker for Production**, we move from running your application directly on EC2 to containerizing it for production deployment. Docker multi-stage builds, security hardening (non-root users, minimal base images), and the Dockerfile patterns that your containers need before we deploy them to ECS in Parts 41-42. The database and cache connections you built in this phase carry forward: your containers connect to RDS and Redis using the same endpoints, credentials from Secrets Manager, and connection patterns.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Infrastructure",
+    tasks: [
+      { text: "ElastiCache Redis instance deployed and status is 'available'", syncKey: "part-38-redis-deployed" },
+      { text: "Subnet group uses private subnets across 2 AZs", syncKey: "part-38-subnet-group" },
+      { text: "Security group allows port 6379 only from application security group", syncKey: "part-38-security-group" },
+      { text: "Custom parameter group with maxmemory-policy allkeys-lru", syncKey: "part-38-parameter-group" }
+    ]
+  },
+  {
+    category: "Security",
+    tasks: [
+      { text: "Encryption at rest enabled", syncKey: "part-38-encryption-rest" },
+      { text: "Transit encryption enabled (TLS)", syncKey: "part-38-encryption-transit" },
+      { text: "AUTH token configured and stored in Secrets Manager", syncKey: "part-38-auth-token" },
+      { text: "Redis not publicly accessible", syncKey: "part-38-not-public" }
+    ]
+  },
+  {
+    category: "Application",
+    tasks: [
+      { text: "Cache-aside pattern implemented with TTL on all keys", syncKey: "part-38-cache-aside" },
+      { text: "Redis-backed session storage implemented", syncKey: "part-38-sessions" },
+      { text: "Graceful fallback to database when Redis is unavailable", syncKey: "part-38-fallback" },
+      { text: "Connection uses TLS (rediss:// protocol)", syncKey: "part-38-tls-connection" }
+    ]
+  },
+  {
+    category: "Cost Management",
+    tasks: [
+      { text: "Dev environment uses cache.t3.micro (not r6g or cluster)", syncKey: "part-38-dev-sizing" },
+      { text: "Production uses cache.t3.micro with single replica", syncKey: "part-38-prod-sizing" },
+      { text: "Snapshots disabled in dev, 3-day retention in prod", syncKey: "part-38-snapshots" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Redis eliminates database round-trips for cacheable data: sessions, user profiles, site config, rate limiting. A sub-millisecond Redis GET replaces a 5-15ms database query.
+2. Start with cache.t3.micro at $12/month. Agents over-provision Redis as aggressively as they over-provision RDS, and cluster mode adds complexity you do not need before 10,000 concurrent users.
+3. Set TTLs on every key. Keys without expiration accumulate silently until your cache is full of stale data competing with fresh data for limited memory.
+4. Redis is a cache, not a primary data store. Design your application to work (slower) when Redis is down. Graceful degradation is not optional.
+5. Phase 9 is complete: you now have RDS PostgreSQL, operational monitoring, credentials in Secrets Manager with rotation, and a Redis caching layer. Your data tier is production-ready.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

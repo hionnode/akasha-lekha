@@ -1,0 +1,650 @@
+---
+title: "ECS Fargate: Python + Go APIs"
+date: "2026-06-16"
+excerpt: "Python + Go on ECS Fargate. Same infrastructure, different runtimes, your container pipeline doesn't care which language is inside."
+description: "Deploy Python FastAPI and Go APIs on ECS Fargate. Same infrastructure pattern, different runtimes, proving the container pipeline is language-agnostic."
+series: "aws-for-startups"
+seriesPart: 42
+draft: true
+tags: ["aws", "devops", "startup", "ecs", "docker", "terraform", "backend"]
+author: "Chinmay"
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+You have three APIs: Bun for the primary API, Python for the ML service, Go for the data pipeline. Three languages. Three Dockerfiles. Three deployment pipelines. Three sets of infrastructure. Three sets of scaling rules. Except none of that is true. Containers make language irrelevant at the infrastructure layer. The same ECS Fargate module you built in [Part 41](/blog/aws-for-startups/41-ecs-fargate-bun) deploys all three.
+
+**Time:** About 45 minutes.
+
+**Outcome:** Python FastAPI and Go APIs deployed on ECS Fargate using the same Terraform module, sharing one ALB with path-based routing, each with independent auto-scaling and health checks.
+
+---
+
+## Why This Matters
+
+Startups use multiple languages. The primary API is in the language the founding team knows best. The ML service is in Python because the libraries are there. The performance-critical service is in Go because it needs to be fast.
+
+Without containers, each language means a different deployment story. Python needs a virtual environment or system packages. Go needs a build step. Bun needs its runtime. Each has different process managers, different health check patterns, different log formats.
+
+With containers, the deployment story is the same: build a Docker image, push it to ECR, update the task definition, ECS rolls out the new version. The infrastructure does not know or care that one container runs Python and another runs Go. A container is a container.
+
+This is the point of the last three posts. [Part 39](/blog/aws-for-startups/39-docker-production) standardized the Dockerfiles. [Part 40](/blog/aws-for-startups/40-ecr-container-registry) set up the registry. [Part 41](/blog/aws-for-startups/41-ecs-fargate-bun) built the ECS module. Now you reuse that module for two more services and prove that the investment pays off.
+
+---
+
+## What We're Building
+
+- Python FastAPI deployed on ECS Fargate with Gunicorn + Uvicorn
+- Go API deployed on ECS Fargate with static binary
+- Path-based routing on the existing ALB (shared with Bun API)
+- Service discovery for container-to-container communication
+- Independent auto-scaling per service
+
+---
+
+## Python FastAPI on Fargate
+
+### Task Definition
+
+The Terraform module from [Part 41](/blog/aws-for-startups/41-ecs-fargate-bun) is parameterized. Creating a new service means calling it with different inputs.
+
+```hcl title="infra/modules/ecs/task-definitions.tf"
+resource "aws_ecs_task_definition" "python_api" {
+  family                   = "${var.project}-${var.environment}-python-api"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "python-api"
+      image     = "${var.ecr_repository_urls["python-api"]}:${var.python_image_tag}"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = 8000
+          protocol      = "tcp"
+        }
+      ]
+
+      environment = [
+        { name = "ENVIRONMENT", value = var.environment },
+        { name = "PORT", value = "8000" },
+        { name = "WORKERS", value = "2" },
+        { name = "LOG_LEVEL", value = "info" }
+      ]
+
+      secrets = [
+        {
+          name      = "DATABASE_URL"
+          valueFrom = var.database_url_secret_arn
+        },
+        {
+          name      = "REDIS_URL"
+          valueFrom = var.redis_url_secret_arn
+        }
+      ]
+
+      healthCheck = {
+        command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 20
+      }
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.python_api.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "python-api"
+        }
+      }
+    }
+  ])
+
+  tags = merge(var.common_tags, {
+    Name    = "${var.project}-${var.environment}-python-api"
+    Service = "python-api"
+  })
+}
+
+resource "aws_cloudwatch_log_group" "python_api" {
+  name              = "/ecs/${var.project}-${var.environment}/python-api"
+  retention_in_days = 30
+  tags              = var.common_tags
+}
+```
+
+The Python task definition looks almost identical to the Bun one. Different port (8000 vs 3000), different health check command, longer `startPeriod` (20 seconds because Gunicorn takes longer to initialize). Same CPU and memory allocation.
+
+### Gunicorn Configuration
+
+The Dockerfile from [Part 39](/blog/aws-for-startups/39-docker-production) uses Gunicorn with Uvicorn workers. The `WORKERS` environment variable controls concurrency.
+
+For 0.25 vCPU, 2 workers is the maximum. The formula is `2 * CPU cores + 1`, but Fargate's 0.25 vCPU means you have fractional CPU. Two workers keep the process responsive without exceeding the CPU allocation.
+
+```python title="services/python-api/src/config.py"
+import os
+
+WORKERS = int(os.getenv("WORKERS", "2"))
+PORT = int(os.getenv("PORT", "8000"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "info")
+```
+
+---
+
+## Go API on Fargate
+
+### Task Definition
+
+```hcl title="infra/modules/ecs/task-definitions.tf (continued)"
+resource "aws_ecs_task_definition" "go_api" {
+  family                   = "${var.project}-${var.environment}-go-api"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "go-api"
+      image     = "${var.ecr_repository_urls["go-api"]}:${var.go_image_tag}"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = 8080
+          protocol      = "tcp"
+        }
+      ]
+
+      environment = [
+        { name = "ENVIRONMENT", value = var.environment },
+        { name = "PORT", value = "8080" },
+        { name = "LOG_LEVEL", value = "info" }
+      ]
+
+      secrets = [
+        {
+          name      = "DATABASE_URL"
+          valueFrom = var.database_url_secret_arn
+        }
+      ]
+
+      healthCheck = {
+        command     = ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+        interval    = 30
+        timeout     = 3
+        retries     = 3
+        startPeriod = 5
+      }
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.go_api.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "go-api"
+        }
+      }
+    }
+  ])
+
+  tags = merge(var.common_tags, {
+    Name    = "${var.project}-${var.environment}-go-api"
+    Service = "go-api"
+  })
+}
+
+resource "aws_cloudwatch_log_group" "go_api" {
+  name              = "/ecs/${var.project}-${var.environment}/go-api"
+  retention_in_days = 30
+  tags              = var.common_tags
+}
+```
+
+The Go task definition has two notable differences:
+
+- **`startPeriod = 5`.** Go starts in under a second. No need for the 15-20 second grace period that Bun and Python need.
+- **`timeout = 3`.** The health check timeout is shorter because Go's HTTP handler responds in microseconds, not milliseconds. If the health check takes more than 3 seconds, something is wrong.
+
+### Resource Comparison Across Runtimes
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Bun", "Python", "Go"]} />
+  <ComparisonRow feature="Container port" Bun="3000" Python="8000" Go="8080" />
+  <ComparisonRow feature="Image size" Bun="~180 MB" Python="~250 MB" Go="~20 MB (Best)" />
+  <ComparisonRow feature="Startup time" Bun="2-3 seconds" Python="5-10 seconds" Go="< 1 second (Best)" />
+  <ComparisonRow feature="Health check start" Bun="15s" Python="20s" Go="5s (Best)" />
+  <ComparisonRow feature="CPU allocation" Bun="0.25 vCPU" Python="0.25 vCPU" Go="0.25 vCPU" />
+  <ComparisonRow feature="Memory allocation" Bun="512 MB" Python="512 MB" Go="512 MB" />
+</ComparisonTable>
+
+Same infrastructure cost for all three. Go is the most efficient runtime, but 0.25 vCPU / 512 MB handles typical startup workloads for all three languages.
+
+---
+
+## Multi-Service ALB Routing
+
+All three services share the ALB from [Part 22](/blog/aws-for-startups/22-alb-load-balancer). Path-based routing directs requests to the correct target group.
+
+```hcl title="infra/modules/ecs/alb-routing.tf"
+# Python API target group
+resource "aws_lb_target_group" "python_api" {
+  name        = "${var.project}-${var.environment}-python-api"
+  port        = 8000
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    path                = "/health"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+    matcher             = "200"
+  }
+
+  deregistration_delay = 30
+  tags = merge(var.common_tags, { Service = "python-api" })
+}
+
+# Go API target group
+resource "aws_lb_target_group" "go_api" {
+  name        = "${var.project}-${var.environment}-go-api"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    path                = "/health"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+    matcher             = "200"
+  }
+
+  deregistration_delay = 30
+  tags = merge(var.common_tags, { Service = "go-api" })
+}
+
+# Path-based routing rules
+resource "aws_lb_listener_rule" "python_api" {
+  listener_arn = var.alb_listener_arn
+  priority     = 200
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.python_api.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/api/ml/*"]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "go_api" {
+  listener_arn = var.alb_listener_arn
+  priority     = 300
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.go_api.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/api/data/*"]
+    }
+  }
+}
+```
+
+The routing layout:
+
+| Path | Service | Port |
+|------|---------|------|
+| `/api/v1/*` | Bun API (from Part 41) | 3000 |
+| `/api/ml/*` | Python FastAPI | 8000 |
+| `/api/data/*` | Go API | 8080 |
+
+One ALB. One DNS name. Three services. The client doesn't know which language handles which endpoint.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents create one ALB per service. Three services means three ALBs. Each ALB costs a minimum of $16.20/month (fixed hourly charge) plus data processing. Three ALBs cost $48.60/month in fixed fees alone. One ALB with path-based routing costs $16.20/month total. The agent creates separate ALBs because it processes each service independently without considering the shared infrastructure.
+
+**What catches it:** Review the `terraform plan` output for `aws_lb` resources. If you see more than one ALB being created, you are paying 3x for no benefit.
+
+</Alert>
+
+---
+
+## ECS Services for Python and Go
+
+```hcl title="infra/modules/ecs/services.tf"
+resource "aws_ecs_service" "python_api" {
+  name            = "${var.project}-${var.environment}-python-api"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.python_api.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  network_configuration {
+    subnets          = var.private_subnet_ids
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.python_api.arn
+    container_name   = "python-api"
+    container_port   = 8000
+  }
+
+  depends_on = [aws_lb_listener_rule.python_api]
+
+  tags = merge(var.common_tags, { Service = "python-api" })
+
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+}
+
+resource "aws_ecs_service" "go_api" {
+  name            = "${var.project}-${var.environment}-go-api"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.go_api.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  network_configuration {
+    subnets          = var.private_subnet_ids
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.go_api.arn
+    container_name   = "go-api"
+    container_port   = 8080
+  }
+
+  depends_on = [aws_lb_listener_rule.go_api]
+
+  tags = merge(var.common_tags, { Service = "go-api" })
+
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+}
+```
+
+The service definitions are structurally identical to the Bun service from Part 41. Different container name, different port, same deployment strategy, same circuit breaker, same network configuration. This is the payoff of the module approach: adding a service is copy-paste with three variable changes.
+
+---
+
+## Service Discovery
+
+When services need to call each other (Bun API calling the Python ML service, for example), going through the ALB works but adds unnecessary latency. The request goes out to the ALB, gets routed back to a task in the same VPC. Service discovery provides direct container-to-container communication.
+
+```hcl title="infra/modules/ecs/service-discovery.tf"
+resource "aws_service_discovery_private_dns_namespace" "main" {
+  name        = "${var.project}.local"
+  vpc         = var.vpc_id
+  description = "Service discovery namespace for ${var.project}"
+
+  tags = var.common_tags
+}
+
+resource "aws_service_discovery_service" "bun_api" {
+  name = "bun-api"
+
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.main.id
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+
+    routing_policy = "MULTIVALUE"
+  }
+
+  health_check_custom_config {
+    failure_threshold = 1
+  }
+}
+
+resource "aws_service_discovery_service" "python_api" {
+  name = "python-api"
+
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.main.id
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+
+    routing_policy = "MULTIVALUE"
+  }
+
+  health_check_custom_config {
+    failure_threshold = 1
+  }
+}
+
+resource "aws_service_discovery_service" "go_api" {
+  name = "go-api"
+
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.main.id
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+
+    routing_policy = "MULTIVALUE"
+  }
+
+  health_check_custom_config {
+    failure_threshold = 1
+  }
+}
+```
+
+Then add the `service_registries` block to each ECS service:
+
+```hcl title="Add to each ECS service resource"
+  service_registries {
+    registry_arn = aws_service_discovery_service.bun_api.arn
+  }
+```
+
+With service discovery, your Bun API calls the Python ML service at `http://python-api.shipfast.local:8000/api/ml/predict` instead of going through the ALB. The DNS resolves directly to the task's IP address.
+
+---
+
+## Independent Auto-Scaling
+
+Each service scales independently based on its own CPU utilization:
+
+```hcl title="infra/modules/ecs/autoscaling.tf (add Python and Go)"
+resource "aws_appautoscaling_target" "python_api" {
+  max_capacity       = 6
+  min_capacity       = 2
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.python_api.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "python_api_cpu" {
+  name               = "${var.project}-${var.environment}-python-api-cpu"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.python_api.resource_id
+  scalable_dimension = aws_appautoscaling_target.python_api.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.python_api.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value       = 70.0
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 60
+  }
+}
+
+resource "aws_appautoscaling_target" "go_api" {
+  max_capacity       = 8
+  min_capacity       = 2
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.go_api.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "go_api_cpu" {
+  name               = "${var.project}-${var.environment}-go-api-cpu"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.go_api.resource_id
+  scalable_dimension = aws_appautoscaling_target.go_api.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.go_api.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value       = 70.0
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 60
+  }
+}
+```
+
+Different max capacities reflect expected usage patterns. The Python ML service processes fewer but heavier requests (max 6). The Go data pipeline handles high throughput (max 8). The Bun API, as the primary entry point, scales to 10 (from Part 41).
+
+---
+
+## Deploying a New Service
+
+Here is the complete workflow for adding a new service going forward:
+
+:::steps
+1. Write a production Dockerfile following the Part 39 patterns
+2. Create a `.dockerignore` in the service directory
+3. Add an ECR repository to the Terraform module (one line in the `repositories` map)
+4. Add a task definition with the correct port and health check
+5. Add an ECS service with circuit breaker and auto-scaling
+6. Add an ALB listener rule with a path pattern
+7. Add a service discovery entry
+8. Build, push to ECR, and deploy
+:::
+
+Steps 3-7 are Terraform changes. The infrastructure code for a new service is under 100 lines. The time savings compound with every service you add.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Different infrastructure per language: EC2 for Go, Elastic Beanstalk for Python, a different ECS cluster for Bun. Three deployment stories, three sets of monitoring, three billing models. |
+| ✅ **Right** | Same Fargate pattern for all languages, path-based routing on one ALB, service discovery for internal communication, independent auto-scaling per service. |
+| ❌ **Over** | Service mesh (AWS App Mesh), sidecar proxies (Envoy), distributed tracing at the network layer, for three services handling startup traffic. Service mesh solves problems you get at 20+ services. |
+| 🤖 **Agent Trap** | Agent creates separate ALBs per service instead of path-based routing on one ALB, tripling ALB costs from $16/month to $49/month with no benefit. Always check `terraform plan` for duplicate `aws_lb` resources. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 43: Full-Stack Preview, The Complete Pipeline**, we combine the frontend preview environments from [Part 19](/blog/aws-for-startups/19-preview-environments) with the containerized backends from Parts 41-42 to build full-stack ephemeral environments per PR. This is also where the multi-agent pipeline, unified MCP verification, and pipeline model evaluation come together.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Infrastructure",
+    tasks: [
+      { text: "Python FastAPI task definition deployed on Fargate", syncKey: "part-42-python-task" },
+      { text: "Go API task definition deployed on Fargate", syncKey: "part-42-go-task" },
+      { text: "Both services using 0.25 vCPU / 0.5 GB allocation", syncKey: "part-42-resource-sizes" },
+      { text: "Service discovery namespace created", syncKey: "part-42-service-discovery" }
+    ]
+  },
+  {
+    category: "Routing",
+    tasks: [
+      { text: "Path-based routing configured: /api/v1/* -> Bun, /api/ml/* -> Python, /api/data/* -> Go", syncKey: "part-42-path-routing" },
+      { text: "All three services using ONE ALB (not separate ALBs)", syncKey: "part-42-single-alb" },
+      { text: "Health checks passing on all target groups", syncKey: "part-42-health-checks" }
+    ]
+  },
+  {
+    category: "Operations",
+    tasks: [
+      { text: "Auto-scaling configured for Python and Go services", syncKey: "part-42-autoscaling" },
+      { text: "Circuit breaker enabled on all ECS services", syncKey: "part-42-circuit-breaker" },
+      { text: "Service-to-service communication tested via discovery DNS", syncKey: "part-42-svc-discovery-test" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Containers make deployment language-agnostic: the same Terraform module deploys Bun, Python, and Go with only port and health check differences.
+2. One ALB with path-based routing costs $16/month; three ALBs cost $49/month. Agents create separate ALBs per service because they process each service independently.
+3. Go's static binary produces the smallest, fastest container (20 MB, sub-second startup), which makes it a useful benchmark for right-sizing task definitions across all your services.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

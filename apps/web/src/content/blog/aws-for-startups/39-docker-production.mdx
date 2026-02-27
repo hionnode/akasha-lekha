@@ -1,0 +1,469 @@
+---
+title: "Docker for Production: Dockerfiles That Aren't Security Liabilities"
+date: "2026-06-04"
+excerpt: "Dockerfiles that aren't security liabilities. Multi-stage builds, non-root users, pinned versions, because agents generate every Docker anti-pattern."
+description: "Write production Dockerfiles with multi-stage builds, non-root users, and security scanning. The agent mistakes that turn containers into vulnerabilities."
+series: "aws-for-startups"
+seriesPart: 39
+draft: true
+tags: ["aws", "devops", "startup", "docker", "security"]
+author: "Chinmay"
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+You ask your agent to write a Dockerfile for the Bun API you built in [Part 29](/blog/aws-for-startups/29-backend-bun-signoz). Thirty seconds later, it hands you a file. Single stage, `FROM oven/bun:latest`, runs as root, no `.dockerignore`, copies `node_modules` into the image. You build it. It works. The image is 1.2 GB, runs as root, contains your `.env` file with production database credentials baked into a layer, and pulls a different base image every time you build because `:latest` is a moving target.
+
+**Time:** About 45 minutes.
+
+**Outcome:** Production Dockerfiles for Bun, Python, and Go with multi-stage builds, non-root users, pinned image versions, health checks, `.dockerignore` files, and Trivy vulnerability scanning. Plus Docker rules added to your `AGENT-INSTRUCTIONS.md`.
+
+---
+
+## Why This Matters
+
+In [Part 10](/blog/aws-for-startups/10-docker-compose-local), you wrote development Dockerfiles. They worked. They got your services running locally. They are completely wrong for production.
+
+Development Dockerfiles optimize for one thing: getting the container running as fast as possible. Production Dockerfiles optimize for security, size, reproducibility, and operational reliability. These goals conflict at every turn. Development wants `:latest` for freshness. Production wants pinned versions for reproducibility. Development wants everything in one stage. Production wants build tools stripped from the runtime image.
+
+The gap between development and production Dockerfiles is exactly where agents cause the most damage. Every Docker tutorial in the agent's training data uses single-stage builds with `:latest` tags and root users. That is what you get when you ask for "a Dockerfile." And if you deploy it, you ship a container that runs as root (one exploit away from host access), changes behavior on every build (`:latest` moves), and includes build dependencies that expand your attack surface.
+
+---
+
+## What We're Building
+
+- Multi-stage Dockerfiles for Bun, Python, and Go
+- `.dockerignore` files that prevent secrets from leaking into image layers
+- Non-root user configuration for all containers
+- `HEALTHCHECK` directives for container orchestration
+- Trivy scanning integrated into the build process
+- Docker rules added to `AGENT-INSTRUCTIONS.md` (7 new lines, cumulative: 71 lines)
+
+---
+
+## Multi-Stage Builds
+
+A multi-stage build separates the build environment from the runtime environment. The build stage has compilers, package managers, and dev dependencies. The runtime stage has only what the application needs to run. Everything else gets discarded.
+
+### Bun.js
+
+```dockerfile title="services/bun-api/Dockerfile"
+# Build stage
+FROM oven/bun:1.1.38-alpine AS builder
+
+WORKDIR /app
+
+COPY package.json bun.lockb ./
+RUN bun install --frozen-lockfile --production
+
+COPY src/ ./src/
+COPY tsconfig.json ./
+
+# Runtime stage
+FROM oven/bun:1.1.38-alpine AS runtime
+
+RUN addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -D appuser
+
+WORKDIR /app
+
+COPY --from=builder --chown=appuser:appgroup /app/node_modules ./node_modules
+COPY --from=builder --chown=appuser:appgroup /app/src ./src
+COPY --from=builder --chown=appuser:appgroup /app/package.json ./
+
+USER appuser
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD bun --eval "fetch('http://localhost:3000/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"
+
+CMD ["bun", "run", "src/index.ts"]
+```
+
+Key decisions in this Dockerfile:
+
+- **`bun:1.1.38-alpine`** not `bun:latest`. The exact version is pinned. Builds are reproducible.
+- **`--frozen-lockfile`** fails the build if `bun.lockb` doesn't match `package.json`. No surprise dependency updates in CI.
+- **Two stages.** The builder stage installs dependencies. The runtime stage copies only what's needed.
+- **`adduser` + `USER appuser`** runs the process as a non-root user. One line that blocks an entire class of container escape attacks.
+- **`HEALTHCHECK`** tells the orchestrator (ECS, in our case) how to determine if the container is healthy.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate single-stage Dockerfiles with root user, `:latest` base, and no `.dockerignore`. This is the default in their training data because most Docker tutorials prioritize "getting it running" over "running it safely." The agent is not malicious. It is optimizing for the fastest path to a working container, which happens to be the least secure path.
+
+**What catches it:** The Docker rules you'll add to `AGENT-INSTRUCTIONS.md` at the end of this post explicitly ban single-stage builds, root users, and `:latest` tags.
+
+</Alert>
+
+### Python (FastAPI)
+
+```dockerfile title="services/python-api/Dockerfile"
+# Build stage
+FROM python:3.12.7-slim AS builder
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir poetry==1.8.4
+
+COPY pyproject.toml poetry.lock ./
+RUN poetry config virtualenvs.in-project true && \
+    poetry install --only main --no-interaction --no-ansi
+
+COPY src/ ./src/
+
+# Runtime stage
+FROM python:3.12.7-slim AS runtime
+
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -g appgroup -m appuser
+
+WORKDIR /app
+
+COPY --from=builder --chown=appuser:appgroup /app/.venv ./.venv
+COPY --from=builder --chown=appuser:appgroup /app/src ./src
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+USER appuser
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+CMD ["gunicorn", "src.main:app", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000"]
+```
+
+The Python Dockerfile copies the virtual environment from the builder stage. No `pip`, no `poetry`, no build tools in the runtime image. Gunicorn with Uvicorn workers handles production process management.
+
+### Go
+
+```dockerfile title="services/go-api/Dockerfile"
+# Build stage
+FROM golang:1.23.4-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/server ./cmd/server
+
+# Runtime stage
+FROM alpine:3.20 AS runtime
+
+RUN apk --no-cache add ca-certificates && \
+    addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -D appuser
+
+WORKDIR /app
+
+COPY --from=builder --chown=appuser:appgroup /app/server .
+
+USER appuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+CMD ["./server"]
+```
+
+Go compiles to a static binary. The runtime stage doesn't even need a Go installation. Just the binary, CA certificates (for HTTPS calls), and a non-root user. The result is a 15-20 MB image.
+
+### Image Size Comparison
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Single-Stage", "Multi-Stage"]} />
+  <ComparisonRow feature="Bun.js" Single_Stage="~850 MB" Multi_Stage="~180 MB (Best)" />
+  <ComparisonRow feature="Python" Single_Stage="~1.1 GB" Multi_Stage="~250 MB" />
+  <ComparisonRow feature="Go" Single_Stage="~800 MB" Multi_Stage="~20 MB (Best)" />
+</ComparisonTable>
+
+Multi-stage builds reduce image sizes by 4-50x depending on the language. Smaller images pull faster, start faster, and have a smaller attack surface.
+
+---
+
+## The .dockerignore File
+
+Every service directory needs a `.dockerignore`. Without it, `COPY . .` sends everything to the Docker daemon, including `.env` files, `.git` directories, `node_modules`, and anything else in the context.
+
+```text title="services/bun-api/.dockerignore"
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+node_modules
+dist
+*.log
+*.md
+docker-compose*.yml
+.DS_Store
+Dockerfile
+.dockerignore
+coverage/
+.nyc_output/
+tests/
+__tests__/
+```
+
+```text title="services/python-api/.dockerignore"
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+__pycache__
+*.pyc
+.venv
+dist
+*.log
+*.md
+docker-compose*.yml
+.DS_Store
+Dockerfile
+.dockerignore
+.pytest_cache/
+tests/
+htmlcov/
+```
+
+```text title="services/go-api/.dockerignore"
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.log
+*.md
+docker-compose*.yml
+.DS_Store
+Dockerfile
+.dockerignore
+*_test.go
+vendor/
+```
+
+The critical line is `.env`. Without it, your production secrets end up baked into an image layer. Even if you delete the file in a later layer, it remains in the image history. Anyone with access to the image can extract it.
+
+:::warning
+Docker image layers are immutable. If you `COPY . .` in one step and `RUN rm .env` in the next, the `.env` file still exists in the first layer. The only way to prevent secrets from entering the image is `.dockerignore`.
+:::
+
+---
+
+## Non-Root User
+
+Running containers as root means a container escape gives the attacker root on the host. Running as a non-root user limits the blast radius to what that user can access inside the container.
+
+The pattern is the same for every language:
+
+```dockerfile title="Non-root user pattern"
+# Create group and user
+RUN addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -D appuser
+
+# Copy files with correct ownership
+COPY --from=builder --chown=appuser:appgroup /app ./
+
+# Switch to non-root user
+USER appuser
+```
+
+Three lines. That is all it takes. The `--chown` flag on `COPY` ensures the non-root user owns the application files. The `USER` directive switches the running process.
+
+Every Dockerfile you write from this point forward includes these three lines. No exceptions.
+
+---
+
+## Health Checks
+
+The `HEALTHCHECK` directive tells container orchestrators how to verify the container is running correctly. Without it, the orchestrator can only check if the process is alive, not if it is serving traffic.
+
+```dockerfile title="Health check pattern"
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD <health-check-command> || exit 1
+```
+
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| `--interval` | 30s | Check every 30 seconds |
+| `--timeout` | 3s | Fail if the check takes more than 3 seconds |
+| `--start-period` | 10-15s | Grace period for application startup |
+| `--retries` | 3 | Three consecutive failures before marking unhealthy |
+
+The `--start-period` varies by language. Go starts in under a second. Python with Gunicorn takes 5-10 seconds. Bun falls somewhere in between. Set this based on your measured startup time, not a guess.
+
+---
+
+## Trivy Scanning
+
+Trivy scans container images for known vulnerabilities. Run it after every build, before pushing to a registry.
+
+```bash terminal
+brew install trivy
+```
+
+Scan an image:
+
+```bash terminal
+docker build -t bun-api:latest -f services/bun-api/Dockerfile services/bun-api/
+trivy image bun-api:latest
+```
+
+A typical scan output looks like:
+
+```text title="Trivy output"
+bun-api:latest (alpine 3.20)
+=============================
+Total: 0 (UNKNOWN: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
+
+Node.js (node_modules/package-lock.json)
+=========================================
+Total: 2 (UNKNOWN: 0, LOW: 0, MEDIUM: 1, HIGH: 1, CRITICAL: 0)
+
+┌──────────────┬──────────────────┬──────────┬─────────────────┐
+│   Library    │  Vulnerability   │ Severity │ Fixed Version   │
+├──────────────┼──────────────────┼──────────┼─────────────────┤
+│ some-package │ CVE-2024-XXXXX   │ HIGH     │ 2.1.4           │
+│ other-pkg    │ CVE-2024-YYYYY   │ MEDIUM   │ 1.0.3           │
+└──────────────┴──────────────────┴──────────┴─────────────────┘
+```
+
+Set a severity threshold for your CI:
+
+```bash terminal
+trivy image --severity HIGH,CRITICAL --exit-code 1 bun-api:latest
+```
+
+This fails the build if any HIGH or CRITICAL vulnerabilities are found. MEDIUM and LOW get logged but don't block the build. That is the right balance for a startup: fix the dangerous ones immediately, track the rest.
+
+:::tip
+Add Trivy scanning to your pre-push workflow. You'll integrate it into CI in [Part 45](/blog/aws-for-startups/45-github-actions-ci), but scanning locally catches issues before they waste CI minutes.
+:::
+
+---
+
+## AGENT-INSTRUCTIONS.md Addition
+
+Add the Docker section to your `AGENT-INSTRUCTIONS.md`. This brings the file to 71 lines.
+
+```markdown title="AGENT-INSTRUCTIONS.md (append)"
+## Docker
+- Multi-stage builds required for all production images
+- Non-root user required (USER directive)
+- .dockerignore required in every service directory
+- Pin specific image versions, never use :latest
+- Health checks required on all containers
+- Resource limits (CPU/memory) required
+- No secrets in Dockerfile (no ENV with credentials, no COPY of .env files)
+```
+
+These rules catch the six most common agent mistakes with Dockerfiles. When your agent generates a Dockerfile, the verification step checks it against these rules. Single stage? Rejected. Root user? Rejected. `:latest` tag? Rejected.
+
+---
+
+## File Structure
+
+After this post, your service directories look like this:
+
+<FileTree>
+services/
+  bun-api/
+    Dockerfile
+    .dockerignore
+    package.json
+    bun.lockb
+    src/
+      index.ts
+  python-api/
+    Dockerfile
+    .dockerignore
+    pyproject.toml
+    poetry.lock
+    src/
+      main.py
+  go-api/
+    Dockerfile
+    .dockerignore
+    go.mod
+    go.sum
+    cmd/
+      server/
+        main.go
+</FileTree>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Single-stage Dockerfile, root user, `:latest` tags, no `.dockerignore`. Your production container is 1.2 GB, runs as root, and contains your `.env` file in a layer anyone can extract. |
+| ✅ **Right** | Multi-stage build, non-root user, pinned versions, `.dockerignore`, health checks, Trivy scan. Images are 20-250 MB depending on language, run as an unprivileged user, and pass vulnerability scanning. |
+| ❌ **Over** | Distroless images, custom hardened base images, signed image verification, notary integration, for an early-stage app with three services. Adds weeks of setup for a problem you'll have at 100 services, not 3. |
+| 🤖 **Agent Trap** | Agent generates a single-stage Dockerfile with `FROM oven/bun:latest`, runs as root, copies everything including `.env`, has no `.dockerignore`, and no health check. Every Docker anti-pattern in one file. The Docker rules in `AGENT-INSTRUCTIONS.md` catch all six violations. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 40: ECR, Your Private Container Registry**, we push these production images to a private registry. ECR gives you vulnerability scanning, lifecycle policies to prevent image accumulation, and Docker Hub rate limits stop being a deployment risk.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Dockerfiles",
+    tasks: [
+      { text: "Bun Dockerfile uses multi-stage build", syncKey: "part-39-bun-multistage" },
+      { text: "Python Dockerfile uses multi-stage build", syncKey: "part-39-python-multistage" },
+      { text: "Go Dockerfile uses multi-stage build", syncKey: "part-39-go-multistage" },
+      { text: "All Dockerfiles pin specific image versions (no :latest)", syncKey: "part-39-pinned-versions" }
+    ]
+  },
+  {
+    category: "Security",
+    tasks: [
+      { text: "All Dockerfiles use non-root USER directive", syncKey: "part-39-non-root" },
+      { text: ".dockerignore exists in every service directory", syncKey: "part-39-dockerignore" },
+      { text: ".dockerignore excludes .env files", syncKey: "part-39-no-env" },
+      { text: "Trivy scan passes with no CRITICAL vulnerabilities", syncKey: "part-39-trivy-clean" }
+    ]
+  },
+  {
+    category: "Operations",
+    tasks: [
+      { text: "HEALTHCHECK directive in all Dockerfiles", syncKey: "part-39-healthcheck" },
+      { text: "Docker section added to AGENT-INSTRUCTIONS.md (7 lines)", syncKey: "part-39-agent-instructions" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Agent-generated Dockerfiles contain every anti-pattern because Docker tutorials in training data optimize for "works" not "works safely."
+2. Multi-stage builds reduce image size by 4-50x, and the runtime stage should contain zero build tools, zero package managers, and zero dev dependencies.
+3. Non-root user, pinned versions, `.dockerignore`, and health checks are four one-line additions that block entire categories of production incidents.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

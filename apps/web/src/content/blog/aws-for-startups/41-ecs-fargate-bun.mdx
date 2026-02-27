@@ -1,0 +1,552 @@
+---
+title: "ECS Fargate: Bun.js API Without Managing Servers"
+date: "2026-06-12"
+excerpt: "Bun.js API without managing servers. ECS Fargate, the sweet spot between EC2 (manage everything) and Lambda (control nothing)."
+description: "Deploy Bun.js API on ECS Fargate. Task definitions, service configuration, ALB integration, and auto-scaling with serverless containers."
+series: "aws-for-startups"
+seriesPart: 41
+draft: true
+tags: ["aws", "devops", "startup", "ecs", "docker", "terraform", "backend"]
+author: "Chinmay"
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your Bun API runs on an EC2 instance. SSH in, `git pull`, `bun run start`. The instance reboots at 3 AM because AWS needed to patch the underlying hardware. Your API is down until you wake up and restart it. No auto-restart, no health checks, no scaling. You are the orchestrator, and you just slept through a page.
+
+**Time:** About 60 minutes.
+
+**Outcome:** Your Bun.js API running on ECS Fargate with a task definition, service configuration, ALB integration, auto-scaling, deployment circuit breaker, and structured logging to CloudWatch. Zero servers to manage, automatic restarts on failure, and scaling that responds to load.
+
+---
+
+## Why This Matters
+
+You have three compute options on AWS. Each trades control for operational overhead.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["EC2", "ECS Fargate", "Lambda"]} />
+  <ComparisonRow feature="Startup time" EC2="Minutes" ECS_Fargate="30-60 seconds" Lambda="Cold start: 100-500ms" />
+  <ComparisonRow feature="Max runtime" EC2="Unlimited" ECS_Fargate="Unlimited" Lambda="15 minutes" />
+  <ComparisonRow feature="Scaling speed" EC2="Minutes (ASG)" ECS_Fargate="30-90 seconds" Lambda="Instant (Best)" />
+  <ComparisonRow feature="Min cost/month" EC2="~$3.80 (t3.nano)" ECS_Fargate="~$9.40 (0.25 vCPU)" Lambda="Free tier" />
+  <ComparisonRow feature="Server management" EC2="You manage everything" ECS_Fargate="AWS manages servers" Lambda="AWS manages everything" />
+  <ComparisonRow feature="Best for" EC2="Legacy apps, GPUs, custom OS" ECS_Fargate="Long-running APIs (Best)" Lambda="Event-driven, short tasks" />
+</ComparisonTable>
+
+ECS Fargate is the sweet spot for a startup running APIs:
+
+- **No servers.** No AMI updates, no SSH, no "the instance ran out of disk space." AWS manages the underlying infrastructure.
+- **Container control.** Unlike Lambda, you control the runtime, the process, the port, the health check. You run the same Docker image locally and in production.
+- **Right-sized scaling.** Unlike EC2 Auto Scaling Groups (which you set up in [Part 33](/blog/aws-for-startups/33-auto-scaling-groups)), Fargate scales at the task level. You don't provision a whole server for one container.
+
+The tradeoff: Fargate costs roughly 2.5x more per vCPU-hour than an equivalent EC2 instance. For a startup, the operational time savings dwarf the compute cost difference.
+
+---
+
+## What We're Building
+
+- ECS cluster for your application
+- Task definition for the Bun API container
+- ECS service with desired count, deployment configuration, and circuit breaker
+- ALB integration with target group and health checks
+- Auto-scaling policies based on CPU utilization
+- CloudWatch log group for structured container logging
+
+---
+
+## ECS Concepts
+
+Before writing Terraform, understand the hierarchy:
+
+```
+ECS Cluster
+  └── Service (manages desired task count)
+        └── Task (runs one or more containers)
+              └── Container (your Docker image)
+```
+
+- **Cluster:** A logical grouping. With Fargate, the cluster is just a namespace. No EC2 instances to manage.
+- **Task Definition:** A blueprint that describes which container to run, how much CPU and memory to allocate, which ports to expose, and where to send logs.
+- **Service:** Maintains a desired number of running tasks. If a task dies, the service launches a replacement. The service also handles deployments: rolling out new task definitions without downtime.
+- **Task:** A running instance of a task definition. In Fargate, each task gets its own ENI (Elastic Network Interface), its own IP, and its own isolated compute.
+
+---
+
+## Terraform: ECS Cluster
+
+```hcl title="infra/modules/ecs/cluster.tf"
+resource "aws_ecs_cluster" "main" {
+  name = "${var.project}-${var.environment}"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-cluster"
+  })
+}
+
+resource "aws_ecs_cluster_capacity_providers" "fargate" {
+  cluster_name = aws_ecs_cluster.main.name
+
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = 1
+    base              = 1
+  }
+}
+```
+
+`containerInsights` enables CloudWatch Container Insights, which gives you CPU, memory, and network metrics per task without any code changes. The cost is $0.01 per metric per month, negligible for the visibility it provides.
+
+`FARGATE_SPOT` is available for fault-tolerant workloads at 70% discount. For now, we use standard Fargate. You can shift non-critical services to FARGATE_SPOT later.
+
+---
+
+## Terraform: Task Definition
+
+```hcl title="infra/modules/ecs/task-definition.tf"
+resource "aws_ecs_task_definition" "bun_api" {
+  family                   = "${var.project}-${var.environment}-bun-api"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "bun-api"
+      image     = "${var.ecr_repository_url}:${var.image_tag}"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = 3000
+          protocol      = "tcp"
+        }
+      ]
+
+      environment = [
+        { name = "NODE_ENV", value = "production" },
+        { name = "PORT", value = "3000" },
+        { name = "LOG_LEVEL", value = "info" }
+      ]
+
+      secrets = [
+        {
+          name      = "DATABASE_URL"
+          valueFrom = var.database_url_secret_arn
+        }
+      ]
+
+      healthCheck = {
+        command     = ["CMD-SHELL", "bun --eval \"fetch('http://localhost:3000/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))\""]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 15
+      }
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.bun_api.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "bun-api"
+        }
+      }
+    }
+  ])
+
+  tags = merge(var.common_tags, {
+    Name    = "${var.project}-${var.environment}-bun-api"
+    Service = "bun-api"
+  })
+}
+
+resource "aws_cloudwatch_log_group" "bun_api" {
+  name              = "/ecs/${var.project}-${var.environment}/bun-api"
+  retention_in_days = 30
+
+  tags = var.common_tags
+}
+```
+
+Critical settings explained:
+
+- **`cpu = 256` (0.25 vCPU), `memory = 512` (0.5 GB).** This is the smallest Fargate task size. It handles a Bun API serving hundreds of requests per second. Start here. Scale up only when metrics tell you to.
+- **`secrets` block.** Database credentials come from Secrets Manager (set up in [Part 37](/blog/aws-for-startups/37-secrets-manager)), not environment variables. ECS injects them at task startup.
+- **`healthCheck`.** The container-level health check, separate from the ALB health check. ECS uses this to determine if a task is healthy.
+- **`retention_in_days = 30`.** Logs older than 30 days get deleted. Without this, CloudWatch Logs grow forever.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents allocate 2 vCPU and 4 GB memory as the default Fargate task size because that is a common example in documentation. For a Bun API handling typical startup traffic (10-100 requests per second), 0.25 vCPU and 0.5 GB is sufficient. The agent's default costs 8x more per task, and at 3 tasks minimum, that is $75/month versus $9.40/month for the same workload.
+
+**What catches it:** Always check the `cpu` and `memory` values in task definitions during review. The AGENT-INSTRUCTIONS.md cost constraints make this a required review item.
+
+</Alert>
+
+---
+
+## IAM Roles
+
+ECS needs two IAM roles:
+
+1. **Execution role:** Used by the ECS agent to pull images from ECR, send logs to CloudWatch, and retrieve secrets. This is infrastructure-level access.
+2. **Task role:** Used by your application code inside the container. This is application-level access (S3, DynamoDB, SQS, etc.).
+
+```hcl title="infra/modules/ecs/iam.tf"
+# Execution role: ECS agent uses this
+resource "aws_iam_role" "ecs_execution" {
+  name = "${var.project}-${var.environment}-ecs-execution"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_policy" "ecs_secrets" {
+  name = "${var.project}-${var.environment}-ecs-secrets"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue"
+      ]
+      Resource = var.secret_arns
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_secrets" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = aws_iam_policy.ecs_secrets.arn
+}
+
+# Task role: your application code uses this
+resource "aws_iam_role" "ecs_task" {
+  name = "${var.project}-${var.environment}-ecs-task"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = var.common_tags
+}
+```
+
+The execution role gets `AmazonECSTaskExecutionRolePolicy` (AWS managed) plus a scoped policy for your specific secrets. The task role starts empty. You add permissions as your application needs them: S3 access for uploads, SQS for queues, etc.
+
+---
+
+## Terraform: ECS Service
+
+```hcl title="infra/modules/ecs/service.tf"
+resource "aws_ecs_service" "bun_api" {
+  name            = "${var.project}-${var.environment}-bun-api"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.bun_api.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  network_configuration {
+    subnets          = var.private_subnet_ids
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.bun_api.arn
+    container_name   = "bun-api"
+    container_port   = 3000
+  }
+
+  depends_on = [aws_lb_listener_rule.bun_api]
+
+  tags = merge(var.common_tags, {
+    Name    = "${var.project}-${var.environment}-bun-api"
+    Service = "bun-api"
+  })
+
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+}
+
+resource "aws_security_group" "ecs_tasks" {
+  name_prefix = "${var.project}-${var.environment}-ecs-tasks-"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [var.alb_security_group_id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-ecs-tasks"
+  })
+}
+```
+
+Key decisions:
+
+- **`desired_count = 2`.** Two tasks across two AZs. One task can handle the load, but two gives you availability during deployments and AZ failures.
+- **`deployment_circuit_breaker` with `rollback = true`.** If a new deployment fails health checks, ECS automatically rolls back to the previous working version. Without this, a bad deployment takes down your service until you manually intervene.
+- **`deployment_minimum_healthy_percent = 100`, `deployment_maximum_percent = 200`.** During deployment, ECS starts new tasks before stopping old ones. Zero downtime.
+- **`assign_public_ip = false`.** Tasks run in private subnets (set up in [Part 20](/blog/aws-for-startups/20-vpc-fundamentals)). Traffic comes through the ALB.
+- **`ignore_changes = [desired_count]`.** Auto-scaling adjusts the count. Terraform should not override it.
+
+---
+
+## ALB Integration
+
+The ALB you created in [Part 22](/blog/aws-for-startups/22-alb-load-balancer) routes traffic to your ECS tasks via a target group.
+
+```hcl title="infra/modules/ecs/alb.tf"
+resource "aws_lb_target_group" "bun_api" {
+  name        = "${var.project}-${var.environment}-bun-api"
+  port        = 3000
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    path                = "/health"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+    matcher             = "200"
+  }
+
+  deregistration_delay = 30
+
+  tags = merge(var.common_tags, {
+    Name    = "${var.project}-${var.environment}-bun-api-tg"
+    Service = "bun-api"
+  })
+}
+
+resource "aws_lb_listener_rule" "bun_api" {
+  listener_arn = var.alb_listener_arn
+  priority     = 100
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.bun_api.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/api/v1/*"]
+    }
+  }
+}
+```
+
+- **`target_type = "ip"`.** Required for Fargate. Unlike EC2 target groups that register instances, Fargate target groups register IP addresses (one per task ENI).
+- **`deregistration_delay = 30`.** When a task is being replaced, the ALB gives it 30 seconds to finish in-flight requests before removing it. Default is 300 seconds, which is too long for a startup API.
+- **Path-based routing.** `/api/v1/*` goes to the Bun API. In [Part 42](/blog/aws-for-startups/42-ecs-fargate-python-go), you'll add rules for Python and Go services on different paths.
+
+---
+
+## Auto-Scaling
+
+```hcl title="infra/modules/ecs/autoscaling.tf"
+resource "aws_appautoscaling_target" "bun_api" {
+  max_capacity       = 10
+  min_capacity       = 2
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.bun_api.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "bun_api_cpu" {
+  name               = "${var.project}-${var.environment}-bun-api-cpu"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.bun_api.resource_id
+  scalable_dimension = aws_appautoscaling_target.bun_api.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.bun_api.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value       = 70.0
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 60
+  }
+}
+```
+
+- **Min 2, max 10.** Two tasks is the floor for availability. Ten handles significant traffic spikes. Adjust the max based on your traffic patterns after you have real data from [Part 44](/blog/aws-for-startups/44-k6-containers).
+- **Target CPU: 70%.** When average CPU across tasks exceeds 70%, ECS adds tasks. Below 70%, it removes them (respecting the minimum).
+- **Scale-out cooldown: 60 seconds.** React quickly to load spikes.
+- **Scale-in cooldown: 300 seconds.** Wait 5 minutes before removing tasks. Prevents flapping (scaling up and down repeatedly).
+
+---
+
+## Structured Logging
+
+Your Bun API should output structured JSON logs. ECS ships these to CloudWatch Logs via the `awslogs` driver configured in the task definition.
+
+```typescript title="services/bun-api/src/logger.ts"
+interface LogEntry {
+  level: string;
+  message: string;
+  timestamp: string;
+  service: string;
+  traceId?: string;
+  requestId?: string;
+  [key: string]: unknown;
+}
+
+export function log(level: string, message: string, meta: Record<string, unknown> = {}) {
+  const entry: LogEntry = {
+    level,
+    message,
+    timestamp: new Date().toISOString(),
+    service: "bun-api",
+    ...meta,
+  };
+  console.log(JSON.stringify(entry));
+}
+
+export const logger = {
+  info: (msg: string, meta?: Record<string, unknown>) => log("info", msg, meta),
+  warn: (msg: string, meta?: Record<string, unknown>) => log("warn", msg, meta),
+  error: (msg: string, meta?: Record<string, unknown>) => log("error", msg, meta),
+};
+```
+
+Structured logs let you query CloudWatch Logs Insights:
+
+```text title="CloudWatch Logs Insights query"
+fields @timestamp, level, message, traceId
+| filter level = "error"
+| sort @timestamp desc
+| limit 20
+```
+
+Without structured logs, you get unformatted text that is nearly impossible to search at scale.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Running containers on EC2 with `docker run` and manual restarts. No health checks, no auto-scaling, no rolling deployments. You are the orchestrator. |
+| ✅ **Right** | ECS Fargate with ALB, auto-scaling (min 2, max 10, target CPU 70%), deployment circuit breaker, structured logging, and 0.25 vCPU / 0.5 GB per task. |
+| ❌ **Over** | EKS (Kubernetes) for a handful of services. Adds a control plane ($73/month), kubectl complexity, Helm charts, and a learning curve that takes weeks, not hours. |
+| 🤖 **Agent Trap** | Agent allocates 2 vCPU / 4 GB memory per task "to be safe." With 2 tasks minimum, that is $150/month instead of $19/month. Always check `cpu` and `memory` in task definitions. Start at the smallest size and scale up with data. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 42: ECS Fargate, Python and Go APIs**, we deploy the Python FastAPI and Go services using the same infrastructure pattern. One ALB, path-based routing, three services. The Terraform module you just built is language-agnostic.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Infrastructure",
+    tasks: [
+      { text: "ECS cluster created with Container Insights enabled", syncKey: "part-41-cluster" },
+      { text: "Task definition uses 0.25 vCPU / 0.5 GB (not agent default of 2 vCPU / 4 GB)", syncKey: "part-41-task-size" },
+      { text: "Execution role and task role are separate IAM roles", syncKey: "part-41-iam-roles" },
+      { text: "Secrets injected via Secrets Manager, not environment variables", syncKey: "part-41-secrets" }
+    ]
+  },
+  {
+    category: "Deployment",
+    tasks: [
+      { text: "ECS service running with desired count of 2", syncKey: "part-41-service-running" },
+      { text: "Deployment circuit breaker enabled with rollback", syncKey: "part-41-circuit-breaker" },
+      { text: "ALB health checks passing for the target group", syncKey: "part-41-health-checks" },
+      { text: "Auto-scaling configured (min 2, max 10, target CPU 70%)", syncKey: "part-41-autoscaling" }
+    ]
+  },
+  {
+    category: "Operations",
+    tasks: [
+      { text: "CloudWatch log group created with 30-day retention", syncKey: "part-41-logs" },
+      { text: "Structured JSON logging verified in CloudWatch", syncKey: "part-41-structured-logs" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. ECS Fargate eliminates server management while giving you full container control, making it the right default for startup APIs that outgrow Lambda's 15-minute limit.
+2. Start every Fargate task at 0.25 vCPU / 0.5 GB and scale up only when CloudWatch metrics justify it, because the agent's "safe" default of 2 vCPU / 4 GB costs 8x more.
+3. Deployment circuit breaker with automatic rollback is the single most important ECS service setting: it prevents bad deployments from taking down your production API.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

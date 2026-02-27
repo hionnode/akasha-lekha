@@ -1,0 +1,604 @@
+---
+title: "GitHub Actions + OIDC: AWS Access Without Stored Credentials"
+description: "Configure OIDC authentication between GitHub Actions and AWS. No more stored access keys — temporary credentials scoped to each workflow run."
+excerpt: "AWS access without stored credentials. OIDC gives GitHub Actions temporary, scoped AWS credentials, because long-lived secrets in CI are a breach waiting to happen."
+date: "2026-07-02"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ci-cd", "security", "iam"]
+series: "aws-for-startups"
+seriesPart: 46
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your CI pipeline has two AWS access keys stored in GitHub Secrets. They were generated six months ago. Nobody remembers which IAM user they belong to. Nobody has rotated them. The keys have `AdministratorAccess` because "it was easier than figuring out the right permissions." If anyone compromises your GitHub repository, those credentials, or any third-party action that can read secrets, they own your AWS account.
+
+**Time:** About 30 minutes.
+
+**Outcome:** GitHub Actions authenticates to AWS via OIDC with temporary credentials. No stored access keys, no rotation schedule, no secrets to leak. Different IAM roles for preview and production, each scoped to exactly what that workflow needs.
+
+---
+
+## Why This Matters
+
+Long-lived AWS credentials in CI are the second most common source of AWS account compromises, right behind leaked credentials in public repositories. The problem is not just theft. The problem is scope, rotation, and auditability.
+
+Stored access keys have three properties that make them dangerous:
+
+1. **They never expire.** Unless you manually rotate them, the same key works forever. A key generated in January works in December. A key from a developer who left the company works until someone remembers to revoke it.
+
+2. **They are hard to scope.** Most teams give CI keys broad permissions because figuring out the minimum set is tedious. The key that deploys Docker images can also delete S3 buckets, modify IAM policies, and read Secrets Manager values. Blast radius: everything.
+
+3. **They are stored in a system you do not fully control.** GitHub Secrets are encrypted at rest, but every GitHub Action in your workflow can read them. A compromised third-party action, a supply chain attack on a popular action, or a misconfigured workflow can exfiltrate your keys silently.
+
+OIDC solves all three. Credentials are temporary (valid for the duration of one workflow run). Permissions are scoped per workflow via IAM role policies. No secrets are stored in GitHub at all.
+
+---
+
+## What We're Building
+
+- An OIDC identity provider in AWS for GitHub Actions
+- Two IAM roles: one for preview deployments, one for production
+- Terraform modules for the OIDC configuration
+- Updated CI workflow using `aws-actions/configure-aws-credentials` with OIDC
+- Condition keys that restrict which repositories and branches can assume each role
+
+---
+
+## How OIDC Works Between GitHub and AWS
+
+The trust relationship has three participants:
+
+<Alert type="important" title="OIDC Authentication Flow">
+
+```
+┌──────────────┐     1. Request token     ┌──────────────┐
+│   GitHub      │ ──────────────────────► │   GitHub      │
+│   Actions     │ ◄────────────────────── │   OIDC        │
+│   Workflow    │     2. JWT token         │   Provider    │
+└──────┬───────┘                          └──────────────┘
+       │
+       │  3. AssumeRoleWithWebIdentity
+       │     (JWT token + Role ARN)
+       ▼
+┌──────────────┐     4. Verify JWT         ┌──────────────┐
+│   AWS STS     │ ──────────────────────► │   IAM OIDC    │
+│               │ ◄────────────────────── │   Provider    │
+│               │     5. Valid             │   Config      │
+└──────┬───────┘                          └──────────────┘
+       │
+       │  6. Temporary credentials
+       │     (15 min - 1 hour)
+       ▼
+┌──────────────┐
+│   AWS         │
+│   Resources   │
+└──────────────┘
+```
+
+</Alert>
+
+Step by step:
+
+1. Your workflow requests a JWT (JSON Web Token) from GitHub's OIDC provider
+2. GitHub returns a signed token containing claims: repository name, branch, workflow, actor
+3. The workflow sends this token to AWS STS with `AssumeRoleWithWebIdentity`
+4. AWS STS checks the token's signature against the OIDC provider you registered in IAM
+5. If the token is valid and the claims match the role's trust policy conditions, STS returns temporary credentials
+6. The workflow uses these temporary credentials for the rest of the job
+
+The temporary credentials expire when the job finishes. No cleanup needed. No rotation. No secrets.
+
+---
+
+## Setting Up the OIDC Provider in AWS
+
+First, register GitHub's OIDC provider in your AWS account. This tells AWS to trust tokens signed by GitHub.
+
+```hcl title="infra/modules/github-oidc/main.tf"
+data "tls_certificate" "github" {
+  url = "https://token.actions.githubusercontent.com/.well-known/openid-configuration"
+}
+
+resource "aws_iam_openid_connect_provider" "github" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.github.certificates[0].sha1_fingerprint]
+
+  tags = {
+    Name        = "${var.project}-github-oidc"
+    Environment = var.environment
+    Project     = var.project
+    Owner       = var.owner
+    ManagedBy   = "terraform"
+  }
+}
+```
+
+```hcl title="infra/modules/github-oidc/variables.tf"
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "owner" {
+  description = "Owner tag value"
+  type        = string
+}
+
+variable "github_org" {
+  description = "GitHub organization or username"
+  type        = string
+}
+
+variable "github_repo" {
+  description = "GitHub repository name"
+  type        = string
+}
+```
+
+You create the OIDC provider once per AWS account. Multiple roles can reference the same provider. If you have multiple repositories deploying to the same account, they share this provider but get different IAM roles with different permissions.
+
+---
+
+## Creating the IAM Roles
+
+Each role has two parts: a trust policy (who can assume this role) and a permissions policy (what the role can do). The trust policy is where OIDC conditions live.
+
+### Preview Deployment Role
+
+The preview role is used by PR workflows. It can push Docker images to ECR, update ECS services in the staging cluster, and manage preview-specific resources. It cannot touch production.
+
+```hcl title="infra/modules/github-oidc/preview-role.tf"
+resource "aws_iam_role" "github_preview" {
+  name = "${var.project}-github-preview"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.github.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:${var.github_org}/${var.github_repo}:pull_request"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name        = "${var.project}-github-preview"
+    Environment = var.environment
+    Project     = var.project
+    Owner       = var.owner
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_iam_role_policy" "github_preview" {
+  name = "${var.project}-github-preview-policy"
+  role = aws_iam_role.github_preview.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ECRPush"
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:PutImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload"
+        ]
+        Resource = "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${var.project}-*"
+      },
+      {
+        Sid    = "ECSPreview"
+        Effect = "Allow"
+        Action = [
+          "ecs:UpdateService",
+          "ecs:DescribeServices",
+          "ecs:DescribeTaskDefinition",
+          "ecs:RegisterTaskDefinition"
+        ]
+        Resource = "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${var.project}-staging/*"
+      },
+      {
+        Sid    = "ECRAuth"
+        Effect = "Allow"
+        Action = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PassRole"
+        Effect = "Allow"
+        Action = "iam:PassRole"
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project}-ecs-task-*"
+      }
+    ]
+  })
+}
+
+data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
+```
+
+The critical line is the `Condition` block in the trust policy. `StringLike` with `repo:org/repo:pull_request` means only pull request workflows from your specific repository can assume this role. A fork, a different repository, or a workflow running on the `main` branch cannot.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate OIDC trust policies with `"token.actions.githubusercontent.com:sub" = "repo:${var.github_org}/${var.github_repo}:*"`. That trailing wildcard matches any branch, any event type, and any workflow. A PR from a fork, a workflow dispatch, or a cron job all get the same role. The whole point of OIDC conditions is scoping access by context. A wildcard in the subject claim defeats that.
+
+**What catches it:** The `sub` condition in the trust policy must specify either `:pull_request`, `:ref:refs/heads/main`, or another specific pattern. Any `Condition` with `:*` on the subject claim needs justification.
+
+</Alert>
+
+### Production Deployment Role
+
+The production role is more permissive (it can deploy to production ECS) but more restrictive in who can assume it (only the `main` branch after merge).
+
+```hcl title="infra/modules/github-oidc/production-role.tf"
+resource "aws_iam_role" "github_production" {
+  name = "${var.project}-github-production"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.github.arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+            "token.actions.githubusercontent.com:sub" = "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name        = "${var.project}-github-production"
+    Environment = "production"
+    Project     = var.project
+    Owner       = var.owner
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_iam_role_policy" "github_production" {
+  name = "${var.project}-github-production-policy"
+  role = aws_iam_role.github_production.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ECRPush"
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:PutImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload"
+        ]
+        Resource = "arn:aws:ecr:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:repository/${var.project}-*"
+      },
+      {
+        Sid    = "ECSProductionDeploy"
+        Effect = "Allow"
+        Action = [
+          "ecs:UpdateService",
+          "ecs:DescribeServices",
+          "ecs:DescribeTaskDefinition",
+          "ecs:RegisterTaskDefinition",
+          "ecs:DescribeTasks",
+          "ecs:ListTasks"
+        ]
+        Resource = [
+          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:service/${var.project}-production/*",
+          "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task-definition/${var.project}-*"
+        ]
+      },
+      {
+        Sid    = "ECRAuth"
+        Effect = "Allow"
+        Action = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PassRole"
+        Effect = "Allow"
+        Action = "iam:PassRole"
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project}-ecs-task-*"
+      }
+    ]
+  })
+}
+```
+
+Notice the production trust policy uses `StringEquals` instead of `StringLike`. The subject must be exactly `repo:org/repo:ref:refs/heads/main`. No wildcards. Only code that has been merged to `main` can trigger production deployments. A PR cannot assume the production role.
+
+### Module Outputs
+
+```hcl title="infra/modules/github-oidc/outputs.tf"
+output "preview_role_arn" {
+  description = "ARN of the IAM role for preview deployments"
+  value       = aws_iam_role.github_preview.arn
+}
+
+output "production_role_arn" {
+  description = "ARN of the IAM role for production deployments"
+  value       = aws_iam_role.github_production.arn
+}
+
+output "oidc_provider_arn" {
+  description = "ARN of the GitHub OIDC provider"
+  value       = aws_iam_openid_connect_provider.github.arn
+}
+```
+
+---
+
+## Terraform Module Structure
+
+<FileTree>
+infra/
+  modules/
+    github-oidc/
+      main.tf
+      variables.tf
+      outputs.tf
+      preview-role.tf
+      production-role.tf
+</FileTree>
+
+Apply the module:
+
+```bash terminal
+cd infra/environments/production
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+<TerminalOutput title="terraform apply">
+
+```
+aws_iam_openid_connect_provider.github: Creating...
+aws_iam_openid_connect_provider.github: Creation complete after 2s
+aws_iam_role.github_preview: Creating...
+aws_iam_role.github_production: Creating...
+aws_iam_role.github_preview: Creation complete after 1s
+aws_iam_role.github_production: Creation complete after 1s
+aws_iam_role_policy.github_preview: Creating...
+aws_iam_role_policy.github_production: Creating...
+
+Apply complete! Resources: 5 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+preview_role_arn = "arn:aws:iam::123456789012:role/shipfast-github-preview"
+production_role_arn = "arn:aws:iam::123456789012:role/shipfast-github-production"
+```
+
+</TerminalOutput>
+
+---
+
+## Updating the CI Workflow
+
+Replace stored credentials with OIDC in your workflow. The `aws-actions/configure-aws-credentials` action handles the token exchange.
+
+```yaml title=".github/workflows/ci.yml"
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write  # Required for OIDC
+
+env:
+  AWS_REGION: us-east-1
+  PREVIEW_ROLE_ARN: arn:aws:iam::123456789012:role/shipfast-github-preview
+  PRODUCTION_ROLE_ARN: arn:aws:iam::123456789012:role/shipfast-github-production
+```
+
+The `id-token: write` permission is mandatory. Without it, the workflow cannot request a JWT from GitHub's OIDC provider.
+
+In any job that needs AWS access, add the credentials step:
+
+```yaml title=".github/workflows/ci.yml"
+  build:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: [test, lint, scan]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (Preview)
+        if: github.event_name == 'pull_request'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.PREVIEW_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (Production)
+        if: github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.PRODUCTION_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+```
+
+Two conditional steps select the correct role based on the event type. PR workflows get the preview role. Main branch pushes get the production role. The OIDC trust policies enforce this at the AWS level regardless of what the workflow YAML says, but explicit conditions in the workflow make intent clear to anyone reading the file.
+
+---
+
+## Removing Stored Credentials
+
+After verifying OIDC works, remove the stored credentials from GitHub Secrets:
+
+:::steps
+1. Run a test PR to confirm OIDC authentication succeeds
+2. Check the workflow logs for `Authenticated with OIDC` in the configure-aws-credentials step
+3. Go to **Settings > Secrets and variables > Actions**
+4. Delete `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+5. Revoke the IAM access keys in the AWS console: **IAM > Users > ci-user > Security credentials > Access keys > Deactivate/Delete**
+:::
+
+Do not skip step 5. Deleting the secret from GitHub does not revoke the key. The key still works until you deactivate it in AWS. If those keys were ever committed to a branch, present in logs, or accessible to a third-party action, they need to be revoked immediately.
+
+:::tip
+After removing stored credentials, search your repository for any workflow that still references `secrets.AWS_ACCESS_KEY_ID`. A global search for `secrets.AWS_` catches references you might have missed.
+:::
+
+---
+
+## Verifying the Setup
+
+Run this verification in a test PR to confirm everything works:
+
+```yaml title=".github/workflows/verify-oidc.yml"
+name: Verify OIDC
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/shipfast-github-preview
+          aws-region: us-east-1
+
+      - name: Verify identity
+        run: aws sts get-caller-identity
+```
+
+The output should show the assumed role ARN, not an IAM user:
+
+<TerminalOutput title="aws sts get-caller-identity">
+
+```json
+{
+    "UserId": "AROA3XFRBF23EXAMPLE:GitHubActions",
+    "Account": "123456789012",
+    "Arn": "arn:aws:sts::123456789012:assumed-role/shipfast-github-preview/GitHubActions"
+}
+```
+
+</TerminalOutput>
+
+If you see an IAM user ARN instead of an assumed role ARN, the workflow is still using stored credentials. Check the `permissions` block for `id-token: write` and verify the role ARN is correct.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Stored AWS access keys in GitHub Secrets. No rotation. `AdministratorAccess` because "it was easier." One compromised action exfiltrates your keys, and the attacker has full account access for as long as the keys exist. |
+| ✅ **Right** | OIDC with two scoped IAM roles: preview (PR workflows, staging only) and production (main branch, production ECS). No stored secrets. Credentials last one workflow run. Trust policy conditions restrict by repository and event type. |
+| ❌ **Over** | Separate IAM roles for every workflow job, custom STS assume-role chains with external ID requirements, session tags for every job, and a dedicated AWS account for CI with cross-account role assumptions. All of this is valid at scale but adds weeks of setup for a 3-person team. |
+| 🤖 **Agent Trap** | Agent generates the stored-credentials pattern (`aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}`) because it is vastly more common in training data than OIDC. OIDC for GitHub Actions became GA in late 2022, but most tutorials, Stack Overflow answers, and open-source workflows still use stored keys. Always check for `role-to-assume` in the credentials step. If it uses `aws-access-key-id`, the agent fell back to the old pattern. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 47: Production Deployment Pipeline**, we build the full deployment flow from merge to production. Agent-assisted deployment with staging validation, an explain summary that tells you exactly what changed and what risks exist, and a non-negotiable human approval gate before anything touches production. Plus Recalibration Checkpoint 3, where you review your agent workflow, scorecard, and pipeline data from the CI/CD phase.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "OIDC Configuration",
+    tasks: [
+      { text: "GitHub OIDC provider registered in AWS IAM", syncKey: "part-46-oidc-provider" },
+      { text: "Preview IAM role created with pull_request condition", syncKey: "part-46-preview-role" },
+      { text: "Production IAM role created with refs/heads/main condition", syncKey: "part-46-production-role" },
+      { text: "Trust policies use specific subject conditions (no wildcard :*)", syncKey: "part-46-no-wildcard" }
+    ]
+  },
+  {
+    category: "Workflow Integration",
+    tasks: [
+      { text: "CI workflow has id-token: write permission", syncKey: "part-46-id-token" },
+      { text: "aws-actions/configure-aws-credentials uses role-to-assume", syncKey: "part-46-role-assume" },
+      { text: "Conditional steps select preview vs production role", syncKey: "part-46-conditional-role" }
+    ]
+  },
+  {
+    category: "Security Cleanup",
+    tasks: [
+      { text: "Stored AWS credentials removed from GitHub Secrets", syncKey: "part-46-secrets-removed" },
+      { text: "IAM access keys deactivated/deleted in AWS console", syncKey: "part-46-keys-revoked" },
+      { text: "No workflow references secrets.AWS_ACCESS_KEY_ID", syncKey: "part-46-no-stored-refs" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "Agent-generated Terraform reviewed for wildcard trust conditions", syncKey: "part-46-agent-reviewed" },
+      { text: "OIDC verification test passed in a PR workflow", syncKey: "part-46-verify-oidc" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. OIDC eliminates stored AWS credentials in CI entirely: temporary credentials, scoped to one workflow run, automatically expired, nothing to rotate.
+2. Scope IAM roles per environment: the preview role can only deploy to staging, the production role can only be assumed from the `main` branch.
+3. Agents generate the stored-credentials pattern by default because OIDC is newer and less represented in training data, so always check for `role-to-assume` instead of `aws-access-key-id`.
+4. Removing secrets from GitHub is not enough: you must also deactivate the access keys in AWS IAM, because the keys remain valid until explicitly revoked.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

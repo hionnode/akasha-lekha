@@ -1,0 +1,432 @@
+---
+title: "K6 Load Testing: Containers Under Pressure"
+date: "2026-06-24"
+excerpt: "Containers under pressure. K6 load testing against ECS Fargate, comparing containerized performance to your EC2 baselines."
+description: "Load test your containerized services with K6. Compare EC2 baselines with ECS Fargate performance, identify container-specific bottlenecks."
+series: "aws-for-startups"
+seriesPart: 44
+draft: true
+tags: ["aws", "devops", "startup", "ecs", "testing"]
+author: "Chinmay"
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+You migrated your API from EC2 to ECS Fargate. The health checks pass. The deployment circuit breaker is green. You open the app, click around, everything works. Then a marketing email goes out. Traffic spikes 5x. Your EC2 auto-scaling group would have handled it (you tested that in [Part 34](/blog/aws-for-startups/34-k6-human-judgment)). But Fargate has different scaling characteristics, different startup times, different resource limits. The thresholds you set on EC2 are wrong for containers. Your 5xx rate hits 8% before Fargate finishes scaling.
+
+**Time:** About 45 minutes.
+
+**Outcome:** K6 load tests against your ECS Fargate services with baseline comparisons to EC2 performance, container-specific bottleneck identification, auto-scaling behavior validated under load, and updated p95 latency thresholds calibrated for Fargate.
+
+---
+
+## Why This Matters
+
+In [Part 34](/blog/aws-for-startups/34-k6-human-judgment), you established performance baselines on EC2. Those baselines are specific to EC2: the CPU throttling behavior of t3 instances, the memory limits of the AMI, the network throughput of a specific instance type. None of those characteristics apply to Fargate.
+
+Fargate has its own performance characteristics:
+
+- **Task startup time.** A new Fargate task takes 30-60 seconds to pull the image, start the container, and pass health checks. An EC2 instance takes 2-5 minutes, but it's already running when traffic arrives. Fargate launches new tasks in response to load, so that 30-60 seconds matters.
+- **ENI allocation.** Each Fargate task gets its own Elastic Network Interface. In a busy AZ, ENI allocation can add 5-15 seconds to task startup.
+- **Resource ceilings.** A Fargate task with 0.25 vCPU cannot burst above 0.25 vCPU. EC2 t3 instances have burst credits that let them exceed baseline CPU temporarily. This difference matters during traffic spikes.
+- **Scaling granularity.** EC2 ASG scales whole instances (4-8 containers per instance). Fargate scales individual tasks. More granular, but each scale-out event has the 30-60 second startup penalty.
+
+Your Part 34 thresholds assumed EC2 behavior. Applying them to Fargate without re-baselining means you either alert on normal Fargate behavior (false positives) or miss real problems (false negatives).
+
+---
+
+## What We're Building
+
+- K6 test scripts targeting ECS Fargate services
+- Baseline comparison: EC2 vs Fargate p95 latency, throughput, error rate
+- Container-specific bottleneck tests (ENI allocation, task startup, resource limits)
+- Auto-scaling validation under sustained load
+- Updated thresholds for Fargate services
+
+---
+
+## K6 Tests for Fargate Services
+
+### Basic API Load Test
+
+Start with the same test structure from Part 34, pointed at the Fargate ALB endpoint:
+
+```javascript title="k6/tests/fargate-baseline.js"
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Rate, Trend } from 'k6/metrics';
+
+const errorRate = new Rate('errors');
+const apiLatency = new Trend('api_latency', true);
+
+export const options = {
+  stages: [
+    { duration: '1m', target: 10 },   // Ramp to 10 VUs
+    { duration: '3m', target: 10 },   // Hold at 10 VUs
+    { duration: '1m', target: 50 },   // Ramp to 50 VUs
+    { duration: '3m', target: 50 },   // Hold at 50 VUs
+    { duration: '1m', target: 100 },  // Ramp to 100 VUs
+    { duration: '3m', target: 100 },  // Hold at 100 VUs
+    { duration: '2m', target: 0 },    // Ramp down
+  ],
+  thresholds: {
+    'http_req_duration': ['p(95)<500'],  // Fargate threshold: 500ms
+    'errors': ['rate<0.01'],              // Error rate under 1%
+    'api_latency': ['p(95)<400'],
+  },
+};
+
+const BASE_URL = __ENV.BASE_URL || 'https://api.works-on-my.cloud';
+
+export default function () {
+  // Health check
+  const healthRes = http.get(`${BASE_URL}/api/v1/health`);
+  check(healthRes, {
+    'health status 200': (r) => r.status === 200,
+    'health response time < 100ms': (r) => r.timings.duration < 100,
+  });
+
+  // API endpoint
+  const apiRes = http.get(`${BASE_URL}/api/v1/items`, {
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  check(apiRes, {
+    'api status 200': (r) => r.status === 200,
+    'api response time < 500ms': (r) => r.timings.duration < 500,
+  });
+
+  apiLatency.add(apiRes.timings.duration);
+  errorRate.add(apiRes.status >= 400);
+
+  sleep(1);
+}
+```
+
+Notice the threshold difference: EC2 baseline from Part 34 used `p(95)<200`. Fargate starts at `p(95)<500`. This is intentional. You establish the Fargate baseline first, then tighten thresholds based on actual data.
+
+### Multi-Service Load Test
+
+Test all three services simultaneously to identify resource contention:
+
+```javascript title="k6/tests/fargate-multiservice.js"
+import http from 'k6/http';
+import { check, group, sleep } from 'k6';
+import { Trend } from 'k6/metrics';
+
+const bunLatency = new Trend('bun_api_latency', true);
+const pythonLatency = new Trend('python_api_latency', true);
+const goLatency = new Trend('go_api_latency', true);
+
+export const options = {
+  stages: [
+    { duration: '1m', target: 20 },
+    { duration: '5m', target: 20 },
+    { duration: '1m', target: 50 },
+    { duration: '5m', target: 50 },
+    { duration: '2m', target: 0 },
+  ],
+  thresholds: {
+    'bun_api_latency': ['p(95)<400'],
+    'python_api_latency': ['p(95)<600'],
+    'go_api_latency': ['p(95)<200'],
+  },
+};
+
+const BASE_URL = __ENV.BASE_URL || 'https://api.works-on-my.cloud';
+
+export default function () {
+  group('Bun API', () => {
+    const res = http.get(`${BASE_URL}/api/v1/items`);
+    check(res, { 'bun 200': (r) => r.status === 200 });
+    bunLatency.add(res.timings.duration);
+  });
+
+  group('Python ML API', () => {
+    const res = http.post(`${BASE_URL}/api/ml/predict`, JSON.stringify({
+      input: [1.0, 2.0, 3.0],
+    }), { headers: { 'Content-Type': 'application/json' } });
+    check(res, { 'python 200': (r) => r.status === 200 });
+    pythonLatency.add(res.timings.duration);
+  });
+
+  group('Go Data API', () => {
+    const res = http.get(`${BASE_URL}/api/data/stats`);
+    check(res, { 'go 200': (r) => r.status === 200 });
+    goLatency.add(res.timings.duration);
+  });
+
+  sleep(0.5);
+}
+```
+
+Different p95 targets per service. Go should be fastest (static binary, no garbage collection pauses). Python is slowest (GIL, Gunicorn overhead). Bun falls in between. These are starting points. Your actual data refines them.
+
+---
+
+## Running the Tests
+
+```bash terminal
+# Baseline test against Fargate
+k6 run \
+  -e BASE_URL=https://api.works-on-my.cloud \
+  --out json=results/fargate-baseline.json \
+  k6/tests/fargate-baseline.js
+```
+
+```bash terminal
+# Multi-service test
+k6 run \
+  -e BASE_URL=https://api.works-on-my.cloud \
+  --out json=results/fargate-multiservice.json \
+  k6/tests/fargate-multiservice.js
+```
+
+Export results for comparison:
+
+```bash terminal
+# Generate summary
+k6 run \
+  -e BASE_URL=https://api.works-on-my.cloud \
+  --summary-export=results/fargate-summary.json \
+  k6/tests/fargate-baseline.js
+```
+
+---
+
+## EC2 vs Fargate Comparison
+
+After running the same test suite against both EC2 (Part 34 baselines) and Fargate, you get numbers like these:
+
+<ComparisonTable>
+  <ComparisonHeader columns={["EC2 (t3.small)", "Fargate (0.25 vCPU)"]} />
+  <ComparisonRow feature="p50 latency" EC2__t3_small_="45ms (Best)" Fargate__0_25_vCPU_="62ms" />
+  <ComparisonRow feature="p95 latency" EC2__t3_small_="120ms (Best)" Fargate__0_25_vCPU_="185ms" />
+  <ComparisonRow feature="p99 latency" EC2__t3_small_="250ms (Best)" Fargate__0_25_vCPU_="340ms" />
+  <ComparisonRow feature="Max throughput" EC2__t3_small_="850 req/s" Fargate__0_25_vCPU_="420 req/s" />
+  <ComparisonRow feature="Scale-out time" EC2__t3_small_="3-5 minutes" Fargate__0_25_vCPU_="30-60 seconds (Best)" />
+  <ComparisonRow feature="Error rate at 100 VU" EC2__t3_small_="0.1%" Fargate__0_25_vCPU_="0.3%" />
+  <ComparisonRow feature="Cost/month (2 tasks)" EC2__t3_small_="$15.18" Fargate__0_25_vCPU_="$18.80" />
+</ComparisonTable>
+
+The numbers tell a clear story: EC2 wins on raw performance. Fargate wins on scaling speed. For a startup, the scaling speed matters more than the latency difference, because 185ms p95 is still fast enough for any API, and recovering from a traffic spike in 60 seconds versus 5 minutes prevents customer-facing outages.
+
+The 0.3% error rate at 100 VUs on Fargate is likely caused by task startup during scaling. New tasks need 30-60 seconds to become healthy. During that window, the existing tasks handle all traffic, occasionally exceeding their CPU limit. The fix is not to over-provision. The fix is to pre-warm by setting a higher minimum task count before planned traffic events (marketing emails, product launches).
+
+---
+
+## Container-Specific Bottlenecks
+
+### Task Resource Limits
+
+Unlike EC2 t3 instances that can burst above their baseline CPU, Fargate tasks have hard CPU limits. A 0.25 vCPU task gets exactly 0.25 vCPU. Under sustained load, this cap creates consistent p99 latency spikes.
+
+Test for this:
+
+```javascript title="k6/tests/fargate-cpu-limit.js"
+import http from 'k6/http';
+import { check } from 'k6';
+import { Trend } from 'k6/metrics';
+
+const p99Latency = new Trend('p99_latency', true);
+
+export const options = {
+  scenarios: {
+    sustained_load: {
+      executor: 'constant-vus',
+      vus: 30,
+      duration: '10m',
+    },
+  },
+  thresholds: {
+    'p99_latency': ['p(99)<800'],
+  },
+};
+
+const BASE_URL = __ENV.BASE_URL || 'https://api.works-on-my.cloud';
+
+export default function () {
+  const res = http.get(`${BASE_URL}/api/v1/items`);
+  check(res, { 'status 200': (r) => r.status === 200 });
+  p99Latency.add(res.timings.duration);
+}
+```
+
+Run this for 10 minutes at steady load. If p99 latency spikes periodically (every 30-60 seconds), the task is hitting its CPU limit. The solution: increase to 0.5 vCPU, or add more tasks at 0.25 vCPU. More tasks at the same size is usually better because it improves availability without changing the per-task cost ratio.
+
+### Auto-Scaling Under Load
+
+Test how Fargate auto-scaling responds to a traffic ramp:
+
+```javascript title="k6/tests/fargate-scaling.js"
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { Counter } from 'k6/metrics';
+
+const errors = new Counter('errors');
+
+export const options = {
+  scenarios: {
+    ramp_up: {
+      executor: 'ramping-vus',
+      startVUs: 5,
+      stages: [
+        { duration: '2m', target: 5 },    // Warm up
+        { duration: '1m', target: 50 },   // Ramp
+        { duration: '5m', target: 50 },   // Sustained (scaling should trigger)
+        { duration: '1m', target: 100 },  // Ramp higher
+        { duration: '5m', target: 100 },  // Sustained (more scaling)
+        { duration: '3m', target: 0 },    // Ramp down
+      ],
+    },
+  },
+  thresholds: {
+    'errors': ['count<50'],
+    'http_req_duration': ['p(95)<600'],
+  },
+};
+
+const BASE_URL = __ENV.BASE_URL || 'https://api.works-on-my.cloud';
+
+export default function () {
+  const res = http.get(`${BASE_URL}/api/v1/items`);
+
+  const isError = !check(res, {
+    'status 200': (r) => r.status === 200,
+    'latency < 600ms': (r) => r.timings.duration < 600,
+  });
+
+  if (isError) {
+    errors.add(1);
+  }
+
+  sleep(0.5);
+}
+```
+
+While the test runs, watch the ECS service task count:
+
+```bash terminal
+watch -n 5 "aws ecs describe-services \
+  --cluster shipfast-dev \
+  --services shipfast-dev-bun-api \
+  --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount}'"
+```
+
+You should see:
+
+1. At 50 VUs: CPU exceeds 70% target, desired count increases from 2 to 3-4
+2. 30-60 seconds later: running count matches desired count
+3. At 100 VUs: desired count increases further to 5-7
+4. During ramp-down: after 5-minute cooldown, tasks scale back
+
+If scaling does not trigger, check your CloudWatch alarm threshold and the auto-scaling policy's `scale_out_cooldown`. If scaling triggers but tasks take longer than 90 seconds to become healthy, check your Docker image size (smaller images pull faster) and application startup time.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents copy EC2 performance thresholds for container tests. Your Part 34 thresholds of p95 < 200ms were calibrated for t3.small instances with burst capability. Applying those to Fargate tasks with 0.25 vCPU hard limits means every test fails, and you waste time "debugging" performance issues that are actually normal Fargate behavior.
+
+**What catches it:** The `## Performance` section in AGENT-INSTRUCTIONS.md states "p95 latency targets must be documented here." Different infrastructure types (EC2, Fargate, Lambda) get different documented targets.
+
+</Alert>
+
+---
+
+## Updated Thresholds for Fargate
+
+Based on load test results, update your performance thresholds:
+
+```markdown title="AGENT-INSTRUCTIONS.md (update Performance section)"
+## Performance
+- Load test thresholds set by HUMANS, not agents
+- p95 latency targets:
+  - EC2 (t3.small): p95 < 200ms
+  - Fargate (0.25 vCPU): p95 < 400ms (Bun), p95 < 600ms (Python), p95 < 200ms (Go)
+  - Lambda: p95 < 1000ms (includes cold start)
+- Cost-per-request calculated from actual load test + billing data
+```
+
+These are starting points from your first load test. After two weeks of production traffic, refine them with real percentiles from CloudWatch. The numbers should get tighter as you optimize, not stay at the first baseline forever.
+
+---
+
+## Cost-Per-Request Comparison
+
+K6 gives you throughput. AWS billing gives you cost. Combine them:
+
+| Metric | EC2 (t3.small) | Fargate (0.25 vCPU, 2 tasks) |
+|--------|----------------|------------------------------|
+| Monthly cost | $15.18 | $18.80 |
+| Requests/second (sustained) | 850 | 420 |
+| Requests/month (at 50% avg util) | ~1.1 billion | ~544 million |
+| Cost per million requests | $0.014 | $0.035 |
+
+Fargate costs 2.5x more per request. But Fargate also auto-scales to handle spikes without pre-provisioning, restarts failed tasks automatically, and requires zero server management. For a startup where engineering time costs $100-200/hour, the $3.62/month difference is paid for by the first 2 minutes of saved operational time.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No load testing of containerized services. You assume Fargate performs the same as EC2 because "it's running the same code." Different infrastructure means different performance characteristics. |
+| ✅ **Right** | K6 against Fargate with EC2 baseline comparison, auto-scaling behavior validated, container-specific bottlenecks identified, and updated p95 thresholds documented in AGENT-INSTRUCTIONS.md. |
+| ❌ **Over** | Continuous load testing in production, chaos engineering (killing tasks mid-test), cross-region load testing, for a startup handling 100 requests per second. Run load tests before deployments and after infrastructure changes, not continuously. |
+| 🤖 **Agent Trap** | Agent uses EC2 thresholds (p95 < 200ms) for container tests because it copies from Part 34 without adjusting for the different infrastructure. Every test fails. The agent suggests increasing Fargate resources to 2 vCPU / 4 GB to "fix" the performance issue, costing 8x more per task. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 45: GitHub Actions CI**, we build the CI pipeline that runs on every push: lint, typecheck, test, build, Docker image build, Trivy scan, and K6 smoke tests. The containerized services you built in Parts 39-44 need automated quality gates before they reach production.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Load Testing",
+    tasks: [
+      { text: "K6 baseline test completed against Fargate services", syncKey: "part-44-baseline" },
+      { text: "Multi-service test completed (Bun, Python, Go simultaneously)", syncKey: "part-44-multiservice" },
+      { text: "EC2 vs Fargate comparison documented with actual numbers", syncKey: "part-44-comparison" }
+    ]
+  },
+  {
+    category: "Container Performance",
+    tasks: [
+      { text: "CPU limit behavior tested under sustained load", syncKey: "part-44-cpu-limit" },
+      { text: "Auto-scaling behavior observed during traffic ramp", syncKey: "part-44-scaling-test" },
+      { text: "Task startup time measured (target: under 60 seconds)", syncKey: "part-44-startup-time" }
+    ]
+  },
+  {
+    category: "Thresholds",
+    tasks: [
+      { text: "Fargate-specific p95 thresholds documented in AGENT-INSTRUCTIONS.md", syncKey: "part-44-thresholds" },
+      { text: "Separate thresholds per service (Bun, Python, Go)", syncKey: "part-44-per-service" },
+      { text: "Cost-per-request calculated for Fargate", syncKey: "part-44-cost-per-request" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Containerized services have fundamentally different performance characteristics than EC2: no CPU burst credits, different scaling speed, ENI allocation overhead. Re-baseline with K6 after any infrastructure migration.
+2. Fargate auto-scaling takes 30-60 seconds per task, compared to EC2 ASG's 3-5 minutes per instance. Faster scale-out, but each task is smaller, so you need more scaling events for the same capacity increase.
+3. Your Part 34 thresholds do not apply to Fargate. Use load test data to set infrastructure-specific targets, document them in AGENT-INSTRUCTIONS.md, and refuse to let agents set performance thresholds for you.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

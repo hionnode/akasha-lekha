@@ -1,0 +1,505 @@
+---
+title: "GitHub Actions CI: The Pipeline That Guards Your Main Branch"
+description: "Complete CI pipeline with GitHub Actions. Test, lint, build, scan, and deploy preview — every PR verified before merge."
+excerpt: "The pipeline that guards your main branch. GitHub Actions CI with every quality gate: tests, linting, builds, security scans, preview deploys."
+date: "2026-06-28"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "ci-cd"]
+series: "aws-for-startups"
+seriesPart: 45
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+You merge a PR on Friday afternoon. The tests passed locally on your machine. Monday morning, staging is broken. The Python service imports a module that was never installed in the Docker image because your local environment had it cached from a different project. Nobody ran the full test suite in a clean environment. Nobody built the Docker images from scratch. Nobody checked whether the Terraform modules still validate after the refactor. "It worked on my machine" is not a deployment strategy.
+
+**Time:** About 45 minutes.
+
+**Outcome:** A complete GitHub Actions CI pipeline that runs tests, linting, Docker builds, security scans, and preview deploys on every PR. No code reaches `main` without passing every gate.
+
+---
+
+## Why This Matters
+
+You have been running quality checks locally since [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality). Pre-commit hooks catch formatting issues, linting errors, and secrets before they hit a branch. That is necessary but not sufficient.
+
+Pre-commit hooks run on your machine with your dependencies, your cached layers, your environment variables. They run fast because they skip expensive checks. They skip E2E tests because those take 3 minutes. They skip Docker builds because those take 5 minutes. They skip security scans because those need network access. The result: a false sense of safety.
+
+CI runs in a clean environment every time. No caches from yesterday. No environment variables leaking from your shell profile. No "oh, I forgot to commit that file." If it passes CI, it works in a clean room. If it does not pass CI, something is broken regardless of what your laptop says.
+
+Three rules for CI in this series:
+
+1. **CI is the only arbiter of merge-readiness.** If CI passes, the code is eligible for review. If CI fails, nothing else matters.
+2. **CI must be fast enough that developers do not skip it.** A 30-minute pipeline trains people to push without waiting. A 10-minute pipeline trains people to watch and fix.
+3. **CI treats agent PRs and human PRs identically.** The pipeline does not care who wrote the code. It checks the same gates, runs the same tests, enforces the same standards.
+
+---
+
+## What We're Building
+
+- A GitHub Actions CI workflow with parallel jobs for test, lint, build, and scan
+- Matrix strategy for multi-language testing (Bun, Python, Go)
+- Docker image builds with layer caching
+- Security scanning with Trivy and gitleaks
+- Terraform validation for infrastructure changes
+- Preview environment trigger from the pipeline built in [Part 43](/blog/aws-for-startups/43-full-stack-preview)
+
+---
+
+## Workflow Architecture
+
+Before writing any YAML, understand the dependency graph. CI jobs should run in parallel when they do not depend on each other and sequentially when they do.
+
+<Alert type="important" title="CI Pipeline Architecture">
+
+```
+                    ┌──────────────┐
+                    │   Trigger    │
+                    │  (PR to main)│
+                    └──────┬───────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+              ▼            ▼            ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │   Test   │ │   Lint   │ │   Scan   │
+        │ (matrix) │ │          │ │ (Trivy,  │
+        │          │ │          │ │ gitleaks)│
+        └────┬─────┘ └────┬─────┘ └────┬─────┘
+             │            │            │
+             └────────────┼────────────┘
+                          │
+                          ▼
+                   ┌──────────────┐
+                   │    Build     │
+                   │ (Docker, TF) │
+                   └──────┬───────┘
+                          │
+                          ▼
+                   ┌──────────────┐
+                   │   Preview    │
+                   │   Deploy     │
+                   └──────────────┘
+```
+
+</Alert>
+
+Test, lint, and scan run in parallel. Build waits for all three to pass. Preview deploy waits for build. Total wall-clock time for a typical PR: 8-12 minutes instead of 25+ minutes if everything ran sequentially.
+
+---
+
+## The Workflow File
+
+Create the CI workflow at the root of your repository:
+
+<FileTree>
+.github/
+  workflows/
+    ci.yml
+    preview-deploy.yml
+</FileTree>
+
+```yaml title=".github/workflows/ci.yml"
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  NODE_VERSION: "20"
+  BUN_VERSION: "1.1"
+  PYTHON_VERSION: "3.12"
+  GO_VERSION: "1.22"
+```
+
+The `concurrency` block is critical. When you push a new commit to a PR that already has CI running, it cancels the in-progress run and starts a new one. Without this, you get queued runs burning minutes on outdated code.
+
+---
+
+## Test Job: Matrix Strategy
+
+The test job uses a matrix to run tests across all three services in parallel. Each service gets its own runner, its own environment, and its own runtime.
+
+```yaml title=".github/workflows/ci.yml"
+jobs:
+  test:
+    name: Test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api-bun
+            runtime: bun
+            working-directory: services/api-bun
+            test-command: bun test
+          - service: api-python
+            runtime: python
+            working-directory: services/api-python
+            test-command: pytest --tb=short -q
+          - service: api-go
+            runtime: go
+            working-directory: services/api-go
+            test-command: go test ./... -v -count=1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Setup Python
+        if: matrix.runtime == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Setup Go
+        if: matrix.runtime == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.working-directory }}
+        run: |
+          if [ "${{ matrix.runtime }}" = "bun" ]; then
+            bun install --frozen-lockfile
+          elif [ "${{ matrix.runtime }}" = "python" ]; then
+            pip install -r requirements.txt -r requirements-dev.txt
+          fi
+
+      - name: Run tests
+        working-directory: ${{ matrix.working-directory }}
+        run: ${{ matrix.test-command }}
+```
+
+`fail-fast: false` is intentional. When one service's tests fail, you still want to see the results from the other services. Fixing three test failures in one push is faster than fixing them one at a time across three CI runs.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate CI workflows with all steps in a single job: install Node, install Python, install Go, run all tests sequentially. This turns a 4-minute parallel run into a 12-minute sequential one. The agent does this because a single job is simpler to reason about, but CI cost is measured in wall-clock time, not job count. Parallel jobs cost the same on GitHub's free tier (2,000 minutes/month for private repos) and finish 3x faster.
+
+**What catches it:** Review the workflow file for `strategy.matrix`. If there is no matrix and the project has multiple services, the agent collapsed everything into one job.
+
+</Alert>
+
+---
+
+## Lint Job: Code Quality Gates
+
+The lint job runs formatting checks, linting, and Terraform validation in a single job. These are fast checks that share a common pattern: read files, check rules, report violations.
+
+```yaml title=".github/workflows/ci.yml"
+  lint:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: ESLint
+        run: bun run lint
+
+      - name: Prettier check
+        run: bun run format:check
+
+      - name: Python lint
+        working-directory: services/api-python
+        run: |
+          pip install ruff
+          ruff check .
+          ruff format --check .
+
+      - name: Go lint
+        working-directory: services/api-go
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          golangci-lint run
+
+      - name: Terraform validate
+        working-directory: infra
+        run: |
+          terraform init -backend=false
+          terraform validate
+          terraform fmt -check -recursive
+```
+
+Notice `terraform init -backend=false`. In CI, you do not need a real backend connection to validate syntax and formatting. Skipping the backend saves 10-15 seconds and avoids needing AWS credentials in the lint job.
+
+---
+
+## Security Scan Job
+
+Security scanning catches vulnerabilities before they reach `main`. Two tools cover the critical surface area: Trivy for container and dependency vulnerabilities, gitleaks for secrets accidentally committed to the repository.
+
+```yaml title=".github/workflows/ci.yml"
+  scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: infra/
+          framework: terraform
+          soft_fail: false
+          output_format: cli
+```
+
+`fetch-depth: 0` on the checkout step gives gitleaks the full git history. Without it, gitleaks only scans the latest commit and misses secrets that were committed and then "deleted" (they are still in the history).
+
+:::tip
+Trivy's `exit-code: 1` makes the job fail when HIGH or CRITICAL vulnerabilities are found. Start with this threshold. If you set it to MEDIUM, you will drown in noise from transitive dependencies you cannot control. Fix HIGH and CRITICAL first, then tighten the threshold.
+:::
+
+---
+
+## Build Job: Docker Images and Artifacts
+
+The build job constructs Docker images for each service. It depends on test, lint, and scan passing first. No point building images from code that fails validation.
+
+```yaml title=".github/workflows/ci.yml"
+  build:
+    name: Build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: [test, lint, scan]
+    strategy:
+      matrix:
+        include:
+          - service: api-bun
+            context: services/api-bun
+            dockerfile: services/api-bun/Dockerfile
+          - service: api-python
+            context: services/api-python
+            dockerfile: services/api-python/Dockerfile
+          - service: api-go
+            context: services/api-go
+            dockerfile: services/api-go/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: ${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.service }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: 1
+```
+
+`cache-from: type=gha` and `cache-to: type=gha,mode=max` use GitHub Actions' built-in cache for Docker layers. First builds take 3-5 minutes. Subsequent builds with layer caching take 30-60 seconds. This is the single biggest CI speed optimization for Docker-based projects.
+
+The build step also runs Trivy against the built image. Filesystem scanning (in the scan job) catches dependency vulnerabilities in lockfiles. Image scanning catches vulnerabilities in the base image, installed system packages, and the runtime environment. You need both.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents set `push: true` on the Docker build step in CI, pushing images to ECR on every PR. This means untested, unreviewed code gets image tags in your registry. An accidental deployment could pull a PR image instead of a release image.
+
+**What catches it:** The build job should have `push: false` for PR workflows. Images only get pushed after merge to `main` (the production deployment pipeline in [Part 47](/blog/aws-for-startups/47-production-deployment)).
+
+</Alert>
+
+---
+
+## Preview Deploy Job
+
+The preview deploy job triggers the preview environment workflow you built in [Part 43](/blog/aws-for-startups/43-full-stack-preview). It only runs on PRs, not on pushes to `main`.
+
+```yaml title=".github/workflows/ci.yml"
+  preview:
+    name: Preview Deploy
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy preview
+        uses: ./.github/actions/preview-deploy
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ github.sha }}
+
+      - name: Comment preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Preview Environment\n\nDeployed to: https://preview-${context.issue.number}.your-domain.com\n\nCommit: ${context.sha.slice(0, 7)}`
+            })
+```
+
+The `if: github.event_name == 'pull_request'` condition prevents preview deploys on pushes to `main`. Main branch pushes trigger the production deployment pipeline instead.
+
+---
+
+## Putting It All Together
+
+The complete workflow runs five jobs. Here is the timing breakdown for a typical PR:
+
+| Job | Runs After | Duration | Parallel With |
+|-----|-----------|----------|---------------|
+| Test (3 matrix) | Trigger | 2-4 min | Lint, Scan |
+| Lint | Trigger | 1-2 min | Test, Scan |
+| Scan | Trigger | 2-3 min | Test, Lint |
+| Build (3 matrix) | Test + Lint + Scan | 1-3 min | Nothing |
+| Preview | Build | 2-3 min | Nothing |
+
+**Total wall-clock time: 8-12 minutes.** The same checks run sequentially would take 20-30 minutes.
+
+### Monitoring CI Health
+
+Track these metrics from the start. You do not need a dashboard yet, but keep mental notes:
+
+- **CI pass rate:** Below 80% means either tests are flaky or code quality is slipping
+- **Average CI duration:** Creeping above 15 minutes means caches are stale or you added a slow step
+- **Agent vs human pass rate:** If agent PRs fail CI at a higher rate, your AGENT-INSTRUCTIONS.md needs new rules
+
+:::note
+**Coming in [Part 47](/blog/aws-for-startups/47-production-deployment):** Your Scorecard gets four new panels tracking PR-to-production lead time, deployment frequency, rollback rate, and post-deploy error rate. CI pass rate feeds directly into those metrics.
+:::
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No CI pipeline. Manual testing on laptops. "It works on my machine" is the deployment criteria. A dependency update breaks production at 11 PM because nobody ran the full test suite since last week. |
+| ✅ **Right** | Parallel CI with test, lint, build, and scan. Matrix strategy for multi-service repos. Docker layer caching for speed. Security scanning on both filesystem and built images. Preview deploy on PRs. 8-12 minute total runtime. |
+| ❌ **Over** | 30-minute CI pipeline with redundant checks, full E2E against a staging database, manual approval gates on every PR, separate workflows for every file path, and a Slack notification for each individual job. |
+| 🤖 **Agent Trap** | Agent generates a CI workflow with all jobs running sequentially in a single runner. Install three runtimes, run all tests in order, build all images in order. The agent optimizes for simplicity (one YAML file, linear flow), not for speed. A 10-minute parallel pipeline becomes a 30-minute sequential one. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 46: GitHub Actions + OIDC**, we eliminate stored AWS credentials from your CI pipeline entirely. OIDC gives GitHub Actions temporary, scoped IAM credentials for each workflow run. No more access keys sitting in GitHub Secrets, no more rotation schedules, no more "who has access to that secret?"
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Pipeline Structure",
+    tasks: [
+      { text: "CI workflow file exists at .github/workflows/ci.yml", syncKey: "part-45-workflow-exists" },
+      { text: "Workflow triggers on pull_request and push to main", syncKey: "part-45-triggers" },
+      { text: "Concurrency group configured to cancel in-progress runs", syncKey: "part-45-concurrency" }
+    ]
+  },
+  {
+    category: "Quality Gates",
+    tasks: [
+      { text: "Test job runs with matrix strategy for each service", syncKey: "part-45-test-matrix" },
+      { text: "Lint job validates code formatting, linting, and Terraform", syncKey: "part-45-lint-job" },
+      { text: "Security scan runs gitleaks, Trivy, and Checkov", syncKey: "part-45-scan-job" },
+      { text: "Build job depends on test, lint, and scan passing", syncKey: "part-45-build-depends" }
+    ]
+  },
+  {
+    category: "Docker & Deploy",
+    tasks: [
+      { text: "Docker builds use GitHub Actions cache for layers", syncKey: "part-45-docker-cache" },
+      { text: "Built images are scanned with Trivy before any push", syncKey: "part-45-image-scan" },
+      { text: "Preview deploy only triggers on pull requests, not main pushes", syncKey: "part-45-preview-pr-only" }
+    ]
+  },
+  {
+    category: "Agent Workflow",
+    tasks: [
+      { text: "CI workflow reviewed for parallel vs sequential job structure", syncKey: "part-45-parallel-review" },
+      { text: "Agent-generated workflow checked against AGENT-INSTRUCTIONS.md", syncKey: "part-45-agent-reviewed" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Parallelize independent CI jobs: test, lint, and scan do not need to wait for each other, and parallel execution cuts pipeline duration by 60%.
+2. Docker layer caching (`cache-from: type=gha`) is the single biggest speed improvement for container-based CI, turning 5-minute builds into 30-second builds.
+3. Every PR gets the same quality gates regardless of author, because the pipeline does not know (or care) whether a human or an agent wrote the code.
+4. CI passing means the code is syntactically valid, builds cleanly, and has no known vulnerabilities, but it does not mean the code is correct, cost-effective, or well-designed.
+5. A CI pipeline that takes longer than 15 minutes trains developers to push without waiting, which defeats the entire purpose of having CI.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

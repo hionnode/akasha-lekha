@@ -1,0 +1,465 @@
+---
+title: "Database Operations: Backups, Monitoring, and Maintenance"
+description: "RDS operational patterns: automated backups, Performance Insights, maintenance windows, and the monitoring queries that catch problems before users do."
+excerpt: "Backups, monitoring, and maintenance. RDS operations that keep your database healthy, because restoring from backup should not be your first backup test."
+date: "2026-05-24"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "rds", "database"]
+series: "aws-for-startups"
+seriesPart: 36
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your RDS instance has been running for three months. Automated backups happen every night. You have never looked at them. You have never tested a restore. Then your application pushes a migration that drops a column it should not have dropped. You need to restore to 10 minutes ago. You open the RDS console, click "Restore to point in time," and realize you have no idea which subnet group to select, which parameter group to attach, or how long this will take. You spend 45 minutes figuring it out while your users see blank fields where their data used to be.
+
+**Time:** About 40 minutes.
+
+**Outcome:** A tested backup-restore procedure you can execute in under 10 minutes, CloudWatch alarms for connection count and storage utilization, Performance Insights queries identifying your slowest SQL, and a maintenance window scheduled outside peak hours.
+
+---
+
+## Why This Matters
+
+Deploying a database is step one. Operating it is everything after. Most startups nail the deployment (Terraform makes it straightforward) and then ignore operations until something breaks. The three failure modes are predictable:
+
+1. **Backups exist but nobody has ever restored one.** Automated backups give you confidence, not capability. A backup you have never tested is a backup you do not know works.
+
+2. **Performance degrades gradually.** Your queries take 50ms at launch, 200ms at month three, 800ms at month six. Nobody notices because the degradation is incremental. Users notice. They just stop using the product instead of telling you.
+
+3. **Maintenance happens whether you schedule it or not.** AWS applies mandatory security patches. If you have no maintenance window configured, AWS picks one for you. That window might land during your busiest hour.
+
+---
+
+## What We're Building
+
+- A documented backup and restore procedure, tested on your actual database
+- CloudWatch alarms for: connection count > 80% of max, free storage < 20%, CPU > 80%
+- Performance Insights dashboard for identifying slow queries
+- A scheduled maintenance window outside peak hours
+- A quarterly restore test reminder in your operational runbook
+
+---
+
+## Backup Strategy
+
+RDS provides two backup mechanisms: automated backups and manual snapshots. They serve different purposes.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Automated Backups", "Manual Snapshots"]} />
+  <ComparisonRow feature="Trigger" Automated_Backups="Daily, during backup window" Manual_Snapshots="On-demand or before risky operations" />
+  <ComparisonRow feature="Retention" Automated_Backups="1-35 days (you set it)" Manual_Snapshots="Until you delete them" />
+  <ComparisonRow feature="Point-in-Time" Automated_Backups="Yes, to any second within retention" Manual_Snapshots="No, snapshot time only" />
+  <ComparisonRow feature="Cost" Automated_Backups="Free up to DB size (Best)" Manual_Snapshots="$0.095/GB-month" />
+  <ComparisonRow feature="Use Case" Automated_Backups="Daily safety net" Manual_Snapshots="Before migrations, major changes" />
+</ComparisonTable>
+
+Automated backups are already configured from [Part 35](/blog/aws-for-startups/35-rds-postgres) with 7-day retention in production and 3-day retention in dev. Point-in-time recovery lets you restore to any second within that retention window.
+
+Manual snapshots are for deliberate checkpoints. Take one before running a migration that alters table schemas, before upgrading the engine version, or before any change you cannot easily reverse. The snapshot persists until you explicitly delete it, regardless of the automated backup retention period.
+
+### Taking a Manual Snapshot
+
+```bash terminal
+aws rds create-db-snapshot \
+  --db-instance-identifier shipfast-prod-postgres \
+  --db-snapshot-identifier shipfast-prod-pre-migration-2026-05-24
+```
+
+Name your snapshots descriptively. `shipfast-prod-pre-migration-2026-05-24` tells you exactly what state it captures and when. `my-snapshot-1` does not.
+
+### Restore Procedure
+
+This is the procedure you will follow when you need to restore. Read it now, before you need it. Practice it on your dev instance.
+
+:::steps
+1. Identify the target time (the moment before the bad change)
+2. Restore to a new RDS instance (you cannot restore in-place)
+3. Verify the restored data is correct
+4. Update your application to point to the new instance
+5. Delete the old instance (after confirming the new one works)
+:::
+
+```bash terminal
+aws rds restore-db-instance-to-point-in-time \
+  --source-db-instance-identifier shipfast-dev-postgres \
+  --target-db-instance-identifier shipfast-dev-postgres-restored \
+  --restore-time "2026-05-24T10:30:00Z" \
+  --db-instance-class db.t3.micro \
+  --db-subnet-group-name shipfast-dev-db-subnet \
+  --vpc-security-group-ids sg-0abc123 \
+  --no-publicly-accessible
+```
+
+The restored instance takes 5-15 minutes to become available, depending on the database size. During this time, you are operating on the original database. Plan for the gap.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate restore commands that forget the subnet group, security group, or parameter group. The restore creates an instance with default settings: public subnet, default security group, default parameter group. You now have a publicly accessible database with no custom tuning, and you might not notice for hours.
+
+Always specify `--db-subnet-group-name`, `--vpc-security-group-ids`, and `--db-parameter-group-name` in restore commands. Your AGENT-INSTRUCTIONS.md networking rules catch the public subnet issue, but security group and parameter group mismatches slip through.
+
+</Alert>
+
+### Testing Your Restore (Do This Now)
+
+Do not wait for an emergency. Run the restore procedure on your dev instance today:
+
+```bash terminal
+# Step 1: Create a restore from 1 hour ago
+aws rds restore-db-instance-to-point-in-time \
+  --source-db-instance-identifier shipfast-dev-postgres \
+  --target-db-instance-identifier shipfast-dev-restore-test \
+  --restore-time "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" \
+  --db-instance-class db.t3.micro \
+  --db-subnet-group-name shipfast-dev-db-subnet \
+  --vpc-security-group-ids sg-0abc123 \
+  --no-publicly-accessible
+
+# Step 2: Wait for it to become available
+aws rds wait db-instance-available \
+  --db-instance-identifier shipfast-dev-restore-test
+
+# Step 3: Connect and verify data
+psql "postgresql://app_admin:PASSWORD@shipfast-dev-restore-test.abc123.us-east-1.rds.amazonaws.com:5432/app?sslmode=require" \
+  -c "SELECT count(*) FROM users;"
+
+# Step 4: Clean up
+aws rds delete-db-instance \
+  --db-instance-identifier shipfast-dev-restore-test \
+  --skip-final-snapshot
+```
+
+If the row count matches what you expect, your backups work. If the command fails at any step, you have a problem to fix now, not during an incident.
+
+Schedule this test quarterly. Put it in your calendar. A backup you have never restored from is a hope, not a strategy.
+
+---
+
+## Performance Insights
+
+Performance Insights is already enabled from [Part 35](/blog/aws-for-startups/35-rds-postgres) (free for 7-day retention). It answers three questions that matter:
+
+1. **Which queries consume the most CPU?** These are your optimization targets.
+2. **What are the wait events?** If queries are waiting on locks, I/O, or CPU, the bottleneck is different and the fix is different.
+3. **When did performance change?** A sudden spike in query time correlates with a deployment, a traffic increase, or a missing index.
+
+### Viewing Top Queries
+
+```bash terminal
+aws pi get-resource-metrics \
+  --service-type RDS \
+  --identifier db-ABC123XYZ \
+  --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.sql","Limit":5}}]' \
+  --start-time "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --period-in-seconds 60
+```
+
+The `db.load.avg` metric shows the average number of active sessions. If this exceeds your vCPU count, queries are waiting for CPU. The `GroupBy` clause breaks the load down by SQL statement, so you see which queries contribute the most.
+
+For the console view: open RDS in the AWS Console, select your instance, click the **Performance Insights** tab. The top SQL table shows your heaviest queries with their average latency, calls per second, and rows examined.
+
+### The Queries Worth Optimizing
+
+Not every slow query needs optimization. Focus on queries that are:
+
+- **Frequent and slow.** A query that runs 1,000 times per minute at 50ms each is consuming 50 seconds of CPU per minute. Reducing it to 10ms saves 40 seconds per minute of database capacity.
+- **Slow and user-facing.** A query that takes 2 seconds on every page load affects every user. A batch job that takes 2 seconds once per night does not.
+- **Missing indexes.** The most common fix. If `pg_stat_statements` shows a query scanning millions of rows to return 10, an index likely solves it.
+
+The pg_stat_statements extension (enabled in [Part 35](/blog/aws-for-startups/35-rds-postgres)) provides detailed stats. Connect to your database and run:
+
+```sql title="Top queries by total time"
+SELECT
+  queryid,
+  calls,
+  round(total_exec_time::numeric, 2) AS total_ms,
+  round(mean_exec_time::numeric, 2) AS avg_ms,
+  round((100 * total_exec_time / sum(total_exec_time) OVER ())::numeric, 2) AS pct,
+  query
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 10;
+```
+
+This gives you the top 10 queries by total execution time. The `pct` column shows what percentage of total database time each query consumes. Fix the top 3 and you typically eliminate 60-80% of your database load.
+
+---
+
+## CloudWatch Monitoring
+
+RDS publishes metrics to CloudWatch automatically. You need alarms, not dashboards. Dashboards require someone to look at them. Alarms tell you when something needs attention.
+
+### Connection Count Alarm
+
+Your db.t3.micro allows approximately 60 connections. Your db.t3.small allows approximately 120. If you hit the limit, new connections are rejected and your application returns errors.
+
+```hcl title="infra/modules/rds/monitoring.tf"
+resource "aws_cloudwatch_metric_alarm" "rds_connections" {
+  alarm_name          = "${var.project}-${var.environment}-rds-connections"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "DatabaseConnections"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = var.instance_class == "db.t3.micro" ? 48 : 96
+  alarm_description   = "RDS connection count exceeds 80% of max"
+  alarm_actions       = [var.sns_topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.main.identifier
+  }
+
+  tags = {
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+```
+
+The threshold is 80% of max connections. At 80%, you have enough headroom for a traffic spike but get warned before connections start failing.
+
+### Free Storage Alarm
+
+Storage autoscaling (configured in Part 35 with `max_allocated_storage`) prevents outages, but you want to know when storage is growing faster than expected.
+
+```hcl title="infra/modules/rds/monitoring.tf"
+resource "aws_cloudwatch_metric_alarm" "rds_storage" {
+  alarm_name          = "${var.project}-${var.environment}-rds-storage"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "FreeStorageSpace"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = var.allocated_storage * 1073741824 * 0.2
+  alarm_description   = "RDS free storage below 20%"
+  alarm_actions       = [var.sns_topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.main.identifier
+  }
+
+  tags = {
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+```
+
+The threshold is 20% of allocated storage in bytes (CloudWatch reports FreeStorageSpace in bytes). At 20%, you have time to investigate before autoscaling kicks in or storage runs out.
+
+### CPU Utilization Alarm
+
+```hcl title="infra/modules/rds/monitoring.tf"
+resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
+  alarm_name          = "${var.project}-${var.environment}-rds-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  alarm_description   = "RDS CPU utilization exceeds 80% for 15 minutes"
+  alarm_actions       = [var.sns_topic_arn]
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.main.identifier
+  }
+
+  tags = {
+    Environment = var.environment
+    Project     = var.project
+    ManagedBy   = "terraform"
+  }
+}
+```
+
+Three evaluation periods of 5 minutes means the alarm triggers after 15 minutes of sustained high CPU. This filters out brief spikes from migrations or batch jobs while catching genuine capacity issues.
+
+---
+
+## Maintenance Windows
+
+RDS applies mandatory patches during the maintenance window. If you do not configure one, AWS assigns a random 30-minute window. That window might land at your busiest hour.
+
+The maintenance window from [Part 35](/blog/aws-for-startups/35-rds-postgres) is set to `sun:04:00-sun:05:00` UTC. Adjust this for your timezone and traffic patterns:
+
+- **If your users are in the US:** Sunday 4:00-5:00 UTC is Saturday 11 PM - midnight Eastern. Low traffic for most B2B applications.
+- **If your users are in India:** Sunday 4:00-5:00 UTC is Sunday 9:30-10:30 AM IST. Potentially busy. Shift to Monday 22:00-23:00 UTC (Monday 3:30-4:30 AM IST).
+- **If your users are global:** Pick the window when your analytics show the lowest traffic. There is no perfect time for a global audience.
+
+Maintenance during this window can include:
+- Minor version upgrades (if `auto_minor_version_upgrade = true`)
+- OS patches
+- Hardware maintenance (rare, requires brief downtime)
+
+For Multi-AZ deployments, maintenance applies to the standby first, then fails over, then applies to the old primary. Downtime is typically under 60 seconds. For single-AZ, expect 5-30 minutes of downtime during version upgrades.
+
+:::tip
+Check pending maintenance actions before they surprise you. Run this weekly or add it to your Monday morning checklist.
+:::
+
+```bash terminal
+aws rds describe-pending-maintenance-actions \
+  --output table
+```
+
+If maintenance is pending, you can apply it manually during a time you control instead of waiting for the window:
+
+```bash terminal
+aws rds apply-pending-maintenance-action \
+  --resource-identifier arn:aws:rds:us-east-1:123456789012:db:shipfast-prod-postgres \
+  --apply-action system-update \
+  --opt-in-type immediate
+```
+
+---
+
+## Disaster Recovery Runbook
+
+Create a simple disaster recovery document for your database. This is not enterprise DR planning. This is a one-page reference you can follow at 3 AM when your brain is not working well.
+
+```markdown title="docs/runbook/rds-disaster-recovery.md"
+# RDS Disaster Recovery Runbook
+
+## Scenario 1: Bad Migration (Data Corruption)
+
+1. Identify the exact time of the bad migration from deploy logs
+2. Restore to point-in-time (2 minutes before the migration):
+   ```
+   aws rds restore-db-instance-to-point-in-time \
+     --source-db-instance-identifier shipfast-prod-postgres \
+     --target-db-instance-identifier shipfast-prod-postgres-restored \
+     --restore-time "YYYY-MM-DDTHH:MM:SSZ" \
+     --db-instance-class db.t3.small \
+     --db-subnet-group-name shipfast-prod-db-subnet \
+     --vpc-security-group-ids sg-PROD_SG_ID \
+     --no-publicly-accessible
+   ```
+3. Wait for instance to become available (~10-15 min)
+4. Verify restored data is correct
+5. Update application DATABASE_URL to new instance endpoint
+6. Monitor for errors
+7. Delete old instance after 24 hours of stable operation
+
+## Scenario 2: Instance Failure (Multi-AZ)
+
+- RDS handles this automatically
+- Failover takes 60-120 seconds
+- Application reconnects automatically (if using connection pooling)
+- No action needed unless failover does not complete
+
+## Scenario 3: Instance Failure (Single-AZ, Dev)
+
+1. Check if RDS auto-recovers (it usually does within 10 min)
+2. If not, restore from latest automated backup:
+   ```
+   aws rds restore-db-instance-from-db-snapshot \
+     --db-instance-identifier shipfast-dev-postgres-restored \
+     --db-snapshot-identifier rds:shipfast-dev-postgres-YYYY-MM-DD-HH-MM \
+     --db-instance-class db.t3.micro \
+     --db-subnet-group-name shipfast-dev-db-subnet \
+     --vpc-security-group-ids sg-DEV_SG_ID \
+     --no-publicly-accessible
+   ```
+3. Accept data loss since last backup window
+
+## Key Information
+
+- Prod instance: shipfast-prod-postgres
+- Dev instance: shipfast-dev-postgres
+- Subnet group (prod): shipfast-prod-db-subnet
+- Subnet group (dev): shipfast-dev-db-subnet
+- Security group (prod): sg-PROD_SG_ID
+- Security group (dev): sg-DEV_SG_ID
+- SNS topic for alerts: arn:aws:sns:us-east-1:123456789012:shipfast-alerts
+```
+
+Replace the placeholder IDs with your actual values. Print this page. Keep it somewhere accessible when you are not at your computer.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Default backup settings (1-day retention), no CloudWatch alarms, no maintenance window configured, never tested a restore. You discover your backup strategy does not work during the incident that requires it. |
+| ✅ **Right** | 7-day backup retention in production, CloudWatch alarms on connections, storage, and CPU. Performance Insights enabled. Maintenance window outside peak hours. Quarterly restore test on dev. A one-page DR runbook with actual instance IDs. |
+| ❌ **Over** | Cross-region read replicas, continuous WAL archiving to S3, 35-day backup retention, automated chaos engineering that randomly kills the database monthly, and a 40-page disaster recovery plan with escalation matrices for a 3-person team. |
+| 🤖 **Agent Trap** | Agent generates Terraform for backups and monitoring but never creates a restore test procedure. You have backup configuration in code and zero confidence that a restore will work. The agent treats backup config as a checkbox, not an operational capability. Add "backup restore tested" to your quarterly ops checklist, not just your Terraform. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 37: Secrets Manager**, we eliminate the hardcoded database password from terraform.tfvars. Secrets Manager stores the credentials, a Lambda function rotates them automatically, and your application retrieves them at runtime. The password you set in [Part 35](/blog/aws-for-startups/35-rds-postgres) becomes the last credential you manage manually.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Backups",
+    tasks: [
+      { text: "Automated backup retention is 7 days in production", syncKey: "part-36-backup-retention" },
+      { text: "Manual snapshot taken before testing restore", syncKey: "part-36-manual-snapshot" },
+      { text: "Point-in-time restore tested on dev instance", syncKey: "part-36-restore-tested" },
+      { text: "Restored instance verified with correct data", syncKey: "part-36-restore-verified" },
+      { text: "Test restore instance cleaned up (deleted)", syncKey: "part-36-restore-cleanup" }
+    ]
+  },
+  {
+    category: "Monitoring",
+    tasks: [
+      { text: "CloudWatch alarm for connection count > 80% of max", syncKey: "part-36-alarm-connections" },
+      { text: "CloudWatch alarm for free storage < 20%", syncKey: "part-36-alarm-storage" },
+      { text: "CloudWatch alarm for CPU > 80% sustained", syncKey: "part-36-alarm-cpu" },
+      { text: "All alarms send to SNS topic", syncKey: "part-36-alarm-sns" }
+    ]
+  },
+  {
+    category: "Performance",
+    tasks: [
+      { text: "Performance Insights enabled and accessible in console", syncKey: "part-36-perf-insights" },
+      { text: "pg_stat_statements extension active (can query top queries)", syncKey: "part-36-pg-stat" }
+    ]
+  },
+  {
+    category: "Operations",
+    tasks: [
+      { text: "Maintenance window set outside peak hours", syncKey: "part-36-maintenance-window" },
+      { text: "DR runbook created with actual instance IDs", syncKey: "part-36-runbook" },
+      { text: "Quarterly restore test scheduled in calendar", syncKey: "part-36-quarterly-test" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. A backup you have never restored from is not a backup. Test your restore procedure on dev quarterly, and keep the commands in a runbook you can follow at 3 AM.
+2. Performance Insights with pg_stat_statements shows you exactly which queries consume the most database time, and it is free for 7-day retention.
+3. Maintenance windows happen whether you schedule them or not. Pick a time when your traffic is lowest, or AWS picks one for you.
+4. Three CloudWatch alarms (connections, storage, CPU) catch 90% of RDS issues before they become user-facing incidents.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
