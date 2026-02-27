@@ -1,0 +1,696 @@
+---
+title: "User Uploads to S3: Presigned URLs and Direct Uploads"
+description: "Implement secure user file uploads with S3 presigned URLs. Direct browser-to-S3 uploads, size limits, content type validation, and lifecycle policies."
+excerpt: "Presigned URLs and direct uploads. Secure file uploads without routing everything through your server, because your API shouldn't be a file proxy."
+date: "2026-03-08"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "s3", "terraform", "frontend"]
+series: "AWS From Zero to Production"
+seriesPart: 16
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import ComparisonTable from '../../../components/blog/guide/ComparisonTable.astro';
+import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.astro';
+import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
+
+Your users need to upload profile pictures. The naive approach: the browser sends the file to your API, your API receives the entire file into memory, then your API uploads it to S3. Every byte flows through your server twice. At 100 concurrent uploads of 5MB each, your API needs 500MB of memory just for file buffering. Your Lambda hits the 6MB payload limit. Your EC2 instance runs out of memory and starts swapping.
+
+The right approach: the browser uploads directly to S3. Your API's only job is generating a presigned URL, which takes 5ms and zero memory. The file never touches your server.
+
+**Time:** About 40 minutes.
+
+**Outcome:** Secure direct-to-S3 uploads with presigned URLs, content type validation, size limits, lifecycle policies for cleanup, and the CORS configuration that makes browser-to-S3 uploads actually work.
+
+---
+
+## Why This Matters
+
+File uploads are one of those features that seems simple until you deploy it. The server-proxied approach works on localhost with small files. It fails in production under real load. The table explains why.
+
+<ComparisonTable>
+  <ComparisonHeader columns={["Server Proxy", "Presigned URL"]} />
+  <ComparisonRow feature="Memory usage" Server_Proxy="File size x concurrent uploads" Presigned_URL="~0 (Best)" />
+  <ComparisonRow feature="Bandwidth cost" Server_Proxy="Double (upload to server + server to S3)" Presigned_URL="Single (browser to S3) (Best)" />
+  <ComparisonRow feature="Upload speed" Server_Proxy="Limited by server throughput" Presigned_URL="Direct to S3 (Best)" />
+  <ComparisonRow feature="Lambda compatible" Server_Proxy="No (6MB payload limit)" Presigned_URL="Yes (Best)" />
+  <ComparisonRow feature="Server complexity" Server_Proxy="Multipart parsing, temp files, streaming" Presigned_URL="One API call (Best)" />
+  <ComparisonRow feature="Progress tracking" Server_Proxy="Server-side only" Presigned_URL="Browser-native XMLHttpRequest" />
+</ComparisonTable>
+
+The presigned URL pattern wins on every dimension except one: familiarity. Most developers learn file uploads by handling multipart form data on the server. Presigned URLs require a mental model shift. Your server does not handle files. Your server generates permission slips. The browser handles files.
+
+---
+
+## Design: The Presigned URL Pattern
+
+<Alert type="important" title="Presigned URL Upload Flow">
+
+```
+┌─────────────┐     1. Request URL     ┌─────────────┐
+│             │ ─────────────────────▶  │             │
+│   Browser   │                         │   Your API  │
+│             │  ◀─────────────────────  │             │
+│             │     2. Presigned URL     │             │
+└──────┬──────┘                         └─────────────┘
+       │
+       │  3. PUT file directly to S3
+       │     (using presigned URL)
+       ▼
+┌─────────────────────────────────────────────────────┐
+│                    S3 BUCKET                          │
+│                                                       │
+│  Validates:                                           │
+│  - URL not expired                                    │
+│  - Content-Type matches                               │
+│  - Content-Length within limits                        │
+│  - Signature valid                                    │
+└─────────────────────────────────────────────────────┘
+```
+
+</Alert>
+
+The flow has three steps:
+
+1. **Browser requests a presigned URL** from your API, including the intended filename and content type
+2. **Your API generates a presigned URL** using the AWS SDK and returns it. This takes 5ms. No file data touches your server.
+3. **Browser uploads the file directly to S3** using the presigned URL. S3 validates the signature, content type, and expiration.
+
+The presigned URL is a regular S3 URL with query parameters that encode a temporary signature. Anyone with the URL can upload a file to that specific S3 key, with the constraints you encoded, until the URL expires. This is why expiration, content type, and size limits matter.
+
+---
+
+## Backend: Generating Presigned URLs
+
+Here is the API endpoint that generates presigned URLs. This is all your server does for uploads.
+
+```typescript title="src/api/uploads/presigned-url.ts"
+import {
+  S3Client,
+  PutObjectCommand,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { randomUUID } from 'crypto';
+
+const s3 = new S3Client({ region: process.env.AWS_REGION });
+
+const ALLOWED_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+];
+
+const MAX_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
+const URL_EXPIRATION_SECONDS = 300; // 5 minutes
+
+interface PresignedUrlRequest {
+  filename: string;
+  contentType: string;
+  contentLength: number;
+}
+
+export async function generatePresignedUrl(
+  request: PresignedUrlRequest,
+  userId: string
+) {
+  // Validate content type
+  if (!ALLOWED_TYPES.includes(request.contentType)) {
+    throw new Error(
+      `Invalid content type: ${request.contentType}. ` +
+      `Allowed: ${ALLOWED_TYPES.join(', ')}`
+    );
+  }
+
+  // Validate file size
+  if (request.contentLength > MAX_SIZE_BYTES) {
+    throw new Error(
+      `File too large: ${request.contentLength} bytes. ` +
+      `Maximum: ${MAX_SIZE_BYTES} bytes (5MB)`
+    );
+  }
+
+  // Generate a unique key to prevent overwrites
+  const extension = request.filename.split('.').pop();
+  const key = `uploads/${userId}/${randomUUID()}.${extension}`;
+
+  const command = new PutObjectCommand({
+    Bucket: process.env.UPLOAD_BUCKET,
+    Key: key,
+    ContentType: request.contentType,
+    ContentLength: request.contentLength,
+    Metadata: {
+      'original-filename': request.filename,
+      'uploaded-by': userId,
+    },
+  });
+
+  const url = await getSignedUrl(s3, command, {
+    expiresIn: URL_EXPIRATION_SECONDS,
+  });
+
+  return { url, key };
+}
+```
+
+Key decisions in this code:
+
+**Content type validation happens on the server, not just in the presigned URL.** The presigned URL enforces the content type at S3 level (the upload fails if the content type does not match). But validating on the server first gives you a clear error message instead of a cryptic S3 403.
+
+**Content length validation happens on the server too.** S3 does not enforce content length in presigned URLs by default. You have to validate it before generating the URL and optionally use presigned POST policies for server-side enforcement (covered in the next section).
+
+**The key uses a UUID, not the original filename.** Users upload files called `image.jpg` and `photo.png`. If two users upload `profile.jpg`, one overwrites the other. The UUID makes every upload unique. The original filename is preserved in S3 metadata for display purposes.
+
+**The URL expires in 5 minutes.** This is deliberately short. A user requests a URL, uploads immediately, and the URL becomes useless. If someone intercepts the URL, they have a 5-minute window. The default if you do not set `expiresIn` is 15 minutes, and agents often generate URLs with 3600 seconds (1 hour) or even 604800 seconds (7 days).
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate presigned URLs without `ContentType` in the `PutObjectCommand`. Without it, the presigned URL accepts any content type. A user could upload an executable, a ZIP file, or an HTML file with embedded JavaScript to your image upload bucket. The presigned URL does not care because no content type constraint was encoded into the signature.
+
+**What the agent generates:**
+
+```typescript
+const command = new PutObjectCommand({
+  Bucket: process.env.UPLOAD_BUCKET,
+  Key: key,
+});
+```
+
+**What you need:**
+
+```typescript
+const command = new PutObjectCommand({
+  Bucket: process.env.UPLOAD_BUCKET,
+  Key: key,
+  ContentType: request.contentType, // Encoded in signature
+  ContentLength: request.contentLength,
+});
+```
+
+When `ContentType` is included in the `PutObjectCommand`, S3 rejects any upload where the `Content-Type` header does not match. The signature covers the content type, so changing it invalidates the URL.
+
+</Alert>
+
+---
+
+## Presigned POST for Size Limits
+
+Presigned PUT URLs (what we just built) do not enforce content length at the S3 level. The `ContentLength` in the command sets the `Content-Length` header, but a determined client can send a different value. For strict server-side size enforcement, use presigned POST with conditions.
+
+```typescript title="src/api/uploads/presigned-post.ts"
+import { S3Client } from '@aws-sdk/client-s3';
+import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
+import { randomUUID } from 'crypto';
+
+const s3 = new S3Client({ region: process.env.AWS_REGION });
+
+export async function generatePresignedPost(
+  contentType: string,
+  userId: string
+) {
+  const key = `uploads/${userId}/${randomUUID()}`;
+
+  const { url, fields } = await createPresignedPost(s3, {
+    Bucket: process.env.UPLOAD_BUCKET!,
+    Key: key,
+    Conditions: [
+      ['content-length-range', 1, 5 * 1024 * 1024], // 1 byte to 5MB
+      ['starts-with', '$Content-Type', 'image/'],    // Any image type
+    ],
+    Fields: {
+      'Content-Type': contentType,
+    },
+    Expires: 300,
+  });
+
+  return { url, fields, key };
+}
+```
+
+The `content-length-range` condition is enforced by S3, not by your server. If the file exceeds 5MB, S3 rejects the upload with a 403. The `starts-with` condition on `Content-Type` allows any image subtype while rejecting non-image content.
+
+The trade-off: presigned POST requires a multipart form upload from the browser, which is slightly more complex than the simple PUT. For most applications, presigned PUT with server-side validation is sufficient. Use presigned POST when you need S3-enforced size limits (financial compliance, regulatory requirements, or public-facing upload forms where you do not control the client).
+
+---
+
+## Frontend: Direct Upload
+
+The browser-side upload code is a standard `fetch` with the presigned URL.
+
+```typescript title="src/lib/upload.ts"
+interface UploadProgress {
+  loaded: number;
+  total: number;
+  percentage: number;
+}
+
+export async function uploadFile(
+  file: File,
+  onProgress?: (progress: UploadProgress) => void
+): Promise<string> {
+  // Step 1: Get presigned URL from your API
+  const response = await fetch('/api/uploads/presigned-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filename: file.name,
+      contentType: file.type,
+      contentLength: file.size,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.message);
+  }
+
+  const { url, key } = await response.json();
+
+  // Step 2: Upload directly to S3
+  if (onProgress) {
+    // Use XMLHttpRequest for progress tracking
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', file.type);
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onProgress({
+            loaded: event.loaded,
+            total: event.total,
+            percentage: Math.round((event.loaded / event.total) * 100),
+          });
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status === 200) resolve(key);
+        else reject(new Error(`Upload failed: ${xhr.status}`));
+      };
+
+      xhr.onerror = () => reject(new Error('Upload failed'));
+      xhr.send(file);
+    });
+  }
+
+  // Without progress tracking, use fetch
+  const uploadResponse = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': file.type },
+    body: file,
+  });
+
+  if (!uploadResponse.ok) {
+    throw new Error(`Upload failed: ${uploadResponse.status}`);
+  }
+
+  return key;
+}
+```
+
+The `fetch` API does not expose upload progress. If you need a progress bar (and users uploading images expect one), use `XMLHttpRequest`. The `xhr.upload.onprogress` event fires as bytes leave the browser. This is a browser API, not an S3 feature. It works because the browser is uploading directly to S3.
+
+---
+
+## CORS Configuration
+
+Browser-to-S3 direct uploads require CORS (Cross-Origin Resource Sharing). Without it, the browser blocks the upload because the S3 bucket domain (`your-bucket.s3.amazonaws.com`) differs from your application domain (`yourdomain.com`). The browser's same-origin policy prevents the request before it even starts.
+
+```hcl title="infra/modules/uploads/cors.tf"
+resource "aws_s3_bucket_cors_configuration" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  cors_rule {
+    allowed_headers = ["Content-Type", "Content-Length", "x-amz-*"]
+    allowed_methods = ["PUT", "POST"]
+    allowed_origins = [var.allowed_origin]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3600
+  }
+}
+```
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate S3 CORS configurations with `allowed_origins = ["*"]`. This means any website on the internet can upload files to your S3 bucket using a valid presigned URL. If someone intercepts or guesses a presigned URL, they can use it from any domain. With a properly scoped origin, the browser blocks the upload from any domain other than yours, adding a layer of defense even if the URL leaks.
+
+**What the agent generates:**
+
+```hcl
+allowed_origins = ["*"]
+```
+
+**What you should use:**
+
+```hcl
+allowed_origins = ["https://yourdomain.com"]
+```
+
+For development, add your local origin too:
+
+```hcl
+allowed_origins = [
+  "https://yourdomain.com",
+  "http://localhost:3000"
+]
+```
+
+checkov flags `*` origins, but many teams skip CORS checks because "it's just CORS." CORS is access control. Treat it that way.
+
+</Alert>
+
+Three things to note about this configuration:
+
+1. **`allowed_headers` includes `x-amz-*`.** The AWS SDK adds headers like `x-amz-content-sha256` and `x-amz-date` to requests. Without allowing these, the preflight check fails and the upload never starts.
+
+2. **`expose_headers` includes `ETag`.** After a successful upload, S3 returns an `ETag` header with the object's hash. Your frontend can use this to verify the upload completed correctly. Without `expose_headers`, the browser hides the `ETag` from your JavaScript.
+
+3. **`max_age_seconds = 3600`.** This controls how long the browser caches the CORS preflight response. Setting it to 3600 (1 hour) means the browser sends one OPTIONS request per hour instead of one per upload. For development, lower this to 60 seconds so CORS changes take effect faster.
+
+---
+
+## Upload Bucket: Terraform
+
+The upload bucket is separate from your website bucket. Different bucket, different lifecycle, different access patterns.
+
+```hcl title="infra/modules/uploads/main.tf"
+resource "aws_s3_bucket" "uploads" {
+  bucket = "${var.project}-${var.environment}-uploads"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-uploads"
+  })
+}
+
+# Block all public access — uploads are private
+resource "aws_s3_bucket_public_access_block" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# Enable versioning for accidental delete protection
+resource "aws_s3_bucket_versioning" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Server-side encryption
+resource "aws_s3_bucket_server_side_encryption_configuration" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+    bucket_key_enabled = true
+  }
+}
+```
+
+This bucket is fully private. No public access, no website hosting, no CloudFront. Users upload files here. Your application reads them using S3 API calls with IAM credentials (or generates presigned GET URLs for the browser).
+
+---
+
+## Lifecycle Policies: Cleanup
+
+Without lifecycle policies, every upload stays in S3 forever. Orphaned uploads (started but never completed, or belonging to deleted accounts) accumulate silently. At $0.023/GB/month for S3 Standard, 10,000 orphaned 5MB images cost $1.15/month. Not catastrophic. But 100,000 orphaned images over two years cost $138/month with zero business value.
+
+```hcl title="infra/modules/uploads/lifecycle.tf"
+resource "aws_s3_bucket_lifecycle_configuration" "uploads" {
+  bucket = aws_s3_bucket.uploads.id
+
+  # Clean up incomplete multipart uploads after 1 day
+  rule {
+    id     = "abort-incomplete-multipart"
+    status = "Enabled"
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
+
+  # Move temporary uploads to cheaper storage after 30 days
+  rule {
+    id     = "transition-temp-uploads"
+    status = "Enabled"
+
+    filter {
+      prefix = "uploads/temp/"
+    }
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    expiration {
+      days = 90
+    }
+  }
+
+  # Delete old versions after 30 days
+  rule {
+    id     = "cleanup-old-versions"
+    status = "Enabled"
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+```
+
+Three rules, each handling a different cleanup scenario:
+
+1. **Abort incomplete multipart uploads.** When a large upload starts but never finishes (browser closed, network dropped), S3 keeps the partial parts. They cost money. This rule deletes them after 24 hours.
+
+2. **Transition temporary uploads.** Files in the `uploads/temp/` prefix move to Infrequent Access after 30 days ($0.0125/GB, roughly half the cost) and get deleted after 90 days. Use this prefix for files that your application processes and moves to permanent storage.
+
+3. **Delete old versions.** With versioning enabled, every overwrite creates a new version. Old versions consume storage. This rule deletes noncurrent versions after 30 days.
+
+:::tip
+Add a fourth rule for your specific use case. If profile pictures are the only upload type, consider a rule that transitions `uploads/{userId}/` objects to Intelligent-Tiering after 90 days. S3 Intelligent-Tiering automatically moves objects between access tiers based on usage patterns, at a small monitoring cost of $0.0025/1000 objects.
+:::
+
+---
+
+## IAM Policy for Presigned URL Generation
+
+Your API needs permission to generate presigned URLs. This IAM policy grants the minimum required permissions:
+
+```hcl title="infra/modules/uploads/iam.tf"
+data "aws_iam_policy_document" "upload_api" {
+  statement {
+    sid    = "AllowPresignedUrlGeneration"
+    effect = "Allow"
+
+    actions = [
+      "s3:PutObject",
+    ]
+
+    resources = [
+      "${aws_s3_bucket.uploads.arn}/uploads/*",
+    ]
+  }
+}
+
+resource "aws_iam_policy" "upload_api" {
+  name   = "${var.project}-${var.environment}-upload-api"
+  policy = data.aws_iam_policy_document.upload_api.json
+
+  tags = var.common_tags
+}
+```
+
+The resource path is scoped to `uploads/*`. Your API can generate presigned URLs for the `uploads/` prefix only, not for the entire bucket. If you later add other prefixes (like `processed/` for thumbnails), the API cannot write to them without an explicit policy update.
+
+---
+
+## Module File Structure
+
+<FileTree>
+infra/
+  modules/
+    uploads/
+      main.tf
+      cors.tf
+      lifecycle.tf
+      iam.tf
+      variables.tf
+      outputs.tf
+</FileTree>
+
+```hcl title="infra/modules/uploads/variables.tf"
+variable "project" {
+  type        = string
+  description = "Project name for resource naming"
+}
+
+variable "environment" {
+  type        = string
+  description = "Environment name (dev, staging, prod)"
+}
+
+variable "allowed_origin" {
+  type        = string
+  description = "Allowed CORS origin (your domain)"
+}
+
+variable "common_tags" {
+  type        = map(string)
+  description = "Common tags for all resources"
+  default     = {}
+}
+```
+
+```hcl title="infra/modules/uploads/outputs.tf"
+output "bucket_name" {
+  value       = aws_s3_bucket.uploads.id
+  description = "Upload bucket name"
+}
+
+output "bucket_arn" {
+  value       = aws_s3_bucket.uploads.arn
+  description = "Upload bucket ARN"
+}
+
+output "upload_policy_arn" {
+  value       = aws_iam_policy.upload_api.arn
+  description = "IAM policy ARN for presigned URL generation"
+}
+```
+
+---
+
+## Testing the Upload Flow
+
+Verify the complete flow works end to end.
+
+Generate a presigned URL using the AWS CLI (simulating what your API does):
+
+```bash terminal
+aws s3 presign s3://yourproject-prod-uploads/uploads/test/test-image.jpg \
+  --expires-in 300
+```
+
+<TerminalOutput title="Presigned URL output">
+
+```
+https://yourproject-prod-uploads.s3.us-east-1.amazonaws.com/uploads/test/test-image.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...&X-Amz-Date=20260308T120000Z&X-Amz-Expires=300&X-Amz-SignedHeaders=host&X-Amz-Signature=...
+```
+
+</TerminalOutput>
+
+Upload a test file using curl:
+
+```bash terminal
+curl -X PUT \
+  -H "Content-Type: image/jpeg" \
+  --upload-file test-image.jpg \
+  "PASTE_PRESIGNED_URL_HERE"
+```
+
+Verify the file exists:
+
+```bash terminal
+aws s3 ls s3://yourproject-prod-uploads/uploads/test/
+```
+
+<TerminalOutput title="S3 listing">
+
+```
+2026-03-08 12:01:23      45678 test-image.jpg
+```
+
+</TerminalOutput>
+
+Verify CORS is configured:
+
+```bash terminal
+curl -I -X OPTIONS \
+  -H "Origin: https://yourdomain.com" \
+  -H "Access-Control-Request-Method: PUT" \
+  "https://yourproject-prod-uploads.s3.us-east-1.amazonaws.com/"
+```
+
+The response should include `Access-Control-Allow-Origin: https://yourdomain.com`. If you see a 403 or no CORS headers, the CORS configuration is not applied yet (it can take a few minutes to propagate).
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Uploading files through your API server. Every byte transits your server, doubling bandwidth costs and capping upload throughput at your server's capacity. Lambda hits the 6MB payload limit. At 100 concurrent uploads your API falls over. |
+| ✅ **Right** | Presigned URLs with content type validation, 5-minute expiration, 5MB size limit, CORS restricted to your domain, lifecycle policies for cleanup, and server-side encryption at rest. Your API generates URLs in 5ms. S3 handles the heavy lifting. |
+| ❌ **Over** | Multipart upload with resumable progress tracking, client-side image resizing, Sharp-based Lambda image processing pipeline, CDN-backed thumbnail generation, and virus scanning on upload. All of these are real features for a mature product. None of them belong in your MVP. |
+| 🤖 **Agent Trap** | Agent generates a presigned URL without `ContentType` in the PutObjectCommand and sets expiration to 3600 seconds (1 hour). The result: a URL that accepts any file type, stays valid for an hour, and can be reused. Combined with `allowed_origins = ["*"]` in CORS, any website can upload any file to your bucket for 60 minutes after any single URL generation. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 17: Frontend Deploy to S3 + CloudFront**, you deploy a real React or Astro application to the S3 + CloudFront stack from Parts 13-15. CI/CD pipeline, cache invalidation on deploy, and real user monitoring to verify your CDN is performing as expected.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Upload Infrastructure",
+    tasks: [
+      { text: "Upload S3 bucket created (separate from website bucket)", syncKey: "part-16-bucket-created" },
+      { text: "Public access fully blocked on upload bucket", syncKey: "part-16-public-blocked" },
+      { text: "Server-side encryption enabled (AES256)", syncKey: "part-16-encryption" },
+      { text: "Versioning enabled on upload bucket", syncKey: "part-16-versioning" }
+    ]
+  },
+  {
+    category: "Presigned URLs",
+    tasks: [
+      { text: "Presigned URL generation working (test with aws s3 presign)", syncKey: "part-16-presigned-working" },
+      { text: "Direct browser-to-S3 upload succeeding (test with curl PUT)", syncKey: "part-16-upload-working" },
+      { text: "Content type encoded in presigned URL signature", syncKey: "part-16-content-type" },
+      { text: "URL expiration set to 300 seconds (5 minutes)", syncKey: "part-16-expiration" }
+    ]
+  },
+  {
+    category: "Security",
+    tasks: [
+      { text: "CORS allowed_origins restricted to your domain (not *)", syncKey: "part-16-cors-restricted" },
+      { text: "IAM policy scoped to uploads/* prefix only", syncKey: "part-16-iam-scoped" },
+      { text: "Lifecycle policies configured for cleanup", syncKey: "part-16-lifecycle" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. Never proxy file uploads through your API server, because presigned URLs let browsers upload directly to S3 with zero server memory, zero server bandwidth, and 5ms of API compute.
+2. Always encode content type and set short expiration (5 minutes) in presigned URLs, because agents generate permissive defaults that accept any file type for hours.
+3. Lifecycle policies are not a nice-to-have: without them, orphaned uploads accumulate silently and your storage costs grow linearly with every user who ever signed up.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

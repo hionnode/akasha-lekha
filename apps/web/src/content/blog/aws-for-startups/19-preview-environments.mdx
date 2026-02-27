@@ -1,0 +1,1236 @@
+---
+title: "Preview Environments: Your First Real Pipeline"
+description: "Build preview environments with S3 per PR and your first scripted Generate → Verify → Explain pipeline. Plus: terraform-mcp server and Recalibration Checkpoint 1."
+excerpt: "Your first real Generate → Verify → Explain pipeline, your first MCP server, and your first trust recalibration. The manual verification from Parts 13-18 gets automated."
+date: "2026-03-20"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "terraform", "ai-agents", "mcp", "model-eval"]
+series: "AWS From Zero to Production"
+seriesPart: 19
+featured: true
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import GuideStep from '../../../components/blog/guide/GuideStep.astro';
+
+For the last six parts, you have been verifying agent output manually. Run `terraform validate`. Run `tflint`. Run `checkov`. Check the output. Fix. Repeat. You know the process works because you have caught real issues: an S3 bucket without encryption, a CloudFront distribution with the wrong origin, a cache policy that served stale content for a week. But you also know you skip steps when you are in a hurry. The 3 PM deploy where you ran `terraform validate` but skipped `checkov` because "it was a small change." The Friday fix where you eyeballed the plan output instead of actually reading each resource diff.
+
+Manual verification works until it does not. Today, the pipeline does it for you, with an iterative fix loop that gives the agent 3 chances to get it right before escalating to you.
+
+**Time:** About 2 hours. This is a KEY part with three major systems: scripted pipeline, MCP server, and recalibration checkpoint.
+
+**Outcome:** A scripted DGVE (Design, Generate, Verify, Explain) pipeline, your first custom MCP server (`terraform-mcp`), preview environments deployed per PR, and your first data-driven trust recalibration.
+
+---
+
+## Why This Matters
+
+Manual verification does not scale. You have been doing it since [Part 13](/blog/aws-for-startups/13-s3-static-hosting), running `terraform validate`, `tflint`, and `checkov` by hand after every generation. You have been checking the output visually, fixing issues, and re-running. This process works for a single developer generating one or two Terraform files per session. It breaks down when you are generating five files across two modules on a Wednesday afternoon with three other tasks competing for your attention.
+
+The failure mode is not "verification fails." The failure mode is "verification gets skipped." You know the tools work. You just stop running them. A script does not get tired. A script does not decide that tflint is overkill for a "simple change." A script runs every check, every time, and logs the results so you can see whether your generators are improving or degrading.
+
+Three systems come together today:
+
+1. **Scripted pipeline (`verify.sh` + `explain.sh`)** automates the Verify and Explain steps of the DGVE loop. The agent generates. The script verifies. If verification fails, the script feeds findings back to the agent for up to 3 fix iterations. Then the script explains what happened.
+
+2. **terraform-mcp server** replaces shell commands with typed tools. Instead of your agent running `terraform plan` and parsing text output, it calls a structured MCP tool and receives structured JSON. No more fragile regex parsing of plan output.
+
+3. **Preview environments** give every PR a live URL. Your reviewer clicks a link and sees the change running, not a screenshot of localhost.
+
+---
+
+## What We're Building
+
+- Preview environment infrastructure: S3 bucket per PR, CloudFront serving preview URLs, cleanup on PR close
+- `scripts/pipeline/verify.sh`: automated verification with iterative fix loop (max 3 iterations)
+- `scripts/pipeline/explain.sh`: model-based summarization of verification results
+- `terraform-mcp` server: custom MCP server with `terraform-plan`, `terraform-validate`, and `compliance-check` tools
+- Scorecard panels 8-11: plan diff summary, Infracost per PR, cost trend, Verification Overhead Ratio
+- Recalibration Checkpoint 1: data-driven trust adjustment
+
+---
+
+## Design: Preview Environment Architecture
+
+Every pull request gets its own S3 prefix and a corresponding CloudFront path. When a developer opens a PR, GitHub Actions runs the deploy script, uploads the built frontend to `s3://preview-bucket/pr-{number}/`, and posts a comment on the PR with the preview URL. When the PR is closed or merged, a cleanup workflow deletes the prefix.
+
+<Alert type="important" title="Preview Environment Architecture">
+
+```
+┌──────────────┐     ┌─────────────────┐     ┌──────────────────────────┐
+│              │     │                 │     │     S3 Preview Bucket     │
+│  Developer   │────▶│  GitHub Actions  │────▶│                          │
+│  opens PR    │     │  preview.yml    │     │  /pr-42/index.html       │
+│              │     │                 │     │  /pr-42/assets/...       │
+└──────────────┘     └────────┬────────┘     │  /pr-57/index.html       │
+                              │              │  /pr-57/assets/...       │
+                              │              └────────────┬─────────────┘
+                              │                           │
+                              ▼                           ▼
+                     ┌─────────────────┐     ┌──────────────────────────┐
+                     │  Posts comment   │     │      CloudFront          │
+                     │  with URL on PR │     │                          │
+                     │                 │     │  preview.your-domain.com │
+                     └─────────────────┘     │  /pr-42/ → S3 /pr-42/   │
+                                             │  /pr-57/ → S3 /pr-57/   │
+                                             └──────────────────────────┘
+```
+
+</Alert>
+
+This architecture uses a single S3 bucket with PR-number prefixes instead of one bucket per PR. One bucket is cheaper (no per-bucket overhead), simpler to manage (one lifecycle policy), and easier to clean up (delete a prefix, not a bucket). The CloudFront distribution uses a single origin with path-based routing.
+
+The Terraform module needs four resources:
+
+- An S3 bucket for all preview content with lifecycle rules
+- A CloudFront distribution with the S3 origin
+- An IAM role for GitHub Actions to assume via OIDC
+- A Route53 record for the preview subdomain
+
+---
+
+## Generate: Agent Produces Terraform + GitHub Actions
+
+Here is the prompt you give your agent. Include your full AGENT-INSTRUCTIONS.md as context (all 43 lines from [Part 12](/blog/aws-for-startups/12-env-vars-secrets-security)).
+
+```text title="prompt.txt"
+Context: AGENT-INSTRUCTIONS.md (attached), existing infra/ directory structure.
+
+Task: Create a preview environment system for frontend PRs.
+
+Requirements:
+1. Terraform module at infra/modules/preview/
+   - S3 bucket with prefix-based isolation per PR
+   - force_destroy = true on the bucket (preview content is ephemeral)
+   - Lifecycle rule: delete objects older than 30 days
+   - CloudFront distribution with S3 origin
+   - Route53 CNAME: preview.${var.domain_name}
+   - IAM role for GitHub Actions OIDC (repo-scoped)
+   - All resources tagged per AGENT-INSTRUCTIONS.md conventions
+
+2. GitHub Actions workflow at .github/workflows/preview.yml
+   - Trigger: pull_request (opened, synchronize, reopened)
+   - Build frontend, deploy to s3://bucket/pr-{number}/
+   - Post comment on PR with preview URL
+   - On PR close: delete s3://bucket/pr-{number}/
+
+3. GitHub Actions cleanup workflow at .github/workflows/preview-cleanup.yml
+   - Trigger: pull_request (closed)
+   - Delete all objects under s3://bucket/pr-{number}/
+
+Output each file separately with full content.
+```
+
+The agent generates the Terraform module and GitHub Actions workflows. Here is the Terraform module (abbreviated to the key resources):
+
+```hcl title="infra/modules/preview/main.tf"
+resource "aws_s3_bucket" "preview" {
+  bucket        = "${var.project}-${var.environment}-preview"
+  force_destroy = true
+
+  tags = merge(var.common_tags, {
+    Name      = "${var.project}-${var.environment}-preview"
+    ManagedBy = "terraform"
+    Purpose   = "pr-preview-environments"
+  })
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "preview" {
+  bucket = aws_s3_bucket.preview.id
+
+  rule {
+    id     = "cleanup-old-previews"
+    status = "Enabled"
+
+    expiration {
+      days = 30
+    }
+
+    filter {
+      prefix = "pr-"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "preview" {
+  bucket = aws_s3_bucket.preview.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_cloudfront_origin_access_control" "preview" {
+  name                              = "${var.project}-preview-oac"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+resource "aws_cloudfront_distribution" "preview" {
+  enabled             = true
+  default_root_object = "index.html"
+  aliases             = ["preview.${var.domain_name}"]
+
+  origin {
+    domain_name              = aws_s3_bucket.preview.bucket_regional_domain_name
+    origin_id                = "preview-s3"
+    origin_access_control_id = aws_cloudfront_origin_access_control.preview.id
+  }
+
+  default_cache_behavior {
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "preview-s3"
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+
+    cache_policy_id = var.cache_policy_id
+  }
+
+  custom_error_response {
+    error_code         = 404
+    response_code      = 200
+    response_page_path = "/index.html"
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn = var.certificate_arn
+    ssl_support_method  = "sni-only"
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-preview-cdn"
+  })
+}
+
+resource "aws_route53_record" "preview" {
+  zone_id = var.hosted_zone_id
+  name    = "preview.${var.domain_name}"
+  type    = "CNAME"
+  ttl     = 300
+  records = [aws_cloudfront_distribution.preview.domain_name]
+}
+```
+
+```hcl title="infra/modules/preview/variables.tf"
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "domain_name" {
+  description = "Root domain name for preview subdomain"
+  type        = string
+}
+
+variable "hosted_zone_id" {
+  description = "Route53 hosted zone ID"
+  type        = string
+}
+
+variable "certificate_arn" {
+  description = "ACM certificate ARN for HTTPS"
+  type        = string
+}
+
+variable "cache_policy_id" {
+  description = "CloudFront cache policy ID"
+  type        = string
+}
+
+variable "github_org" {
+  description = "GitHub organization name for OIDC"
+  type        = string
+}
+
+variable "github_repo" {
+  description = "GitHub repository name for OIDC"
+  type        = string
+}
+
+variable "common_tags" {
+  description = "Tags applied to all resources"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```yaml title=".github/workflows/preview.yml"
+name: Preview Environment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'apps/web/**'
+      - 'pnpm-lock.yaml'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  deploy-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @your-app/web build
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PREVIEW_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Deploy to preview
+        run: |
+          aws s3 sync apps/web/dist/ \
+            s3://${{ secrets.PREVIEW_BUCKET }}/pr-${{ github.event.number }}/ \
+            --delete
+
+      - name: Comment preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = `https://preview.${{ secrets.DOMAIN }}/pr-${{ github.event.number }}/`;
+            const body = `Preview deployed: ${url}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.startsWith('Preview deployed:'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+```
+
+```yaml title=".github/workflows/preview-cleanup.yml"
+name: Preview Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PREVIEW_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Delete preview content
+        run: |
+          aws s3 rm \
+            s3://${{ secrets.PREVIEW_BUCKET }}/pr-${{ github.event.number }}/ \
+            --recursive
+```
+
+That is the raw agent output. It is good. Not perfect. Let us run it through verification.
+
+---
+
+## Verify Loop (Scripted)
+
+This is the heart of the pipeline. `verify.sh` runs every check you have been running manually, but it does three things you never did: it runs them all every time, it feeds failures back to the agent for automated fixes, and it logs every iteration for your Scorecard.
+
+```bash title="scripts/pipeline/verify.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Configuration
+MAX_ITERATIONS="${MAX_ITERATIONS:-3}"
+TARGET_DIR="${1:?Usage: verify.sh <terraform-directory>}"
+LOG_FILE="pipeline-$(date +%Y%m%d-%H%M%S).json"
+ITERATION=0
+TOTAL_FINDINGS=0
+
+log_json() {
+  echo "$1" >> "${LOG_FILE}"
+}
+
+run_checks() {
+  local findings=0
+  local results=""
+
+  echo "--- terraform validate ---"
+  if ! terraform -chdir="${TARGET_DIR}" validate -json > /tmp/validate.json 2>&1; then
+    local validate_errors
+    validate_errors=$(jq '.diagnostics | length' /tmp/validate.json)
+    findings=$((findings + validate_errors))
+    results="${results}\nterraform validate: ${validate_errors} errors"
+    echo "FAIL: ${validate_errors} errors"
+  else
+    echo "PASS"
+    results="${results}\nterraform validate: PASS"
+  fi
+
+  echo "--- tflint ---"
+  if ! tflint --chdir="${TARGET_DIR}" --format=json > /tmp/tflint.json 2>&1; then
+    local tflint_issues
+    tflint_issues=$(jq '.issues | length' /tmp/tflint.json)
+    findings=$((findings + tflint_issues))
+    results="${results}\ntflint: ${tflint_issues} issues"
+    echo "FAIL: ${tflint_issues} issues"
+  else
+    echo "PASS"
+    results="${results}\ntflint: PASS"
+  fi
+
+  echo "--- checkov ---"
+  if ! checkov -d "${TARGET_DIR}" --output json > /tmp/checkov.json 2>&1; then
+    local checkov_failures
+    checkov_failures=$(jq '[.results.failed_checks // []] | flatten | length' /tmp/checkov.json)
+    findings=$((findings + checkov_failures))
+    results="${results}\ncheckov: ${checkov_failures} failures"
+    echo "FAIL: ${checkov_failures} failures"
+  else
+    echo "PASS"
+    results="${results}\ncheckov: PASS"
+  fi
+
+  echo "--- infracost ---"
+  if command -v infracost &> /dev/null; then
+    infracost breakdown --path="${TARGET_DIR}" --format=json > /tmp/infracost.json 2>&1
+    local monthly_cost
+    monthly_cost=$(jq -r '.totalMonthlyCost // "0"' /tmp/infracost.json)
+    results="${results}\ninfracost: \$${monthly_cost}/month estimated"
+    echo "Cost estimate: \$${monthly_cost}/month"
+  fi
+
+  echo "--- instruction compliance ---"
+  local compliance_issues=0
+  # Check required tags
+  if grep -r 'resource "aws_' "${TARGET_DIR}" | grep -vL 'tags' > /dev/null 2>&1; then
+    compliance_issues=$((compliance_issues + 1))
+    results="${results}\ncompliance: resources without tags found"
+  fi
+  # Check naming convention
+  if grep -rP 'resource "aws_\w+" "\w+"' "${TARGET_DIR}" | grep -v "${PROJECT:-shipfast}" > /dev/null 2>&1; then
+    compliance_issues=$((compliance_issues + 1))
+    results="${results}\ncompliance: naming convention violations"
+  fi
+  findings=$((findings + compliance_issues))
+
+  echo ""
+  echo "=== ITERATION ${ITERATION} SUMMARY ==="
+  echo -e "${results}"
+  echo "Total findings: ${findings}"
+
+  log_json "{\"iteration\": ${ITERATION}, \"findings\": ${findings}, \"results\": \"${results}\"}"
+
+  return ${findings}
+}
+
+request_agent_fix() {
+  local findings_summary="$1"
+  echo ""
+  echo "==> Requesting agent fix (iteration $((ITERATION + 1)) of ${MAX_ITERATIONS})..."
+  echo ""
+  echo "Feed this to your agent:"
+  echo "---"
+  echo "The following verification issues were found in ${TARGET_DIR}:"
+  echo ""
+  echo "${findings_summary}"
+  echo ""
+  echo "Fix these issues. Do not change anything that already passes."
+  echo "Refer to AGENT-INSTRUCTIONS.md for conventions."
+  echo "---"
+}
+
+# Initialize
+echo "=== VERIFY PIPELINE ==="
+echo "Target: ${TARGET_DIR}"
+echo "Max iterations: ${MAX_ITERATIONS}"
+echo ""
+
+terraform -chdir="${TARGET_DIR}" init -backend=false > /dev/null 2>&1
+
+# Main loop
+while [ ${ITERATION} -lt ${MAX_ITERATIONS} ]; do
+  ITERATION=$((ITERATION + 1))
+  echo ""
+  echo "========================================="
+  echo "  ITERATION ${ITERATION} of ${MAX_ITERATIONS}"
+  echo "========================================="
+  echo ""
+
+  FINDINGS=0
+  run_checks || FINDINGS=$?
+
+  if [ ${FINDINGS} -eq 0 ]; then
+    echo ""
+    echo "ALL CHECKS PASSED on iteration ${ITERATION}."
+    log_json "{\"result\": \"pass\", \"iterations\": ${ITERATION}}"
+    exit 0
+  fi
+
+  TOTAL_FINDINGS=${FINDINGS}
+
+  if [ ${ITERATION} -lt ${MAX_ITERATIONS} ]; then
+    request_agent_fix "$(cat /tmp/validate.json /tmp/tflint.json /tmp/checkov.json 2>/dev/null)"
+    echo ""
+    echo "Waiting for agent fix... Press Enter when ready."
+    read -r
+  fi
+done
+
+echo ""
+echo "=== ESCALATION ==="
+echo "Max iterations (${MAX_ITERATIONS}) reached with ${TOTAL_FINDINGS} remaining findings."
+echo "Manual review required."
+log_json "{\"result\": \"escalate\", \"iterations\": ${MAX_ITERATIONS}, \"remaining_findings\": ${TOTAL_FINDINGS}}"
+exit 1
+```
+
+Make it executable:
+
+```bash terminal
+chmod +x scripts/pipeline/verify.sh
+```
+
+Now run it against the agent-generated preview module:
+
+```bash terminal
+./scripts/pipeline/verify.sh infra/modules/preview
+```
+
+Here is what the first run looks like in practice:
+
+<TerminalOutput title="verify.sh — iteration 1">
+
+```
+=== VERIFY PIPELINE ===
+Target: infra/modules/preview
+Max iterations: 3
+
+=========================================
+  ITERATION 1 of 3
+=========================================
+
+--- terraform validate ---
+PASS
+--- tflint ---
+FAIL: 1 issues
+--- checkov ---
+FAIL: 2 failures
+--- infracost ---
+Cost estimate: $1.08/month
+--- instruction compliance ---
+
+=== ITERATION 1 SUMMARY ===
+terraform validate: PASS
+tflint: 1 issues
+checkov: 2 failures
+infracost: $1.08/month
+Total findings: 3
+
+==> Requesting agent fix (iteration 2 of 3)...
+
+Feed this to your agent:
+---
+The following verification issues were found in infra/modules/preview:
+
+1. tflint: aws_cloudfront_distribution missing viewer_certificate minimum_protocol_version
+2. checkov: CKV_AWS_86 - CloudFront distribution logging not enabled
+3. checkov: CKV_AWS_174 - CloudFront distribution not using WAF
+
+Fix these issues. Do not change anything that already passes.
+Refer to AGENT-INSTRUCTIONS.md for conventions.
+---
+
+Waiting for agent fix... Press Enter when ready.
+```
+
+</TerminalOutput>
+
+Three findings on the first pass. The agent missed CloudFront access logging, WAF association, and the TLS minimum protocol version. These are exactly the kind of issues you would have caught manually on a good day and skipped on a Friday afternoon. The script catches them every time.
+
+You feed the findings to your agent, it fixes the Terraform, and you press Enter:
+
+<TerminalOutput title="verify.sh — iteration 2">
+
+```
+=========================================
+  ITERATION 2 of 3
+=========================================
+
+--- terraform validate ---
+PASS
+--- tflint ---
+PASS
+--- checkov ---
+FAIL: 1 failures
+--- infracost ---
+Cost estimate: $1.08/month
+--- instruction compliance ---
+
+=== ITERATION 2 SUMMARY ===
+terraform validate: PASS
+tflint: PASS
+checkov: 1 failures
+infracost: $1.08/month
+Total findings: 1
+
+==> Requesting agent fix (iteration 3 of 3)...
+
+Feed this to your agent:
+---
+The following verification issues were found in infra/modules/preview:
+
+1. checkov: CKV_AWS_174 - CloudFront distribution not using WAF
+
+Fix these issues. Do not change anything that already passes.
+Refer to AGENT-INSTRUCTIONS.md for conventions.
+---
+
+Waiting for agent fix... Press Enter when ready.
+```
+
+</TerminalOutput>
+
+One finding left. The agent fixed the logging and TLS version but did not associate a WAF Web ACL. The fix is a single resource and one attribute on the distribution. Agent fixes, you press Enter:
+
+<TerminalOutput title="verify.sh — iteration 3">
+
+```
+=========================================
+  ITERATION 3 of 3
+=========================================
+
+--- terraform validate ---
+PASS
+--- tflint ---
+PASS
+--- checkov ---
+PASS
+--- infracost ---
+Cost estimate: $6.08/month
+--- instruction compliance ---
+
+=== ITERATION 3 SUMMARY ===
+terraform validate: PASS
+tflint: PASS
+checkov: PASS
+infracost: $6.08/month
+Total findings: 0
+
+ALL CHECKS PASSED on iteration 3.
+```
+
+</TerminalOutput>
+
+Clean on iteration 3. The cost jumped from $1.08 to $6.08/month because WAF Web ACLs have a $5/month base cost. That is a tradeoff worth knowing about before you apply, not after you see the bill. The infracost output made it visible.
+
+The `iterations-to-clean` metric for this run is 3. That number feeds into your Scorecard and tells you how good your generator is. If you consistently need 3 iterations, the problem is your prompt or your model, not your verification pipeline. Improving the prompt reduces iterations. Improving the model reduces iterations. Adding more checks to the pipeline does not reduce iterations. It catches more issues per iteration.
+
+<Alert type="caution" title="Agent Trap">
+
+The agent generates preview Terraform without `force_destroy = true` on the S3 bucket. When a PR closes and the cleanup workflow tries to delete the preview prefix, it works fine because it deletes objects, not the bucket. But if you later run `terraform destroy` to tear down the preview infrastructure, Terraform fails because the bucket is not empty. Every old preview that was not fully cleaned up blocks your infrastructure teardown. You end up with orphaned S3 buckets that require manual intervention to delete.
+
+**What catches it:** The `verify.sh` instruction compliance check flags S3 buckets without `force_destroy` in preview/ephemeral modules. Add this to your AGENT-INSTRUCTIONS.md if you want agents to always include it for non-production buckets.
+
+</Alert>
+
+---
+
+## Explain (Scripted)
+
+The Explain step summarizes what happened. It uses the cheapest available model (you do not need Claude Opus for summarization) via the `invoke_model` function from [Part 9](/blog/aws-for-startups/09-monorepo-context-evals).
+
+```bash title="scripts/pipeline/explain.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Source the model invocation abstraction from Part 9
+source scripts/eval/model-invoke.sh
+
+LOG_FILE="${1:?Usage: explain.sh <pipeline-log-file>}"
+TARGET_DIR="${2:?Usage: explain.sh <pipeline-log-file> <terraform-directory>}"
+
+# Use the cheapest model for summarization
+EXPLAIN_MODEL="${EXPLAIN_MODEL:-gpt-4o-mini}"
+
+PROMPT="You are a senior infrastructure engineer reviewing a verification pipeline run.
+
+Pipeline log:
+$(cat "${LOG_FILE}")
+
+Terraform files reviewed:
+$(find "${TARGET_DIR}" -name '*.tf' -exec echo '--- {} ---' \; -exec cat {} \;)
+
+Summarize:
+1. What was generated (resource types, count, purpose)
+2. What was flagged in verification (list each finding)
+3. How many iterations were needed and what was fixed in each
+4. What the human reviewer should focus on (things automation cannot catch)
+5. Cost estimate and whether it is reasonable for the use case
+
+Be concise. Use bullet points. No pleasantries."
+
+echo "=== PIPELINE SUMMARY ==="
+echo ""
+
+invoke_model "${EXPLAIN_MODEL}" "${PROMPT}"
+```
+
+<TerminalOutput title="explain.sh output">
+
+```
+=== PIPELINE SUMMARY ===
+
+**Generated:** Preview environment module (7 resources)
+- S3 bucket with lifecycle rules and public access block
+- CloudFront distribution with OAC, custom error response
+- Route53 CNAME record
+- WAF Web ACL (added in iteration 3)
+- IAM role for GitHub Actions OIDC
+
+**Verification findings:**
+- Iteration 1 (3 findings): Missing TLS minimum protocol version,
+  CloudFront logging not enabled, no WAF association
+- Iteration 2 (1 finding): WAF still not associated
+- Iteration 3: Clean
+
+**Iterations to clean:** 3
+
+**Human review focus:**
+- OIDC trust policy: verify the repo scope matches YOUR repository,
+  not a generic pattern
+- CloudFront custom_error_response: the SPA fallback sends 200 for
+  all 404s, which may mask actual missing assets
+- Lifecycle rule: 30-day expiration applies to ALL objects with pr-
+  prefix, including active PRs that are open longer than 30 days
+
+**Cost:** $6.08/month ($1.08 S3/CloudFront + $5.00 WAF Web ACL)
+Reasonable for a preview environment. The WAF cost is fixed
+regardless of traffic.
+```
+
+</TerminalOutput>
+
+The Explain step caught something the Verify step could not: the SPA fallback masking real 404s. That is a design issue, not a syntax or compliance issue. No automated check will catch it. But a cheap model, given the full context, can surface it for human review. The human then decides whether it matters.
+
+---
+
+## terraform-mcp Server
+
+The Model Context Protocol (MCP) concept was introduced in [Part 9](/blog/aws-for-startups/09-monorepo-context-evals). Today it becomes real. Instead of agents shelling out to `terraform plan` and parsing text output, they call structured tools with typed inputs and receive structured JSON responses.
+
+### Why MCP Over Shell
+
+<Alert type="important" title="MCP vs Shell: Agent-to-Tool Communication">
+
+```
+SHELL APPROACH (fragile):
+┌─────────┐    shell exec     ┌────────────────┐    text output
+│  Agent   │ ─────────────▶   │ terraform plan │ ─────────────▶  Agent parses
+│          │  "terraform      │                │  "Plan: 3 to   text with regex.
+│          │   plan -json"    │                │   add, 0 to    Breaks on format
+│          │                  │                │   change..."   changes.
+└─────────┘                   └────────────────┘
+
+MCP APPROACH (structured):
+┌─────────┐    tool call      ┌────────────────┐    JSON response
+│  Agent   │ ─────────────▶   │ terraform-mcp  │ ─────────────▶  Agent receives
+│          │  terraform-plan  │    server       │  { "add": 3,   typed data.
+│          │  { "dir": "..." }│                │    "change": 0, No parsing.
+│          │                  │                │    "resources":  No breakage.
+└─────────┘                   └────────────────┘    [...] }
+```
+
+</Alert>
+
+The shell approach works until it does not. Terraform's text output format changes between versions. JSON output is more stable but still requires the agent to handle process execution, error codes, stderr, and timeout. MCP eliminates all of that. The agent calls a tool. The server handles execution. The agent receives structured data.
+
+### Server Implementation
+
+<FileTree>
+tools/
+  terraform-mcp/
+    package.json
+    tsconfig.json
+    src/
+      index.ts
+      tools/
+        terraform-plan.ts
+        terraform-validate.ts
+        compliance-check.ts
+</FileTree>
+
+```typescript title="tools/terraform-mcp/src/index.ts"
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import { execSync } from 'child_process';
+
+const server = new McpServer({
+  name: 'terraform-mcp',
+  version: '1.0.0',
+});
+
+// Tool: terraform-plan
+server.tool(
+  'terraform-plan',
+  'Run terraform plan and return structured resource changes',
+  {
+    directory: z.string().describe('Path to the Terraform directory'),
+    vars: z.record(z.string()).optional().describe('Terraform variables'),
+  },
+  async ({ directory, vars }) => {
+    try {
+      const varArgs = vars
+        ? Object.entries(vars).map(([k, v]) => `-var="${k}=${v}"`).join(' ')
+        : '';
+
+      execSync(`terraform -chdir=${directory} init -backend=false`, {
+        stdio: 'pipe',
+      });
+
+      const output = execSync(
+        `terraform -chdir=${directory} plan -json -out=tfplan ${varArgs}`,
+        { stdio: 'pipe', maxBuffer: 10 * 1024 * 1024 }
+      ).toString();
+
+      const lines = output.trim().split('\n').map(l => JSON.parse(l));
+      const changes = lines.filter(l => l.type === 'resource_drift' || l.type === 'planned_change');
+
+      const summary = {
+        add: changes.filter(c => c.change?.action === 'create').length,
+        change: changes.filter(c => c.change?.action === 'update').length,
+        destroy: changes.filter(c => c.change?.action === 'delete').length,
+        resources: changes.map(c => ({
+          address: c.change?.resource?.addr,
+          action: c.change?.action,
+          type: c.change?.resource?.type,
+        })),
+      };
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(summary, null, 2),
+        }],
+      };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ error: message }),
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: terraform-validate
+server.tool(
+  'terraform-validate',
+  'Run terraform validate and return structured diagnostics',
+  {
+    directory: z.string().describe('Path to the Terraform directory'),
+  },
+  async ({ directory }) => {
+    try {
+      execSync(`terraform -chdir=${directory} init -backend=false`, {
+        stdio: 'pipe',
+      });
+
+      const output = execSync(
+        `terraform -chdir=${directory} validate -json`,
+        { stdio: 'pipe' }
+      ).toString();
+
+      return {
+        content: [{
+          type: 'text',
+          text: output,
+        }],
+      };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            valid: false,
+            error: message,
+          }),
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool: compliance-check
+server.tool(
+  'compliance-check',
+  'Check Terraform files against AGENT-INSTRUCTIONS.md rules',
+  {
+    directory: z.string().describe('Path to the Terraform directory'),
+    rules_file: z.string().optional().describe('Path to AGENT-INSTRUCTIONS.md'),
+  },
+  async ({ directory, rules_file }) => {
+    try {
+      const findings: Array<{ rule: string; severity: string; detail: string }> = [];
+      const fs = await import('fs');
+      const path = await import('path');
+
+      const tfFiles = fs.readdirSync(directory)
+        .filter((f: string) => f.endsWith('.tf'))
+        .map((f: string) => ({
+          name: f,
+          content: fs.readFileSync(path.join(directory, f), 'utf-8'),
+        }));
+
+      for (const file of tfFiles) {
+        // Check: All resources must have tags
+        const resourceBlocks = file.content.match(/resource "aws_\w+" "\w+"/g) || [];
+        const tagBlocks = (file.content.match(/tags\s*=/g) || []).length;
+        if (resourceBlocks.length > tagBlocks) {
+          findings.push({
+            rule: 'required-tags',
+            severity: 'error',
+            detail: `${file.name}: ${resourceBlocks.length} resources but only ${tagBlocks} tag blocks`,
+          });
+        }
+
+        // Check: No hardcoded AMI IDs
+        if (/ami-[0-9a-f]{8,17}/.test(file.content)) {
+          findings.push({
+            rule: 'no-hardcoded-ami',
+            severity: 'error',
+            detail: `${file.name}: hardcoded AMI ID found`,
+          });
+        }
+
+        // Check: No hardcoded account IDs
+        if (/\d{12}/.test(file.content) && !/\$\{/.test(file.content)) {
+          findings.push({
+            rule: 'no-hardcoded-account-id',
+            severity: 'warning',
+            detail: `${file.name}: possible hardcoded AWS account ID`,
+          });
+        }
+
+        // Check: Naming convention
+        const names = file.content.match(/Name\s*=\s*"([^"]+)"/g) || [];
+        for (const name of names) {
+          if (!/\$\{var\.project\}/.test(name) && !/\$\{var\.environment\}/.test(name)) {
+            findings.push({
+              rule: 'naming-convention',
+              severity: 'warning',
+              detail: `${file.name}: Name tag may not follow {project}-{env}-{resource} convention: ${name}`,
+            });
+          }
+        }
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            directory,
+            files_checked: tfFiles.length,
+            findings,
+            pass: findings.filter(f => f.severity === 'error').length === 0,
+          }, null, 2),
+        }],
+      };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ error: message }),
+        }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Start the server
+const transport = new StdioServerTransport();
+server.connect(transport);
+```
+
+```json title="tools/terraform-mcp/package.json"
+{
+  "name": "terraform-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  }
+}
+```
+
+Install, build, and test:
+
+```bash terminal
+cd tools/terraform-mcp && npm install && npm run build
+```
+
+Configure your agent to use the MCP server. For Claude Code, add it to your MCP settings:
+
+```json title=".claude/mcp_settings.json"
+{
+  "mcpServers": {
+    "terraform-mcp": {
+      "command": "node",
+      "args": ["tools/terraform-mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+Now when your agent needs to run `terraform plan`, it calls the `terraform-plan` tool and receives structured JSON with resource counts, types, and actions. No shell parsing. No regex. No broken pipelines when Terraform updates its output format.
+
+<Alert type="caution" title="Agent Trap">
+
+The agent configures the MCP server with overly broad tool permissions. The `terraform-plan` tool should only read state and produce a plan. But the agent might add a `terraform-apply` tool "for convenience," or the `compliance-check` tool might get write access to modify files directly. MCP tool permissions must follow least privilege: plan and validate are read-only operations, and the compliance checker reads files but never modifies them. If you need an apply tool, it belongs behind a separate approval step, not in the same MCP server your agent calls freely.
+
+**What catches it:** Review the tool definitions in your MCP server. Each tool should have a clear read/write designation. Read-only tools can run freely. Write tools require human confirmation.
+
+</Alert>
+
+---
+
+## Scorecard: Panels 8-11
+
+Your Agent Scorecard from [Part 9](/blog/aws-for-startups/09-monorepo-context-evals) has been running with 7 panels. Today it grows to 11. The new panels measure pipeline performance, not just model quality.
+
+**Panel 8: Terraform Plan Diff Summary.** Resources added, changed, and destroyed per generation session. This is the `terraform-plan` MCP tool's output, logged to your pipeline metrics. A session that creates 12 resources when you asked for 3 is a red flag. A session that destroys resources you did not expect is a bigger one.
+
+**Panel 9: Infracost Estimate per PR.** Monthly cost estimate from every `verify.sh` run. Track agent-generated PRs separately from human PRs. If agent-generated infrastructure consistently costs 2x what human-written infrastructure costs for the same functionality, your prompts need cost constraints.
+
+**Panel 10: Cost Trend Over Time.** Aggregated monthly cost estimates across all pipeline runs. This panel answers "are my agents getting better or worse at cost-efficient infrastructure?" If the trend is up without a corresponding increase in infrastructure scope, something changed: a model update, a prompt regression, or a new default the agent picked up.
+
+**Panel 11: Verification Overhead Ratio.** Time spent on verify + explain divided by time spent on generation. If you spend 5 minutes generating and 20 minutes verifying, the ratio is 4.0. That means verification is the bottleneck, and you should improve your generator (better prompts, better model) rather than adding more checks. A healthy ratio is 0.5 to 1.5: verification takes less time than generation because the generator is good enough.
+
+:::tip
+The Verification Overhead Ratio is the single most actionable metric in your pipeline. If it is consistently above 2.0, do not add more verification tools. Improve your prompts. Better input produces better output, which reduces verification time. More verification tools increase the denominator without fixing the numerator.
+:::
+
+---
+
+## Recalibration Checkpoint 1
+
+This is your first data-driven trust adjustment. You have been building verification infrastructure since [Part 8](/blog/aws-for-startups/08-pre-commit-code-quality), measuring since [Part 9](/blog/aws-for-startups/09-monorepo-context-evals), and now you have enough data to make informed decisions about your pipeline. Recalibration is not a deep dive. It is a 15-minute checkpoint. Quick data check, adjustments, move on.
+
+<GuideStep title="Re-run model evaluations" number={1} syncKey="part-19-rerun-evals">
+
+Run `eval-models.sh` from Part 9 and compare the results to your original baseline. The expanded eval now includes Infracost scoring, instruction compliance, time metrics, and multi-file project evaluation.
+
+```bash terminal
+./scripts/eval/eval-models.sh
+```
+
+Compare the output to your Part 9 results. Key questions:
+
+- Are your primary models scoring higher or lower than before?
+- Has any model's instruction compliance dropped below 80%?
+- Are newer models (released since Part 9) worth evaluating?
+
+If scores improved, your context and prompt engineering from Parts 10-18 is paying off. If scores dropped, check whether a model update changed behavior, or whether your prompts drifted from the patterns in AGENT-INSTRUCTIONS.md.
+
+</GuideStep>
+
+<GuideStep title="Check Scorecard panels" number={2} syncKey="part-19-check-scorecard">
+
+Open your Grafana Scorecard and review all 11 panels. Focus on:
+
+- **Pre-commit pass/fail rate (Panel 1):** Is agent code passing pre-commit hooks more often than in Part 8? If yes, your AGENT-INSTRUCTIONS.md rules are being followed. If no, the rules need rephrasing or the model is ignoring them.
+- **Iterations-to-clean (from pipeline logs):** How many iterations does your generator typically need? If consistently 1, your generator is strong and you can reduce verification scope. If consistently 3+, your prompts need work.
+- **Cost estimates (Panels 9-10):** Are agent-generated resources cost-reasonable? Compare against what you would provision manually.
+
+</GuideStep>
+
+<GuideStep title="Review AGENT-INSTRUCTIONS.md" number={3} syncKey="part-19-review-instructions">
+
+Open your AGENT-INSTRUCTIONS.md (currently at 43 lines from Part 12). For each rule, ask:
+
+- Is this rule consistently followed? If yes, keep it.
+- Is this rule consistently violated? If yes, rephrase it or add a pre-commit hook to enforce it. A rule that agents ignore is not a rule.
+- Is this rule unnecessary? If you have never seen a violation and the rule does not prevent a realistic failure mode, consider removing it. Fewer, stronger rules are better than many weak ones.
+
+Do not add new rules today. This checkpoint is about evaluating existing rules, not expanding them. AGENT-INSTRUCTIONS.md stays at 43 lines after Part 19.
+
+</GuideStep>
+
+<GuideStep title="Adjust pipeline intensity" number={4} syncKey="part-19-adjust-pipeline">
+
+Based on your data:
+
+- **Iterations-to-clean averages 1:** Your generator is reliable. Consider skipping the agent fix loop for low-risk changes (documentation, variable descriptions) and running the full loop only for resource definitions and IAM policies.
+- **Iterations-to-clean averages 2:** Normal. Keep the current 3-iteration maximum.
+- **Iterations-to-clean averages 3+:** Your generator needs help. Improve your prompts before adding more verification checks. Review the findings from each iteration. Are they the same types of issues? Add those as explicit constraints in your prompt.
+
+</GuideStep>
+
+<GuideStep title="Update cost budget" number={5} syncKey="part-19-cost-budget">
+
+Check your LLM API spending for the last month. Compare it to your infrastructure spending.
+
+- **API spend < 2% of infra spend:** Healthy. Your pipeline is cost-efficient.
+- **API spend 2-5% of infra spend:** Acceptable. Monitor the trend.
+- **API spend > 5% of infra spend:** Optimize. Use cheaper models for the Explain step. Reduce the number of eval prompts. Consider local models for simple checks.
+
+The rule of thumb: your AI tooling should cost less than one engineer-hour per month to be worth the automation. If you are spending $200/month on API calls that save 10 minutes of manual work, the math does not work.
+
+</GuideStep>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Manual verification forever. You skip checkov on Fridays, forget tflint after lunch, and only run infracost when someone asks about the bill. No preview environments, so reviewers look at code diffs and imagine what the site looks like. |
+| ✅ **Right** | Scripted DGVE pipeline with a 3-iteration fix loop. terraform-mcp server for structured tool access. Preview environments per PR with automatic cleanup. Scorecard panels 8-11 tracking pipeline performance. Recalibration Checkpoint 1 completed with data-driven adjustments. |
+| ❌ **Over** | Full multi-agent orchestration with parallel generators, voting-based consensus, and automated deployment to preview environments, all before you have tested whether a single scripted pipeline catches real issues. Building the spaceship before you have proven the bicycle works. |
+| 🤖 **Agent Trap** | Agent generates preview infrastructure without lifecycle rules or cleanup workflows. Every PR creates objects in S3 that are never deleted. After 6 months, you have 200 preview prefixes consuming storage, and your S3 bill includes $15/month of orphaned preview assets nobody will ever look at again. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 20: VPC Fundamentals**, we leave the frontend behind and enter the network layer. Your backend needs a home, and that home is a VPC with public and private subnets, route tables, and a NAT Gateway. The preview pipeline you built today will verify every piece of networking Terraform your agent generates.
+
+:::note
+**Coming in Part 27:** The terraform-mcp server runs headlessly in GitHub Actions. MCP tools replace raw CLI commands in your CI pipeline, giving you structured verification output in CI logs instead of text you have to parse manually.
+:::
+
+:::note
+**Coming in Part 43:** The full multi-agent pipeline with parallel generators, unified MCP verification, and the pipeline eval framework that measures which model combinations produce the best infrastructure. The single pipeline you built today is the foundation.
+:::
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Preview Environments",
+    tasks: [
+      { text: "S3 bucket created with PR-prefix isolation", syncKey: "part-19-s3-bucket" },
+      { text: "CloudFront serving preview URLs", syncKey: "part-19-cloudfront" },
+      { text: "GitHub Actions deploys preview on PR open", syncKey: "part-19-preview-deploy" },
+      { text: "GitHub Actions cleans up on PR close", syncKey: "part-19-preview-cleanup" },
+      { text: "S3 lifecycle rule deletes objects older than 30 days", syncKey: "part-19-lifecycle" }
+    ]
+  },
+  {
+    category: "Pipeline",
+    tasks: [
+      { text: "verify.sh runs all checks (validate, tflint, checkov, infracost, compliance)", syncKey: "part-19-verify-checks" },
+      { text: "Fix loop works: verify → agent fix → re-verify (up to 3 iterations)", syncKey: "part-19-fix-loop" },
+      { text: "explain.sh produces readable summaries", syncKey: "part-19-explain" },
+      { text: "Pipeline metrics logged to JSON file", syncKey: "part-19-metrics-log" }
+    ]
+  },
+  {
+    category: "MCP",
+    tasks: [
+      { text: "terraform-mcp server builds and starts", syncKey: "part-19-mcp-build" },
+      { text: "terraform-plan tool returns structured JSON", syncKey: "part-19-mcp-plan" },
+      { text: "terraform-validate tool returns diagnostics", syncKey: "part-19-mcp-validate" },
+      { text: "compliance-check tool checks AGENT-INSTRUCTIONS.md rules", syncKey: "part-19-mcp-compliance" }
+    ]
+  },
+  {
+    category: "Scorecard",
+    tasks: [
+      { text: "Panel 8: Plan diff summary visible", syncKey: "part-19-panel-8" },
+      { text: "Panel 9: Infracost per PR visible", syncKey: "part-19-panel-9" },
+      { text: "Panel 10: Cost trend over time visible", syncKey: "part-19-panel-10" },
+      { text: "Panel 11: Verification Overhead Ratio calculating", syncKey: "part-19-panel-11" }
+    ]
+  },
+  {
+    category: "Recalibration",
+    tasks: [
+      { text: "eval-models.sh re-run and compared to Part 9 baseline", syncKey: "part-19-rerun-evals" },
+      { text: "AGENT-INSTRUCTIONS.md reviewed (no additions, 43 lines)", syncKey: "part-19-review-instructions" },
+      { text: "Pipeline intensity adjusted based on iterations-to-clean data", syncKey: "part-19-adjust-pipeline" },
+      { text: "Cost budget checked (API spend vs infra spend)", syncKey: "part-19-cost-budget" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. The manual verification you have been doing since Part 13 is now a script: `verify.sh` runs every check and gives the agent 3 chances to fix before escalating to you.
+2. The fix loop's "iterations-to-clean" metric tells you how good your generator is. Consistently above 2 means improve your prompts, not add more verification tools.
+3. MCP turns CLI commands into typed tools: agents call `terraform-plan` with structured input and get structured output instead of parsing shell text that breaks on version updates.
+4. Recalibration Checkpoint 1 is your first data-driven trust adjustment. The pipeline is not set-and-forget. It adapts based on what the data tells you about model quality, rule effectiveness, and cost efficiency.
+5. Preview environments per PR are table stakes for professional development. Every PR gets a live URL, every reviewer sees real output, and every closed PR cleans up after itself.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

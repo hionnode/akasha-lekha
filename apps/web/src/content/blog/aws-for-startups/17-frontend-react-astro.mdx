@@ -1,0 +1,540 @@
+---
+title: "Frontend Deployment: React + Astro on AWS"
+description: "Deploy React and Astro frontends to S3 + CloudFront with OpenTelemetry browser SDK. Web Vitals in SigNoz for real user performance monitoring."
+excerpt: "React + Astro on AWS with real user monitoring. Deploy to S3 + CloudFront and see Web Vitals in SigNoz, because 'it loads fast on my machine' isn't data."
+date: "2026-03-12"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "frontend", "opentelemetry", "s3", "cloudfront"]
+series: "AWS From Zero to Production"
+seriesPart: 17
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import PanelSwitcher from '../../../components/blog/code/PanelSwitcher.astro';
+import Panel from '../../../components/blog/code/Panel.astro';
+
+"It loads fast on my machine." You have said it. Everyone has said it. You open DevTools, check the Network tab, see 200ms load time, and close the laptop. Meanwhile, a user on a 3G connection in a coffee shop watches your loading spinner for 11 seconds before closing the tab. You will never know this happened because you have no data from their browser.
+
+Your SigNoz instance from [Part 5](/blog/aws-for-startups/05-observability-setup) has been sitting empty, waiting for real telemetry. Today it gets Web Vitals from actual browser sessions. Not Lighthouse scores from your M3 MacBook. Real data from real users on real networks.
+
+**Time:** About 45 minutes.
+
+**Outcome:** Frontend deployed to S3 + CloudFront with the OpenTelemetry browser SDK sending Web Vitals (LCP, FID, CLS) to SigNoz. Your first real user monitoring data.
+
+---
+
+## Why This Matters
+
+Local development servers lie. They serve files from disk with zero network latency. Assets are uncompressed because gzip adds build complexity you skip in dev. Your fonts load instantly because they are cached from your last session. None of this reflects production.
+
+Lighthouse scores lie differently. They simulate throttling on your fast machine with a warm cache and no real network variability. A Lighthouse score of 95 feels great. It means nothing if your actual p75 LCP is 4.2 seconds on mobile.
+
+The only performance data that matters comes from real browsers. The OpenTelemetry browser SDK captures Web Vitals (Largest Contentful Paint, First Input Delay, Cumulative Layout Shift) from every page load and sends them to SigNoz. You built the SigNoz infrastructure in Part 5. Today it starts earning its keep.
+
+Two framework builds, one deployment target. React (via Vite) and Astro both produce static files. The S3 bucket and CloudFront distribution you created in [Parts 13-15](/blog/aws-for-startups/13-s3-static-hosting) do not care which framework generated those files. HTML, CSS, JS. That is all S3 sees.
+
+---
+
+## What We're Building
+
+- Build configuration for React (Vite) and Astro targeting S3 deployment
+- A deployment script (`scripts/deploy-frontend.sh`) with S3 sync and CloudFront invalidation
+- OpenTelemetry browser SDK integration sending Web Vitals to SigNoz
+- A SigNoz dashboard showing real user performance metrics
+- A cache invalidation strategy that balances freshness with cost
+
+---
+
+## Build Configuration
+
+Both frameworks produce a directory of static files. The only difference is the build command and the output directory.
+
+<PanelSwitcher defaultActive="react">
+  <Panel label="React (Vite)" value="react">
+
+```typescript title="vite.config.ts"
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  build: {
+    outDir: 'dist',
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        // Content-hash filenames for long-term caching
+        entryFileNames: 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash].[ext]',
+      },
+    },
+  },
+});
+```
+
+Build the project:
+
+```bash terminal
+npm run build
+```
+
+Output directory: `dist/`. Every JS and CSS file gets a content hash in its filename. This is critical for cache invalidation: when the content changes, the filename changes, and CloudFront serves the new file without waiting for the cache TTL.
+
+  </Panel>
+  <Panel label="Astro" value="astro">
+
+```typescript title="astro.config.mjs"
+import { defineConfig } from 'astro/config';
+
+export default defineConfig({
+  output: 'static',
+  build: {
+    assets: 'assets',
+  },
+  vite: {
+    build: {
+      sourcemap: true,
+      rollupOptions: {
+        output: {
+          entryFileNames: 'assets/[name]-[hash].js',
+          chunkFileNames: 'assets/[name]-[hash].js',
+          assetFileNames: 'assets/[name]-[hash].[ext]',
+        },
+      },
+    },
+  },
+});
+```
+
+Build the project:
+
+```bash terminal
+npm run build
+```
+
+Output directory: `dist/`. Astro's static mode produces the same kind of output as React: HTML files, hashed assets, and a predictable directory structure.
+
+  </Panel>
+</PanelSwitcher>
+
+The build output from both frameworks looks identical from S3's perspective:
+
+<FileTree>
+dist/
+  index.html
+  404.html
+  assets/
+    main-a1b2c3d4.js
+    main-e5f6g7h8.css
+    logo-i9j0k1l2.svg
+  favicon.ico
+</FileTree>
+
+:::tip
+Enable source maps in production builds. When a JavaScript error fires in a user's browser, the OTel browser SDK captures it with a stack trace. Source maps let SigNoz show you the original file and line number instead of minified garbage.
+:::
+
+---
+
+## Deployment Script
+
+You deployed manually with `aws s3 sync` in [Part 13](/blog/aws-for-startups/13-s3-static-hosting). That works for one-off deployments. For repeatable deployments, you need a script that handles the build, sync, and cache invalidation in one command.
+
+```bash title="scripts/deploy-frontend.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Configuration
+S3_BUCKET="${S3_BUCKET:?Set S3_BUCKET environment variable}"
+CLOUDFRONT_ID="${CLOUDFRONT_ID:?Set CLOUDFRONT_ID environment variable}"
+BUILD_DIR="${BUILD_DIR:-dist}"
+
+echo "==> Building frontend..."
+npm run build
+
+echo "==> Syncing ${BUILD_DIR}/ to s3://${S3_BUCKET}..."
+
+# Sync hashed assets with long cache (1 year)
+aws s3 sync "${BUILD_DIR}/assets/" "s3://${S3_BUCKET}/assets/" \
+  --cache-control "public, max-age=31536000, immutable" \
+  --delete
+
+# Sync HTML files with short cache (5 minutes)
+aws s3 sync "${BUILD_DIR}/" "s3://${S3_BUCKET}/" \
+  --cache-control "public, max-age=300" \
+  --exclude "assets/*" \
+  --delete
+
+echo "==> Invalidating CloudFront distribution ${CLOUDFRONT_ID}..."
+INVALIDATION_ID=$(aws cloudfront create-invalidation \
+  --distribution-id "${CLOUDFRONT_ID}" \
+  --paths "/index.html" "/404.html" \
+  --query 'Invalidation.Id' \
+  --output text)
+
+echo "==> Invalidation created: ${INVALIDATION_ID}"
+echo "==> Deploy complete."
+```
+
+The script uses two different `aws s3 sync` commands with different `Cache-Control` headers. This is the key insight: hashed assets (JS, CSS, images) get a one-year cache because their filenames change when content changes. HTML files get a 5-minute cache because their filenames never change, and you want users to see new content quickly after a deploy.
+
+Make it executable and run it:
+
+```bash terminal
+chmod +x scripts/deploy-frontend.sh
+S3_BUCKET=your-app-frontend CLOUDFRONT_ID=E1A2B3C4D5 ./scripts/deploy-frontend.sh
+```
+
+<TerminalOutput title="deploy output">
+
+```
+==> Building frontend...
+✓ 312 modules transformed.
+dist/index.html                     1.42 kB │ gzip:  0.73 kB
+dist/assets/main-a1b2c3d4.js     142.87 kB │ gzip: 45.21 kB
+dist/assets/main-e5f6g7h8.css      8.34 kB │ gzip:  2.15 kB
+==> Syncing dist/ to s3://your-app-frontend...
+upload: dist/assets/main-a1b2c3d4.js to s3://your-app-frontend/assets/main-a1b2c3d4.js
+upload: dist/assets/main-e5f6g7h8.css to s3://your-app-frontend/assets/main-e5f6g7h8.css
+upload: dist/index.html to s3://your-app-frontend/index.html
+==> Invalidating CloudFront distribution E1A2B3C4D5...
+==> Invalidation created: I3KDHSAW2EXAMPLE
+==> Deploy complete.
+```
+
+</TerminalOutput>
+
+:::note
+CloudFront invalidations are free for the first 1,000 paths per month. After that, $0.005 per path. Invalidating `/*` counts as one path but clears everything, including your perfectly cached hashed assets. Only invalidate the specific HTML files that changed.
+:::
+
+---
+
+## OTel Browser SDK
+
+The OpenTelemetry browser SDK sends performance data from the user's browser to your SigNoz collector. This is real user monitoring (RUM): actual page load times, actual interaction delays, actual layout shifts. Not synthetic tests.
+
+<PanelSwitcher defaultActive="react">
+  <Panel label="React (Vite)" value="react">
+
+Install the dependencies:
+
+```bash terminal
+npm install @opentelemetry/api @opentelemetry/sdk-trace-web \
+  @opentelemetry/instrumentation-document-load \
+  @opentelemetry/exporter-trace-otlp-http \
+  web-vitals
+```
+
+Create the telemetry initialization file:
+
+```typescript title="src/telemetry.ts"
+import { WebTracerProvider } from '@opentelemetry/sdk-trace-web';
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-web';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { DocumentLoadInstrumentation } from '@opentelemetry/instrumentation-document-load';
+import { registerInstrumentations } from '@opentelemetry/instrumentation';
+import { Resource } from '@opentelemetry/resources';
+import { onLCP, onFID, onCLS, onTTFB } from 'web-vitals';
+
+const COLLECTOR_URL = import.meta.env.VITE_OTEL_COLLECTOR_URL
+  || 'https://otel.your-domain.com/v1/traces';
+
+// Sample 10% of sessions in production
+const SAMPLE_RATE = import.meta.env.PROD ? 0.1 : 1.0;
+
+export function initTelemetry() {
+  // Session-based sampling: decide once per session
+  if (Math.random() > SAMPLE_RATE) return;
+
+  const exporter = new OTLPTraceExporter({
+    url: COLLECTOR_URL,
+  });
+
+  const provider = new WebTracerProvider({
+    resource: new Resource({
+      'service.name': 'frontend-react',
+      'deployment.environment': import.meta.env.MODE,
+    }),
+  });
+
+  provider.addSpanProcessor(new BatchSpanProcessor(exporter, {
+    maxQueueSize: 100,
+    maxExportBatchSize: 10,
+    scheduledDelayMillis: 5000,
+  }));
+
+  provider.register();
+
+  registerInstrumentations({
+    instrumentations: [new DocumentLoadInstrumentation()],
+  });
+
+  // Web Vitals as custom spans
+  const tracer = provider.getTracer('web-vitals');
+
+  const reportVital = (metric: { name: string; value: number; id: string }) => {
+    const span = tracer.startSpan(`web-vital.${metric.name}`);
+    span.setAttribute('vital.name', metric.name);
+    span.setAttribute('vital.value', metric.value);
+    span.setAttribute('vital.id', metric.id);
+    span.end();
+  };
+
+  onLCP(reportVital);
+  onFID(reportVital);
+  onCLS(reportVital);
+  onTTFB(reportVital);
+}
+```
+
+Initialize it in your app entry point:
+
+```typescript title="src/main.tsx"
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import { initTelemetry } from './telemetry';
+
+initTelemetry();
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+```
+
+  </Panel>
+  <Panel label="Astro" value="astro">
+
+Install the dependencies:
+
+```bash terminal
+npm install @opentelemetry/api @opentelemetry/sdk-trace-web \
+  @opentelemetry/instrumentation-document-load \
+  @opentelemetry/exporter-trace-otlp-http \
+  web-vitals
+```
+
+Create the telemetry initialization file:
+
+```typescript title="src/scripts/telemetry.ts"
+import { WebTracerProvider } from '@opentelemetry/sdk-trace-web';
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-web';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { DocumentLoadInstrumentation } from '@opentelemetry/instrumentation-document-load';
+import { registerInstrumentations } from '@opentelemetry/instrumentation';
+import { Resource } from '@opentelemetry/resources';
+import { onLCP, onFID, onCLS, onTTFB } from 'web-vitals';
+
+const COLLECTOR_URL = import.meta.env.PUBLIC_OTEL_COLLECTOR_URL
+  || 'https://otel.your-domain.com/v1/traces';
+
+const SAMPLE_RATE = import.meta.env.PROD ? 0.1 : 1.0;
+
+export function initTelemetry() {
+  if (Math.random() > SAMPLE_RATE) return;
+
+  const exporter = new OTLPTraceExporter({
+    url: COLLECTOR_URL,
+  });
+
+  const provider = new WebTracerProvider({
+    resource: new Resource({
+      'service.name': 'frontend-astro',
+      'deployment.environment': import.meta.env.MODE,
+    }),
+  });
+
+  provider.addSpanProcessor(new BatchSpanProcessor(exporter, {
+    maxQueueSize: 100,
+    maxExportBatchSize: 10,
+    scheduledDelayMillis: 5000,
+  }));
+
+  provider.register();
+
+  registerInstrumentations({
+    instrumentations: [new DocumentLoadInstrumentation()],
+  });
+
+  const tracer = provider.getTracer('web-vitals');
+
+  const reportVital = (metric: { name: string; value: number; id: string }) => {
+    const span = tracer.startSpan(`web-vital.${metric.name}`);
+    span.setAttribute('vital.name', metric.name);
+    span.setAttribute('vital.value', metric.value);
+    span.setAttribute('vital.id', metric.id);
+    span.end();
+  };
+
+  onLCP(reportVital);
+  onFID(reportVital);
+  onCLS(reportVital);
+  onTTFB(reportVital);
+}
+```
+
+Load it in your base layout as a client-side script:
+
+```astro title="src/layouts/BaseLayout.astro"
+---
+// ... layout props
+---
+<html>
+  <head>
+    <!-- head content -->
+  </head>
+  <body>
+    <slot />
+    <script>
+      import { initTelemetry } from '../scripts/telemetry';
+      initTelemetry();
+    </script>
+  </body>
+</html>
+```
+
+  </Panel>
+</PanelSwitcher>
+
+Three things to notice about this configuration:
+
+1. **Session-based sampling at 10%.** The `Math.random()` check runs once per page load. If the user is not in the 10% sample, no telemetry code runs at all. No network requests, no performance overhead. This is essential for production. Without sampling, every page view sends telemetry data, and SigNoz ingestion costs scale linearly with traffic.
+
+2. **BatchSpanProcessor with conservative settings.** The batch processor queues spans and sends them in batches every 5 seconds. The max queue size of 100 prevents memory issues on long-lived pages. The batch size of 10 keeps individual requests small.
+
+3. **Web Vitals as spans, not metrics.** The OTel browser SDK does not have a native metrics API that works well in browsers yet. We create spans for each Web Vital, which SigNoz can query, aggregate, and alert on. This is a pragmatic choice, not an architectural statement.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate OTel browser configurations with no sampling. The default `TraceIdRatioBasedSampler` set to `1.0` means every single page view sends full telemetry. For a site with 10,000 daily page views, that is 10,000 trace exports per day, each containing document load spans, resource timing spans, and Web Vitals. SigNoz ingestion will spike, and if you are on a paid plan, your bill will spike with it.
+
+**What catches it:** Check the `SAMPLE_RATE` value in your telemetry initialization. Production should be 0.05 to 0.2 (5% to 20%). Development should be 1.0 for debugging.
+
+</Alert>
+
+---
+
+## SigNoz Dashboard
+
+Your SigNoz instance from [Part 5](/blog/aws-for-startups/05-observability-setup) now receives browser traces. Open the SigNoz UI and navigate to **Traces**. Filter by `service.name = frontend-react` (or `frontend-astro`). You should see document load traces and Web Vital spans.
+
+Create a dashboard for Web Vitals:
+
+:::steps
+1. Navigate to **Dashboards > New Dashboard**
+2. Add a panel for LCP: query `web-vital.LCP` spans, aggregate by `avg(vital.value)`, group by time
+3. Add a panel for FID: same pattern, `web-vital.FID`
+4. Add a panel for CLS: same pattern, `web-vital.CLS`
+5. Add a panel for TTFB: same pattern, `web-vital.TTFB`
+6. Set the time range to "Last 24 hours" and save
+:::
+
+Target thresholds from Google's Core Web Vitals:
+
+| Metric | Good | Needs Improvement | Poor |
+|--------|------|-------------------|------|
+| LCP | < 2.5s | 2.5s - 4.0s | > 4.0s |
+| FID | < 100ms | 100ms - 300ms | > 300ms |
+| CLS | < 0.1 | 0.1 - 0.25 | > 0.25 |
+| TTFB | < 800ms | 800ms - 1800ms | > 1800ms |
+
+Set SigNoz alerts on these thresholds. When your p75 LCP crosses 2.5 seconds, you want to know. Not next sprint. Today.
+
+:::tip
+Start with TTFB. It measures the time from the user's request to the first byte of your response. If TTFB is slow, nothing else matters because the browser cannot start rendering until it receives the HTML. For S3 + CloudFront, your TTFB should be under 200ms for cached content. If it is over 800ms, check your CloudFront cache hit ratio.
+:::
+
+---
+
+## Cache Invalidation Strategy
+
+Cache invalidation is one of the two hard problems in computer science (the other is naming things and off-by-one errors). With S3 + CloudFront, you have three levers:
+
+**1. Content-hash filenames (assets).** This is the primary strategy. Every JS, CSS, and image file has a hash in its filename. When the file content changes, the filename changes. CloudFront caches the old filename forever, and the new filename is a cache miss that gets fetched from S3. No invalidation needed.
+
+**2. Short TTL on HTML (5 minutes).** HTML files do not have hashed filenames. `index.html` is always `index.html`. The 5-minute `max-age` in the deploy script means CloudFront serves stale HTML for at most 5 minutes after a deploy. For most applications, this is acceptable.
+
+**3. CloudFront invalidation (emergency).** When you need immediate updates (a broken link, a security fix, a pricing error), invalidate the specific HTML paths. The deploy script already does this for `index.html` and `404.html`. Do not invalidate `/*` unless you genuinely need to clear everything. Invalidating `/*` forces CloudFront to fetch every asset from S3, which temporarily increases your S3 request costs and slows first-visit load times.
+
+| Strategy | When to Use | Cost |
+|----------|-------------|------|
+| Content hashing | Every deploy (automatic) | $0 |
+| Short TTL | Every deploy (automatic) | $0 |
+| Path invalidation | Emergency content fixes | Free up to 1,000 paths/month |
+| Wildcard invalidation | Major rewrite, cache corruption | Counts as 1 path, but re-fetches everything |
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Deploy frontend to S3 and call it done. No performance monitoring, no cache strategy. You find out your site is slow when users stop coming. |
+| ✅ **Right** | S3 + CloudFront deployment with content-hash caching, OTel browser SDK at 10% sampling, Web Vitals in SigNoz, alerts on LCP/FID/CLS thresholds. |
+| ❌ **Over** | Custom RUM solution, A/B testing infrastructure, performance budgets with automated rollbacks, and a dedicated dashboard engineer, all before you have 100 daily users. |
+| 🤖 **Agent Trap** | Agent generates OTel config that sends every event unsampled, sets `TraceIdRatioBasedSampler(1.0)`, and creates spans for every DOM interaction. Your SigNoz ingestion bill doubles and your app adds 200ms of telemetry overhead on every page load. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 18: Frontend Deployment, SvelteKit + SolidStart on AWS**, we deploy the same S3 + CloudFront stack with different frameworks. The deploy script you wrote today works unchanged. The infrastructure does not care about your framework choice, and Part 18 proves it.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "Deployment",
+    tasks: [
+      { text: "Frontend built with production config (source maps enabled)", syncKey: "part-17-build" },
+      { text: "Build output synced to S3 bucket", syncKey: "part-17-s3-sync" },
+      { text: "CloudFront serving the application (visit your domain)", syncKey: "part-17-cloudfront-serving" },
+      { text: "deploy-frontend.sh script runs end-to-end", syncKey: "part-17-deploy-script" }
+    ]
+  },
+  {
+    category: "Monitoring",
+    tasks: [
+      { text: "OTel browser SDK configured with session sampling", syncKey: "part-17-otel-sdk" },
+      { text: "Web Vitals visible in SigNoz Traces view", syncKey: "part-17-signoz-traces" },
+      { text: "SigNoz dashboard created with LCP, FID, CLS, TTFB panels", syncKey: "part-17-signoz-dashboard" },
+      { text: "Sampling rate set to 10% for production, 100% for development", syncKey: "part-17-sampling" }
+    ]
+  },
+  {
+    category: "Caching",
+    tasks: [
+      { text: "Hashed assets have 1-year Cache-Control", syncKey: "part-17-cache-assets" },
+      { text: "HTML files have 5-minute Cache-Control", syncKey: "part-17-cache-html" },
+      { text: "CloudFront invalidation targeting specific HTML paths only", syncKey: "part-17-invalidation" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. SigNoz gets its first real data today: the empty dashboard from Part 5 starts earning its keep with Web Vitals from actual browser sessions.
+2. Web Vitals (LCP, FID, CLS) measured from real users on real networks are the performance metrics that matter, not your local Lighthouse score on a fast machine.
+3. Always configure session-based sampling on browser telemetry: 10% in production gives you statistically meaningful data without flooding your observability backend or adding overhead to every page load.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

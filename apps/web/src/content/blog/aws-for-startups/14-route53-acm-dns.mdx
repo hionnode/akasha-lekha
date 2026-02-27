@@ -1,0 +1,632 @@
+---
+title: "Route53 + ACM: Custom Domain with HTTPS"
+description: "Configure custom domain with Route53 DNS and ACM SSL certificates. Terraform-managed DNS records, certificate validation, and the agent workflow for DNS setup."
+excerpt: "Custom domain with HTTPS. Route53 for DNS, ACM for SSL, because nobody trusts an S3 endpoint URL."
+date: "2026-02-28"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "route53", "acm", "terraform", "frontend"]
+series: "AWS From Zero to Production"
+seriesPart: 14
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import GuideStep from '../../../components/blog/guide/GuideStep.astro';
+
+Nobody trusts `http://mastery-dev-website.s3-website-us-east-1.amazonaws.com`. That URL tells your users three things: you are on AWS, you are serving over HTTP, and you did not bother setting up a real domain. Custom domains and HTTPS are not features. They are baseline trust. Route53 gives you DNS, ACM gives you free SSL certificates, and Terraform manages both.
+
+**Time:** About 30 minutes of hands-on work, plus up to 48 hours of DNS propagation (usually under 30 minutes).
+
+**Outcome:** Your custom domain pointing to your S3 static site with a valid HTTPS certificate, fully managed by Terraform.
+
+---
+
+## Why This Matters
+
+HTTPS is not optional. Browsers mark HTTP sites as "Not Secure" in the address bar. Google ranks HTTPS sites higher. Any site that handles user interaction (forms, cookies, JavaScript) over HTTP is vulnerable to man-in-the-middle attacks. Even for a static marketing page, HTTP signals "this person does not know what they are doing."
+
+ACM certificates are free. Route53 hosted zones cost $0.50/month. There is no cost justification for skipping this. The only reason startups serve over HTTP is because DNS configuration feels complicated. It is not. It is four Terraform resources and a nameserver update.
+
+Two concepts drive this post:
+
+1. **DNS validation is the modern way to prove domain ownership.** ACM gives you a choice: email validation or DNS validation. DNS validation is automatable with Terraform. Email validation requires clicking a link in an email sent to admin@yourdomain.com, which may not exist yet. Always choose DNS validation.
+
+2. **ACM certificates for CloudFront must be in us-east-1.** This catches people constantly. Your application can run in any region. Your ACM certificate for CloudFront must be in us-east-1 (N. Virginia). This is an AWS requirement, not a Terraform limitation. You will need this in [Part 15](/blog/aws-for-startups/15-cloudfront-cdn) when you add CloudFront. We set it up correctly now so you do not have to recreate the certificate later.
+
+---
+
+## What We're Building
+
+- A Route53 hosted zone for your domain
+- An ACM certificate with DNS validation
+- DNS validation records (CNAME) that prove domain ownership
+- An A record (alias) pointing your domain to the S3 website endpoint
+- A CNAME record for the `www` subdomain
+- Terraform managing all of it
+
+---
+
+## Prerequisites
+
+You need a registered domain name. If you do not have one:
+
+- **Register through Route53:** $12-15/year for a `.com`. Route53 automatically creates the hosted zone and sets nameservers. Easiest path.
+- **Register through an external registrar** (Namecheap, Cloudflare, Google Domains): Works fine, but you will need to update nameservers to point to Route53 after creating the hosted zone.
+
+This post assumes you have a domain. If you register through Route53, skip the nameserver configuration section.
+
+---
+
+## Design: DNS and Certificate Architecture
+
+```
+┌──────────────┐  DNS query   ┌──────────────────┐
+│   Browser    │ ───────────► │   Route53         │
+│              │              │   Hosted Zone      │
+│              │              │                    │
+│  yourdomain  │              │   A record ──────►│──► S3 Website Endpoint
+│   .com       │              │   (alias)          │
+│              │              │                    │
+│  www.your    │              │   CNAME ──────────►│──► yourdomain.com
+│   domain.com │              │   (www redirect)   │
+└──────────────┘              └──────────────────┘
+
+                              ┌──────────────────┐
+                              │   ACM             │
+                              │   Certificate     │
+                              │                   │
+                              │   *.yourdomain    │
+                              │   .com            │
+                              │                   │
+                              │   DNS validated   │
+                              │   via CNAME       │
+                              │   record in       │
+                              │   Route53         │
+                              └──────────────────┘
+```
+
+**Design decisions:**
+
+- **Wildcard certificate.** Request a cert for `*.yourdomain.com` and `yourdomain.com` (SAN). This covers the apex domain and every subdomain. One certificate handles your main site, API subdomain, staging subdomain, and anything else you add later. No additional cost.
+- **Certificate in us-east-1.** Even if your S3 bucket is in another region. CloudFront (Part 15) requires this. Creating it in us-east-1 now means zero rework later.
+- **Alias record, not CNAME for apex.** DNS rules prohibit CNAME records on the apex domain (`yourdomain.com`). Route53 alias records solve this. They behave like CNAMEs but are allowed on the apex domain and resolve faster (no additional DNS lookup).
+- **TTL strategy.** Low TTL (60 seconds) during initial setup so DNS changes propagate quickly. You can increase to 3600 seconds (1 hour) once everything is stable. Agents set 300 seconds for everything, which is a mediocre default for all record types.
+
+---
+
+## Generate: Agent Builds the Terraform
+
+### The Prompt
+
+```text title="Agent Prompt"
+Create Terraform configuration for Route53 DNS and ACM certificate.
+
+Requirements:
+- Route53 hosted zone for the domain (variable)
+- ACM certificate for *.{domain} and {domain} (SAN) in us-east-1
+- DNS validation records for ACM in the Route53 hosted zone
+- A record (alias) pointing apex domain to S3 website endpoint (from existing s3-website module)
+- CNAME for www.{domain} pointing to {domain}
+- TTL of 60 for A records (migration period), 300 for CNAME
+- All resources tagged per AGENT-INSTRUCTIONS.md
+- Use a separate AWS provider for us-east-1 (aliased) for the ACM certificate
+
+Files to create:
+- modules/dns/main.tf
+- modules/dns/variables.tf
+- modules/dns/outputs.tf
+- environments/dev/dns.tf (module invocation)
+
+Follow all conventions in AGENT-INSTRUCTIONS.md.
+```
+
+### Agent Output (Unedited)
+
+```hcl title="modules/dns/variables.tf"
+variable "domain_name" {
+  description = "Root domain name (e.g., yourdomain.com)"
+  type        = string
+}
+
+variable "project" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Deployment environment"
+  type        = string
+}
+
+variable "s3_website_endpoint" {
+  description = "S3 website endpoint (without http://)"
+  type        = string
+}
+
+variable "s3_hosted_zone_id" {
+  description = "S3 website endpoint hosted zone ID for alias record"
+  type        = string
+}
+
+variable "common_tags" {
+  description = "Common tags applied to all resources"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```hcl title="modules/dns/main.tf"
+terraform {
+  required_providers {
+    aws = {
+      source                = "hashicorp/aws"
+      configuration_aliases = [aws.us_east_1]
+    }
+  }
+}
+
+# Route53 Hosted Zone
+resource "aws_route53_zone" "main" {
+  name = var.domain_name
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-zone"
+  })
+}
+
+# ACM Certificate (must be in us-east-1 for CloudFront)
+resource "aws_acm_certificate" "main" {
+  provider = aws.us_east_1
+
+  domain_name               = var.domain_name
+  subject_alternative_names = ["*.${var.domain_name}"]
+  validation_method         = "DNS"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-cert"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# DNS Validation Records
+resource "aws_route53_record" "cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.main.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  allow_overwrite = true
+  name            = each.value.name
+  records         = [each.value.record]
+  ttl             = 300
+  type            = each.value.type
+  zone_id         = aws_route53_zone.main.zone_id
+}
+
+# Certificate Validation
+resource "aws_acm_certificate_validation" "main" {
+  provider = aws.us_east_1
+
+  certificate_arn         = aws_acm_certificate.main.arn
+  validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+}
+
+# A Record - Apex domain to S3
+resource "aws_route53_record" "apex" {
+  zone_id = aws_route53_zone.main.zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  alias {
+    name                   = var.s3_website_endpoint
+    zone_id                = var.s3_hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+# CNAME - www to apex
+resource "aws_route53_record" "www" {
+  zone_id = aws_route53_zone.main.zone_id
+  name    = "www.${var.domain_name}"
+  type    = "CNAME"
+  ttl     = 300
+  records = [var.domain_name]
+}
+```
+
+```hcl title="modules/dns/outputs.tf"
+output "zone_id" {
+  description = "Route53 hosted zone ID"
+  value       = aws_route53_zone.main.zone_id
+}
+
+output "nameservers" {
+  description = "Nameservers for the hosted zone (update at your registrar)"
+  value       = aws_route53_zone.main.name_servers
+}
+
+output "certificate_arn" {
+  description = "ACM certificate ARN (for CloudFront)"
+  value       = aws_acm_certificate.main.arn
+}
+
+output "domain_name" {
+  description = "The domain name"
+  value       = var.domain_name
+}
+```
+
+```hcl title="environments/dev/dns.tf"
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+
+  default_tags {
+    tags = {
+      Environment = "dev"
+      Project     = "mastery"
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+module "dns" {
+  source = "../../modules/dns"
+
+  providers = {
+    aws            = aws
+    aws.us_east_1  = aws.us_east_1
+  }
+
+  domain_name         = "yourdomain.com"
+  project             = "mastery"
+  environment         = "dev"
+  s3_website_endpoint = module.website.website_endpoint
+  s3_hosted_zone_id   = "Z3AQBSTGFYJSTF"  # us-east-1 S3 website endpoint hosted zone ID
+
+  common_tags = {
+    Environment = "dev"
+    Project     = "mastery"
+    Owner       = "your-name"
+    ManagedBy   = "terraform"
+  }
+}
+
+output "nameservers" {
+  description = "Update these at your domain registrar"
+  value       = module.dns.nameservers
+}
+
+output "certificate_arn" {
+  description = "ACM certificate ARN for CloudFront (Part 15)"
+  value       = module.dns.certificate_arn
+}
+```
+
+### Review: What the Agent Got Right and Wrong
+
+The agent produced solid Terraform. The multi-provider pattern for us-east-1 ACM is correct. The `for_each` on `domain_validation_options` is the idiomatic way to create DNS validation records. The `lifecycle { create_before_destroy = true }` on the certificate prevents downtime during certificate renewal. Good work.
+
+But there are two issues.
+
+**Issue 1: Hardcoded S3 hosted zone ID.**
+
+```hcl
+s3_hosted_zone_id = "Z3AQBSTGFYJSTF"  # us-east-1 S3 website endpoint hosted zone ID
+```
+
+The agent hardcoded the S3 website endpoint hosted zone ID. This value is different per region. If your bucket is in `ap-south-1`, this zone ID is wrong and the alias record will not resolve. The correct approach is to use a data source or pass it as an output from the S3 module.
+
+Add this output to your S3 module:
+
+```hcl title="modules/s3-website/outputs.tf (add)"
+output "hosted_zone_id" {
+  description = "Hosted zone ID for S3 website endpoint"
+  value       = aws_s3_bucket.website.hosted_zone_id
+}
+```
+
+Then reference it in the environment file:
+
+```hcl title="environments/dev/dns.tf (fix)"
+  s3_hosted_zone_id   = module.website.hosted_zone_id
+```
+
+No more hardcoded zone IDs. The value comes from the actual bucket, regardless of region.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate Route53 records with hardcoded TTL of 300 seconds (5 minutes) for all record types. In the agent output above, both the A record alias and the www CNAME use 300-second TTLs. In reality, the A record alias does not use TTL at all (Route53 aliases resolve at query time), and the www CNAME should use 60 seconds during the initial migration period, increasing to 3600 seconds once DNS is stable.
+
+The agent uses the same TTL everywhere because its training data does not differentiate TTL strategy by record type and lifecycle stage. Low TTLs during migration let you fix DNS mistakes quickly. High TTLs once stable reduce DNS query costs and improve resolution speed. 300 seconds is not terrible, but it is the mediocre middle ground agents default to.
+
+**What catches it:** Manual review. No automated tool checks TTL strategy. Add a comment in your Terraform explaining the TTL choice so future reviewers (and future agents) understand the reasoning.
+
+</Alert>
+
+**Issue 2: Missing TTL comment and apex record TTL.**
+
+The alias record does not have a TTL (which is correct, Route53 handles it), but the www CNAME should have a comment explaining the TTL strategy. Add one:
+
+```hcl title="modules/dns/main.tf (improved)"
+# CNAME - www to apex
+# TTL: 60s during migration, increase to 3600 once DNS is stable
+resource "aws_route53_record" "www" {
+  zone_id = aws_route53_zone.main.zone_id
+  name    = "www.${var.domain_name}"
+  type    = "CNAME"
+  ttl     = 60
+  records = [var.domain_name]
+}
+```
+
+---
+
+## Deploy and Configure
+
+<GuideStep title="Run terraform plan" number={1} syncKey="part-14-plan">
+
+```bash terminal
+cd environments/dev
+terraform plan -out=tfplan
+```
+
+<TerminalOutput title="terraform plan">
+
+```
+Terraform will perform the following actions:
+
+  # module.dns.aws_route53_zone.main will be created
+  # module.dns.aws_acm_certificate.main will be created
+  # module.dns.aws_route53_record.cert_validation["yourdomain.com"] will be created
+  # module.dns.aws_route53_record.cert_validation["*.yourdomain.com"] will be created
+  # module.dns.aws_acm_certificate_validation.main will be created
+  # module.dns.aws_route53_record.apex will be created
+  # module.dns.aws_route53_record.www will be created
+
+Plan: 7 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + certificate_arn = (known after apply)
+  + nameservers     = (known after apply)
+```
+
+</TerminalOutput>
+
+Seven resources. The certificate validation resources are what prove to ACM that you own the domain.
+
+</GuideStep>
+
+<GuideStep title="Apply and note the nameservers" number={2} syncKey="part-14-apply">
+
+```bash terminal
+terraform apply tfplan
+```
+
+<TerminalOutput title="terraform apply (partial)">
+
+```
+module.dns.aws_route53_zone.main: Creating...
+module.dns.aws_route53_zone.main: Creation complete after 1s
+
+module.dns.aws_acm_certificate.main: Creating...
+module.dns.aws_acm_certificate.main: Creation complete after 3s
+
+module.dns.aws_route53_record.cert_validation["yourdomain.com"]: Creating...
+module.dns.aws_route53_record.cert_validation["*.yourdomain.com"]: Creating...
+module.dns.aws_route53_record.cert_validation["yourdomain.com"]: Creation complete after 30s
+module.dns.aws_route53_record.cert_validation["*.yourdomain.com"]: Creation complete after 30s
+
+module.dns.aws_route53_record.apex: Creating...
+module.dns.aws_route53_record.www: Creating...
+module.dns.aws_route53_record.apex: Creation complete after 30s
+module.dns.aws_route53_record.www: Creation complete after 30s
+
+module.dns.aws_acm_certificate_validation.main: Creating...
+module.dns.aws_acm_certificate_validation.main: Still creating... [1m0s elapsed]
+module.dns.aws_acm_certificate_validation.main: Still creating... [2m0s elapsed]
+module.dns.aws_acm_certificate_validation.main: Creation complete after 2m34s
+
+Apply complete! Resources: 7 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/abc123-def456"
+nameservers = tolist([
+  "ns-1234.awsdns-26.org",
+  "ns-567.awsdns-07.net",
+  "ns-890.awsdns-45.co.uk",
+  "ns-12.awsdns-01.com",
+])
+```
+
+</TerminalOutput>
+
+The certificate validation step takes 2-5 minutes. Terraform waits for ACM to verify the DNS records. If this times out, the CNAME validation records may not have propagated yet. Run `terraform apply` again and it will pick up where it left off.
+
+Save those nameservers. You need them in the next step.
+
+</GuideStep>
+
+<GuideStep title="Update nameservers at your registrar" number={3} syncKey="part-14-nameservers">
+
+If you registered your domain through Route53, skip this step. Route53 handles nameservers automatically.
+
+If you registered elsewhere, go to your registrar's DNS settings and replace the existing nameservers with the four Route53 nameservers from the Terraform output. Every registrar has a different UI for this, but the concept is the same: find "Nameservers" or "DNS Settings" and replace the defaults.
+
+:::warning
+Nameserver changes can take up to 48 hours to propagate globally. In practice, most registrars propagate within 30 minutes. Do not make other DNS changes until propagation completes.
+:::
+
+</GuideStep>
+
+<GuideStep title="Verify DNS propagation" number={4} syncKey="part-14-verify-dns">
+
+Use `dig` to verify your DNS is resolving through Route53:
+
+```bash terminal
+dig yourdomain.com NS +short
+```
+
+<TerminalOutput title="dig NS">
+
+```
+ns-1234.awsdns-26.org.
+ns-567.awsdns-07.net.
+ns-890.awsdns-45.co.uk.
+ns-12.awsdns-01.com.
+```
+
+</TerminalOutput>
+
+If you see the Route53 nameservers, propagation is complete. If you see your old registrar's nameservers, wait and try again.
+
+Verify the A record resolves:
+
+```bash terminal
+dig yourdomain.com A +short
+```
+
+This should return an IP address from the S3 website endpoint.
+
+Verify the certificate is issued:
+
+```bash terminal
+aws acm describe-certificate \
+  --certificate-arn "arn:aws:acm:us-east-1:123456789012:certificate/abc123-def456" \
+  --region us-east-1 \
+  --query 'Certificate.Status'
+```
+
+<TerminalOutput title="ACM status">
+
+```
+"ISSUED"
+```
+
+</TerminalOutput>
+
+If the status is `PENDING_VALIDATION`, the DNS validation records have not propagated yet. Wait and check again.
+
+</GuideStep>
+
+---
+
+## Understanding the ACM us-east-1 Requirement
+
+This trips up nearly everyone the first time. ACM certificates are regional resources. A certificate in `ap-south-1` cannot be used by CloudFront, because CloudFront is a global service that manages its certificate configuration from us-east-1.
+
+The rule is simple: **if the certificate will be used with CloudFront, create it in us-east-1.** If the certificate will be used with an ALB or API Gateway, create it in the same region as those resources.
+
+We created the certificate in us-east-1 now, even though we are not using CloudFront yet, because in [Part 15](/blog/aws-for-startups/15-cloudfront-cdn) you will attach this certificate to a CloudFront distribution. Creating it in the right region from day one means zero rework.
+
+The multi-provider pattern in the Terraform handles this cleanly:
+
+```hcl title="environments/dev/dns.tf"
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+}
+```
+
+The aliased provider is only used for the ACM certificate resource. Everything else uses your default provider and region.
+
+:::note
+**Coming in Part 15:** You will use the `certificate_arn` output from this module to attach the ACM certificate to a CloudFront distribution. The S3 website will then be served through 400+ edge locations with HTTPS on your custom domain.
+:::
+
+---
+
+## DNS Record Types Reference
+
+If DNS record types feel unfamiliar, here is a quick reference for the records you will use most:
+
+| Record Type | Purpose | Example |
+|---|---|---|
+| A | Maps domain to IPv4 address (or alias to AWS resource) | `yourdomain.com` -> S3 endpoint |
+| AAAA | Maps domain to IPv6 address | Same as A, but for IPv6 |
+| CNAME | Maps subdomain to another domain name | `www.yourdomain.com` -> `yourdomain.com` |
+| MX | Mail server records | Required if you use email on this domain |
+| TXT | Text records for verification | SPF, DKIM, domain verification |
+| NS | Nameserver delegation | Set at registrar to point to Route53 |
+
+The key rule: **CNAME records cannot exist on the apex domain** (`yourdomain.com`). That is why Route53 has alias records. An alias record on the apex domain behaves like a CNAME (resolves to another hostname) but is technically an A record (returns an IP address). This is a Route53-specific feature, not a standard DNS feature.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Serving your site on the raw S3 endpoint URL over HTTP. No custom domain, no HTTPS, no credibility. Your users see `s3-website-us-east-1.amazonaws.com` in the address bar and close the tab. |
+| ✅ **Right** | Custom domain via Route53, wildcard ACM certificate with DNS validation in us-east-1, alias record for the apex domain, CNAME for www. Terraform manages all of it. Total cost: $0.50/month for the hosted zone. |
+| ❌ **Over** | Multi-region DNS failover with health checks, latency-based routing, and a GeoDNS policy for a static site with 50 daily visitors. Route53 advanced routing costs extra and adds complexity you will not need until you have traffic to route. |
+| 🤖 **Agent Trap** | Agent creates the ACM certificate in your default region instead of us-east-1. The certificate works for ALBs and API Gateways in that region, but fails silently when you try to attach it to CloudFront in Part 15. You discover the problem after deploying CloudFront, recreate the certificate in us-east-1, wait for validation again, and redeploy. The fix is the multi-provider pattern: always create CloudFront-bound certificates in us-east-1. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 15: CloudFront CDN**, you put your site on 400+ edge locations worldwide. CloudFront sits in front of S3, serves content from the edge closest to your user, handles HTTPS with the ACM certificate you just created, and adds caching. Your S3 bucket becomes the origin. CloudFront becomes the front door.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "DNS",
+    tasks: [
+      { text: "Route53 hosted zone created for your domain", syncKey: "part-14-zone" },
+      { text: "Nameservers updated at domain registrar (or auto-configured if registered via Route53)", syncKey: "part-14-nameservers" },
+      { text: "dig shows Route53 nameservers for your domain", syncKey: "part-14-verify-dns" },
+      { text: "A record (alias) pointing apex domain to S3 website endpoint", syncKey: "part-14-a-record" },
+      { text: "CNAME record for www subdomain pointing to apex", syncKey: "part-14-www-record" }
+    ]
+  },
+  {
+    category: "ACM Certificate",
+    tasks: [
+      { text: "ACM certificate created in us-east-1 (not your default region)", syncKey: "part-14-cert-region" },
+      { text: "Certificate covers both apex domain and wildcard (*.yourdomain.com)", syncKey: "part-14-cert-san" },
+      { text: "DNS validation records created in Route53", syncKey: "part-14-cert-validation" },
+      { text: "Certificate status is ISSUED (not PENDING_VALIDATION)", syncKey: "part-14-cert-issued" }
+    ]
+  },
+  {
+    category: "Terraform",
+    tasks: [
+      { text: "All resources tagged: Environment, Project, Owner, ManagedBy", syncKey: "part-14-tags" },
+      { text: "Multi-provider pattern used for us-east-1 ACM", syncKey: "part-14-multi-provider" },
+      { text: "No hardcoded hosted zone IDs (use module outputs or data sources)", syncKey: "part-14-no-hardcode" },
+      { text: "terraform plan shows 7 resources to add", syncKey: "part-14-plan" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. ACM certificates are free. Route53 hosted zones cost $0.50/month. There is no cost excuse for serving a site without HTTPS and a custom domain.
+2. ACM certificates for CloudFront must be in us-east-1 regardless of your application region. Create them there from the start, or you will recreate them later.
+3. DNS propagation takes time. Verify with `dig` before declaring victory, and use low TTLs (60 seconds) during migration so mistakes are fixable within minutes, not hours.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

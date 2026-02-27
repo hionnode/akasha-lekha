@@ -1,0 +1,635 @@
+---
+title: "S3 Static Hosting: Your First Real AWS Deployment"
+description: "Deploy a static website to S3 with Terraform. Bucket policies, website configuration, and the agent-assisted workflow for your first real AWS resource."
+excerpt: "Your first real AWS deployment. S3 static hosting with Terraform, agent-generated, human-reviewed, actually deployed."
+date: "2026-02-24"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "s3", "terraform", "frontend"]
+series: "AWS From Zero to Production"
+seriesPart: 13
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+import GuideStep from '../../../components/blog/guide/GuideStep.astro';
+
+You have been writing Terraform locally for weeks. `terraform plan`, `terraform validate`, checking agent output. Today, something actually deploys to AWS. A real S3 bucket, serving a real website, accessible from any browser in the world. The gap between "learning" and "building" closes right here.
+
+**Time:** About 45 minutes.
+
+**Outcome:** A static website deployed on S3 with Terraform managing the bucket, website configuration, and bucket policy. You will have a working URL you can open in any browser.
+
+---
+
+## Why This Matters
+
+Everything you have done so far was setup. Account creation, IAM, Terraform configuration, git workflows, pre-commit hooks, local Docker development. Important work. Necessary work. But nothing a user could see. Nothing that responds to an HTTP request.
+
+S3 static hosting changes that. It is the simplest possible deployment on AWS: no servers, no scaling configuration, no load balancers, no containers. You upload HTML, CSS, and JavaScript. AWS serves them. You pay fractions of a cent per thousand requests.
+
+This simplicity is the point. Your first deployment should be boring. It should work on the first try. It should let you focus on the Terraform workflow (Design, Generate, Verify, Deploy) without debugging container networking or database connections. Every complexity you add later (CloudFront in [Part 15](/blog/aws-for-startups/15-cloudfront-cdn), containers in Part 41) builds on top of this foundation.
+
+---
+
+## What We're Building
+
+- An S3 bucket configured for static website hosting
+- A bucket policy scoped to public read access on website content only
+- Versioning enabled for rollback safety
+- A sample `index.html` and `error.html` uploaded via CLI
+- Terraform managing all of it
+
+---
+
+## Design: S3 Website Architecture
+
+Before prompting the agent, you need to know what you want. Agents generate better output when you give them constraints. Vague prompts produce vague infrastructure.
+
+Here is the architecture:
+
+```
+┌──────────────┐       HTTPS        ┌──────────────────────────────┐
+│              │ ──────────────────► │         S3 Bucket            │
+│   Browser    │                    │   (Website Hosting Enabled)  │
+│              │ ◄────────────────  │                              │
+└──────────────┘    HTML/CSS/JS     │   index.html (index doc)     │
+                                    │   error.html (error doc)     │
+                                    │   assets/                    │
+                                    └──────────────────────────────┘
+                                              │
+                                              │ Bucket Policy
+                                              │ allows s3:GetObject
+                                              │ from * (public read)
+                                              ▼
+                                    ┌──────────────────────────────┐
+                                    │   S3 Website Endpoint        │
+                                    │   {bucket}.s3-website-       │
+                                    │   {region}.amazonaws.com     │
+                                    └──────────────────────────────┘
+```
+
+**Design decisions:**
+
+- **Website hosting mode, not REST endpoint.** S3 has two URL formats. The website endpoint supports index documents and custom error pages. The REST endpoint does not. We want the website endpoint.
+- **Public bucket policy, not ACL.** AWS deprecated ACLs for new buckets. Bucket policies are the correct way to grant public read access.
+- **Versioning on.** Costs almost nothing for a small site. Gives you rollback capability if a bad deploy overwrites your files.
+- **No CloudFront yet.** CloudFront adds caching, HTTPS with custom domain, and edge distribution. All valuable. But adding it before you have a working S3 site means debugging two things at once. We add CloudFront in [Part 15](/blog/aws-for-startups/15-cloudfront-cdn).
+
+---
+
+## Generate: Agent Builds the Terraform
+
+This is the first time you will use the full Design, Generate, Verify, Explain pattern from the content plan. In this phase (Parts 13 through 18), the pipeline is manual. You type the prompt, review the output, run verification tools by hand. In [Part 19](/blog/aws-for-startups/19-preview-environments), the pipeline gets scripted.
+
+### The Prompt
+
+Give your agent this prompt. Include AGENT-INSTRUCTIONS.md in the context (your agent should already have it from [Part 9](/blog/aws-for-startups/09-monorepo-context-evals)):
+
+```text title="Agent Prompt"
+Create a Terraform configuration for S3 static website hosting.
+
+Requirements:
+- S3 bucket named "{project}-{env}-website" using variables
+- Static website hosting enabled with index.html and error.html
+- Bucket policy allowing public read (s3:GetObject) for all objects
+- Versioning enabled
+- Block public access settings configured appropriately for a public website
+- All resources tagged per AGENT-INSTRUCTIONS.md conventions
+- Output the website endpoint URL
+
+Files to create:
+- modules/s3-website/main.tf
+- modules/s3-website/variables.tf
+- modules/s3-website/outputs.tf
+- environments/dev/s3-website.tf (module invocation)
+
+Follow all conventions in AGENT-INSTRUCTIONS.md.
+```
+
+### Agent Output (Unedited)
+
+Here is what the agent generates. This is unedited output. Read it before scrolling to the review.
+
+```hcl title="modules/s3-website/variables.tf"
+variable "project" {
+  description = "Project name used in resource naming"
+  type        = string
+}
+
+variable "environment" {
+  description = "Deployment environment (dev, staging, prod)"
+  type        = string
+
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Environment must be dev, staging, or prod."
+  }
+}
+
+variable "common_tags" {
+  description = "Common tags applied to all resources"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```hcl title="modules/s3-website/main.tf"
+resource "aws_s3_bucket" "website" {
+  bucket = "${var.project}-${var.environment}-website"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-website"
+  })
+}
+
+resource "aws_s3_bucket_website_configuration" "website" {
+  bucket = aws_s3_bucket.website.id
+
+  index_document {
+    suffix = "index.html"
+  }
+
+  error_document {
+    key = "error.html"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "website" {
+  bucket = aws_s3_bucket.website.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_policy" "website" {
+  bucket = aws_s3_bucket.website.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "PublicReadGetObject"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource  = "${aws_s3_bucket.website.arn}/*"
+      }
+    ]
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "website" {
+  bucket = aws_s3_bucket.website.id
+
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = false
+  restrict_public_buckets = false
+}
+```
+
+```hcl title="modules/s3-website/outputs.tf"
+output "website_endpoint" {
+  description = "S3 website endpoint URL"
+  value       = aws_s3_bucket_website_configuration.website.website_endpoint
+}
+
+output "bucket_arn" {
+  description = "ARN of the S3 bucket"
+  value       = aws_s3_bucket.website.arn
+}
+
+output "bucket_id" {
+  description = "ID of the S3 bucket"
+  value       = aws_s3_bucket.website.id
+}
+```
+
+```hcl title="environments/dev/s3-website.tf"
+module "website" {
+  source = "../../modules/s3-website"
+
+  project     = "mastery"
+  environment = "dev"
+
+  common_tags = {
+    Environment = "dev"
+    Project     = "mastery"
+    Owner       = "your-name"
+    ManagedBy   = "terraform"
+  }
+}
+
+output "website_url" {
+  description = "Website URL"
+  value       = "http://${module.website.website_endpoint}"
+}
+```
+
+### Review: What the Agent Got Wrong
+
+The agent produced a clean structure. Good naming, proper tagging, variables with validation. But there is one problem, and it is the most common agent failure mode for S3.
+
+Look at the bucket policy. The action is `s3:*`.
+
+```hcl
+Action = "s3:*"
+```
+
+A public website bucket needs exactly one permission: `s3:GetObject`. That lets anyone read files. `s3:*` lets anyone do everything: list the bucket, delete objects, modify permissions, upload files. The agent chose the broadest permission because it guarantees the code works. That is exactly the wrong priority for a public bucket.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate S3 bucket policies with `s3:*` instead of scoped `s3:GetObject` because broad permissions are the fastest path to working code. The agent's optimization function is "does it work?" not "is it secure?" For a public-facing bucket, `s3:*` grants anonymous users full control over your bucket contents.
+
+**What catches it:** `checkov` flags this with check CKV_AWS_70 (Ensure S3 bucket policy does not grant broad permissions). `tflint` custom rules can catch wildcard actions. Manual review should always check the `Action` field in any bucket policy.
+
+</Alert>
+
+**Fix the action:**
+
+```hcl title="modules/s3-website/main.tf (fixed)"
+resource "aws_s3_bucket_policy" "website" {
+  bucket = aws_s3_bucket.website.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "PublicReadGetObject"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:GetObject"
+        Resource  = "${aws_s3_bucket.website.arn}/*"
+      }
+    ]
+  })
+}
+```
+
+One word changed. `s3:*` to `s3:GetObject`. That is the difference between a public website and an open S3 bucket.
+
+There is a second issue you may have noticed. The agent did not set `block_public_access` in a way that raises a checkov finding, but it is worth understanding. The `aws_s3_bucket_public_access_block` resource has four settings. For a public website, you need `block_public_policy = false` and `restrict_public_buckets = false` (otherwise the bucket policy is rejected). The agent got this right. But it also set `block_public_acls = true` and `ignore_public_acls = true`, which is correct because we are using policies, not ACLs. No fix needed here, but you should understand why these values are what they are.
+
+---
+
+## Verify: Checking the Output
+
+Run the verification tools manually. This is the manual pipeline you will use until Part 19 automates it.
+
+### Step 1: terraform validate
+
+```bash terminal
+cd environments/dev
+terraform init
+terraform validate
+```
+
+<TerminalOutput title="terraform validate">
+
+```
+Success! The configuration is valid.
+```
+
+</TerminalOutput>
+
+`terraform validate` checks syntax and internal consistency. It does not check security. It does not check best practices. It would happily validate `Action: "s3:*"`. This is why validate alone is not enough.
+
+### Step 2: tflint
+
+```bash terminal
+tflint --init
+tflint
+```
+
+<TerminalOutput title="tflint">
+
+```
+1 issue(s) found:
+
+Warning: variable "common_tags" is declared but not used in module (terraform_unused_declarations)
+
+  on modules/s3-website/variables.tf line 16:
+  16: variable "common_tags" {
+```
+
+</TerminalOutput>
+
+This is a false positive. The variable is used via `merge(var.common_tags, ...)` in `main.tf`. tflint sometimes flags this when the merge happens inside a `tags` block. Safe to ignore.
+
+### Step 3: checkov
+
+```bash terminal
+checkov -d . --framework terraform
+```
+
+<TerminalOutput title="checkov (relevant findings)">
+
+```
+Passed checks: 3
+Failed checks: 2
+
+Check: CKV_AWS_53: "Ensure S3 bucket has block public access enabled"
+  FAILED for resource: aws_s3_bucket_public_access_block.website
+  File: /modules/s3-website/main.tf
+
+Check: CKV_AWS_145: "Ensure S3 bucket is encrypted with KMS"
+  FAILED for resource: aws_s3_bucket.website
+  File: /modules/s3-website/main.tf
+```
+
+</TerminalOutput>
+
+Two findings. Both require judgment, not blind fixes:
+
+**CKV_AWS_53 (block public access):** checkov wants all four `block_public_access` settings to be `true`. But we are building a public website. Blocking public access on a public website makes it inaccessible. This is a valid exception. Suppress it with an inline comment:
+
+```hcl title="modules/s3-website/main.tf"
+resource "aws_s3_bucket_public_access_block" "website" {
+  #checkov:skip=CKV_AWS_53:Public website requires public access
+  bucket = aws_s3_bucket.website.id
+
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = false
+  restrict_public_buckets = false
+}
+```
+
+**CKV_AWS_145 (KMS encryption):** S3 buckets use AES-256 (SSE-S3) encryption by default since January 2023. KMS encryption adds cost ($1/month per key plus $0.03 per 10,000 requests) and no security benefit for a public website whose content is meant to be read by anyone. Skip this one too:
+
+```hcl title="modules/s3-website/main.tf"
+resource "aws_s3_bucket" "website" {
+  #checkov:skip=CKV_AWS_145:Public website content, SSE-S3 default encryption sufficient
+  bucket = "${var.project}-${var.environment}-website"
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-website"
+  })
+}
+```
+
+This is the verification skill the series is building. Not "make all checks green" but "understand each finding and decide whether to fix or suppress with a documented reason."
+
+---
+
+## Explain: What Just Happened
+
+The agent generated four files. You found one real issue (wildcard bucket policy action) and two legitimate checkov exceptions. One iteration of the fix loop: fix the `s3:*` to `s3:GetObject`, suppress two checkov findings with documented reasons.
+
+**What to verify manually before deploying:**
+
+- The bucket policy `Action` is `s3:GetObject`, not `s3:*` or any other wildcard
+- The `Resource` in the bucket policy ends with `/*` (all objects in the bucket, not the bucket itself)
+- The `Principal` is `"*"` (public access), which is intentional for a website bucket
+- All four tags are present: Environment, Project, Owner, ManagedBy
+- The bucket name follows the `{project}-{env}-website` convention
+
+---
+
+## Deploy and Test
+
+With verification complete, deploy the infrastructure.
+
+<GuideStep title="Run terraform plan" number={1} syncKey="part-13-plan">
+
+Always plan before you apply. Save the plan output to a file so the apply executes exactly what you reviewed.
+
+```bash terminal
+terraform plan -out=tfplan
+```
+
+<TerminalOutput title="terraform plan">
+
+```
+Terraform will perform the following actions:
+
+  # module.website.aws_s3_bucket.website will be created
+  + resource "aws_s3_bucket" "website" {
+      + arn            = (known after apply)
+      + bucket         = "mastery-dev-website"
+      + id             = (known after apply)
+      + tags           = {
+          + "Environment" = "dev"
+          + "ManagedBy"   = "terraform"
+          + "Name"        = "mastery-dev-website"
+          + "Owner"       = "your-name"
+          + "Project"     = "mastery"
+        }
+    }
+
+  # module.website.aws_s3_bucket_policy.website will be created
+  # module.website.aws_s3_bucket_public_access_block.website will be created
+  # module.website.aws_s3_bucket_versioning.website will be created
+  # module.website.aws_s3_bucket_website_configuration.website will be created
+
+Plan: 5 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + website_url = (known after apply)
+```
+
+</TerminalOutput>
+
+Five resources. All creates. No destroys. This is what you expect for a new deployment.
+
+</GuideStep>
+
+<GuideStep title="Apply the plan" number={2} syncKey="part-13-apply">
+
+```bash terminal
+terraform apply tfplan
+```
+
+<TerminalOutput title="terraform apply">
+
+```
+module.website.aws_s3_bucket.website: Creating...
+module.website.aws_s3_bucket.website: Creation complete after 2s [id=mastery-dev-website]
+module.website.aws_s3_bucket_versioning.website: Creating...
+module.website.aws_s3_bucket_website_configuration.website: Creating...
+module.website.aws_s3_bucket_public_access_block.website: Creating...
+module.website.aws_s3_bucket_versioning.website: Creation complete after 1s
+module.website.aws_s3_bucket_website_configuration.website: Creation complete after 1s
+module.website.aws_s3_bucket_public_access_block.website: Creation complete after 1s
+module.website.aws_s3_bucket_policy.website: Creating...
+module.website.aws_s3_bucket_policy.website: Creation complete after 1s
+
+Apply complete! Resources: 5 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+website_url = "http://mastery-dev-website.s3-website-us-east-1.amazonaws.com"
+```
+
+</TerminalOutput>
+
+</GuideStep>
+
+<GuideStep title="Upload sample site files" number={3} syncKey="part-13-upload">
+
+Create a minimal HTML file and upload it:
+
+```html title="site/index.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mastery - S3 Static Hosting</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 600px; margin: 4rem auto; padding: 0 1rem; }
+    h1 { color: #1a1a2e; }
+    .status { color: #16a34a; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Mastery</h1>
+  <p class="status">Deployed with Terraform on S3.</p>
+  <p>If you can read this, your S3 static hosting is working.</p>
+</body>
+</html>
+```
+
+```html title="site/error.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>404 - Not Found</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 600px; margin: 4rem auto; padding: 0 1rem; }
+  </style>
+</head>
+<body>
+  <h1>404</h1>
+  <p>This page does not exist. <a href="/">Go home</a>.</p>
+</body>
+</html>
+```
+
+Upload both files:
+
+```bash terminal
+aws s3 cp site/index.html s3://mastery-dev-website/index.html --content-type "text/html"
+aws s3 cp site/error.html s3://mastery-dev-website/error.html --content-type "text/html"
+```
+
+</GuideStep>
+
+<GuideStep title="Verify the website" number={4} syncKey="part-13-verify-site">
+
+Open the website endpoint in your browser:
+
+```bash terminal
+curl -s http://mastery-dev-website.s3-website-us-east-1.amazonaws.com
+```
+
+You should see the HTML content of your index page. Open the URL in a browser to confirm it renders correctly.
+
+Test the error page by requesting a path that does not exist:
+
+```bash terminal
+curl -s http://mastery-dev-website.s3-website-us-east-1.amazonaws.com/nonexistent
+```
+
+You should see the 404 error page content.
+
+</GuideStep>
+
+---
+
+## The File Structure
+
+After this part, your Terraform project looks like this:
+
+<FileTree>
+infra/
+  modules/
+    s3-website/
+      main.tf
+      variables.tf
+      outputs.tf
+  environments/
+    dev/
+      main.tf
+      s3-website.tf
+      terraform.tfvars
+      backend.hcl
+  provider.tf
+  versions.tf
+</FileTree>
+
+This is the module pattern from [Part 4](/blog/aws-for-startups/04-terraform-fundamentals) in action. The module defines the S3 website resources. The environment file invokes the module with environment-specific values. When you create a staging or production environment, you create a new `environments/staging/s3-website.tf` file pointing to the same module with different variables.
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | Creating the S3 bucket through the AWS console. No Terraform, no versioning, no reproducibility. When you need a staging environment, you click through the same 15 screens again and inevitably miss a setting. |
+| ✅ **Right** | Terraform-managed S3 bucket with website hosting, versioning enabled, bucket policy scoped to `s3:GetObject`, and all resources tagged. One `terraform apply` recreates the entire setup in any environment. |
+| ❌ **Over** | Adding CloudFront, Route53, ACM, WAF, and Lambda@Edge before you have confirmed that basic S3 hosting works. Debug one layer at a time. CloudFront is Part 15. |
+| 🤖 **Agent Trap** | Agent generates a bucket policy with `Action: "s3:*"` instead of `Action: "s3:GetObject"`. The agent optimizes for "does the website load?" and wildcard permissions guarantee that. But `s3:*` on a public bucket means anyone on the internet can list, write, and delete your files. checkov catches this with CKV_AWS_70. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 14: Route53 + ACM**, you replace that `s3-website-us-east-1.amazonaws.com` URL with your own custom domain and a valid HTTPS certificate. Nobody trusts an S3 endpoint URL, and your site should not be served over plain HTTP. Route53 handles DNS, ACM provides free SSL certificates, and Terraform manages both.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "S3 Configuration",
+    tasks: [
+      { text: "S3 bucket created with Terraform (mastery-dev-website)", syncKey: "part-13-bucket" },
+      { text: "Website hosting enabled with index.html and error.html", syncKey: "part-13-website-config" },
+      { text: "Bucket policy scoped to s3:GetObject only (not s3:*)", syncKey: "part-13-policy-scoped" },
+      { text: "Versioning enabled on the bucket", syncKey: "part-13-versioning" }
+    ]
+  },
+  {
+    category: "Terraform",
+    tasks: [
+      { text: "All resources tagged: Environment, Project, Owner, ManagedBy", syncKey: "part-13-tags" },
+      { text: "terraform plan shows 5 resources to add", syncKey: "part-13-plan" },
+      { text: "terraform apply completed successfully", syncKey: "part-13-apply" }
+    ]
+  },
+  {
+    category: "Verification",
+    tasks: [
+      { text: "Website accessible via S3 endpoint URL", syncKey: "part-13-verify-site" },
+      { text: "Index page renders correctly in browser", syncKey: "part-13-index-renders" },
+      { text: "Error page shows for non-existent paths", syncKey: "part-13-error-renders" },
+      { text: "Agent-generated code reviewed (bucket policy action checked)", syncKey: "part-13-agent-reviewed" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. S3 static hosting is the simplest deployment on AWS: no servers, no scaling configuration, no ongoing maintenance beyond uploading files.
+2. Bucket policies must be scoped to `s3:GetObject` for public websites. Agents default to `s3:*` because it works, and "works" is not the same as "safe."
+3. This is your first real AWS deployment. Everything before was setup. From here forward, every part builds production infrastructure that serves real traffic.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*

@@ -1,0 +1,591 @@
+---
+title: "CloudFront CDN: Global Performance Without the Complexity"
+description: "Deploy CloudFront as CDN for your S3 static site. Origin access control, cache behaviors, custom error pages, and SSL termination — all Terraform-managed."
+excerpt: "Global performance without the complexity. CloudFront CDN in front of S3, because your users are everywhere and latency matters."
+date: "2026-03-04"
+author: "works-on-my.cloud"
+tags: ["aws", "devops", "startup", "cloudfront", "s3", "terraform", "frontend"]
+series: "AWS From Zero to Production"
+seriesPart: 15
+featured: false
+draft: true
+---
+
+import Alert from '../../../components/shared/Alert.astro';
+import ValidationChecklist from '../../../components/blog/guide/ValidationChecklist.astro';
+import FileTree from '../../../components/blog/code/FileTree.astro';
+import Command from '../../../components/blog/code/Command.astro';
+import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
+
+Your S3 site works. But it serves from a single region. A user in Mumbai waits 800ms for your landing page while someone in Virginia gets it in 50ms. A user in Tokyo waits 400ms. A user in Sao Paulo waits 600ms. Your site is technically global because the internet is global. Your performance is not.
+
+CloudFront puts your content on 450+ edge locations across 90+ cities worldwide. The same static files, cached meters from your users instead of continents away. For a static site serving under 1TB/month, the cost is under $1. The performance improvement is 10-20x.
+
+**Time:** About 40 minutes.
+
+**Outcome:** A CloudFront distribution serving your S3 site globally with Origin Access Control, cache behaviors, custom error pages for SPA routing, and the ACM certificate from [Part 14](/blog/aws-for-startups/14-route53-acm-dns) terminating SSL at the edge.
+
+---
+
+## Why This Matters
+
+Without CloudFront, every request hits your S3 bucket in `us-east-1` (or wherever you created it). The HTTP response travels from that single region to wherever the user is. Physics applies. Light through fiber crosses the Atlantic in about 45ms one way. Add TCP handshake, TLS negotiation, and the actual data transfer, and a user in Mumbai is looking at 600-900ms for a first meaningful paint. Your competitor with a CDN delivers the same page in 50-80ms from the Mumbai edge.
+
+This is not a premature optimization. This is baseline infrastructure. CloudFront sits between your users and your S3 bucket, caching content at edge locations worldwide. When a user in London requests your homepage, CloudFront serves it from a London edge location. The first request goes to S3 (a "cache miss"). Every subsequent request from London serves from the edge (a "cache hit"). For static sites where content changes infrequently, cache hit ratios above 95% are normal.
+
+Three things CloudFront gives you beyond caching:
+
+1. **SSL termination at the edge.** The TLS handshake happens at the nearest edge location, not at your origin. This alone shaves 100-300ms off every HTTPS request for distant users.
+
+2. **HTTP/2 and HTTP/3 support.** S3 website endpoints only support HTTP/1.1. CloudFront supports HTTP/2 by default and HTTP/3 (QUIC) with a checkbox. Multiplexed connections and reduced round trips.
+
+3. **DDoS protection.** CloudFront includes AWS Shield Standard at no extra cost. It absorbs volumetric attacks at the edge before they reach your origin. For a static site, this is usually sufficient.
+
+---
+
+## Design: CloudFront + S3 Architecture
+
+<Alert type="important" title="CloudFront + S3 Architecture">
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                          USERS                                    │
+│                                                                    │
+│   Mumbai        London        Virginia        Tokyo                │
+│     │              │              │              │                  │
+└─────┼──────────────┼──────────────┼──────────────┼──────────────────┘
+      │              │              │              │
+      ▼              ▼              ▼              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    CLOUDFRONT (450+ edges)                         │
+│                                                                    │
+│   Mumbai Edge    London Edge   Virginia Edge   Tokyo Edge          │
+│   (cached)       (cached)      (cached)        (cached)           │
+│                                                                    │
+│   SSL termination at edge                                          │
+│   HTTP/2 + HTTP/3                                                  │
+│   Gzip + Brotli compression                                       │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │ Cache miss only
+                             ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    S3 BUCKET (us-east-1)                           │
+│                                                                    │
+│   Origin Access Control (OAC)                                      │
+│   No public access                                                 │
+│   index.html, assets, etc.                                         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+</Alert>
+
+The key insight: with CloudFront in front, your S3 bucket does not need to be publicly accessible. CloudFront authenticates to S3 using Origin Access Control, and S3 only responds to requests that come through CloudFront. Your bucket stays private. Your content is public only through the CDN.
+
+---
+
+## Origin Access Control: The Modern Pattern
+
+Origin Access Control (OAC) is the mechanism that lets CloudFront access your private S3 bucket. When CloudFront makes a request to S3, it signs the request using its own identity. Your S3 bucket policy allows that specific identity and denies everyone else.
+
+This replaces the older pattern called **Origin Access Identity (OAI)**, which AWS deprecated in 2022. OAI still works, but it does not support SSE-KMS encryption, it does not support S3 bucket keys, and AWS is not adding features to it. OAC is the replacement.
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate CloudFront distributions with Origin Access Identity (OAI) instead of Origin Access Control (OAC). This happens because most Terraform examples in the agent's training data predate OAI's deprecation.
+
+**What the agent generates:**
+
+```hcl
+resource "aws_cloudfront_origin_access_identity" "oai" {
+  comment = "OAI for S3 bucket"
+}
+```
+
+**What you should use:**
+
+```hcl
+resource "aws_cloudfront_origin_access_control" "oac" {
+  name                              = "s3-oac"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+```
+
+**How to spot it:** Search the Terraform output for `aws_cloudfront_origin_access_identity`. If it exists, the agent used the deprecated pattern. Replace it with `aws_cloudfront_origin_access_control`.
+
+</Alert>
+
+### How OAC Works
+
+OAC uses AWS Signature Version 4 (SigV4) to sign every request CloudFront makes to S3. The flow:
+
+1. CloudFront receives a request from a user
+2. If the content is not cached, CloudFront makes a request to S3
+3. CloudFront signs the S3 request using SigV4 with the OAC identity
+4. S3 checks the bucket policy, sees the request is signed by the allowed CloudFront distribution, and returns the object
+5. CloudFront caches the response and returns it to the user
+
+The bucket policy grants access only to the specific CloudFront distribution, not to all CloudFront distributions. This means if someone creates a different CloudFront distribution and points it at your bucket, S3 denies the request.
+
+---
+
+## Terraform: The CloudFront Distribution
+
+Here is the complete Terraform configuration. This is the part where agents generate 80% of the code correctly and the remaining 20% contains the mistakes that matter. Read every line.
+
+```hcl title="infra/modules/cdn/main.tf"
+# Origin Access Control — the modern way to connect CloudFront to S3
+resource "aws_cloudfront_origin_access_control" "this" {
+  name                              = "${var.project}-${var.environment}-oac"
+  description                       = "OAC for ${var.project} S3 origin"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+resource "aws_cloudfront_distribution" "this" {
+  enabled             = true
+  is_ipv6_enabled     = true
+  comment             = "${var.project}-${var.environment} CDN"
+  default_root_object = "index.html"
+  price_class         = "PriceClass_100"
+  aliases             = [var.domain_name]
+
+  # S3 origin with OAC
+  origin {
+    domain_name              = var.s3_bucket_regional_domain_name
+    origin_id                = "S3-${var.project}"
+    origin_access_control_id = aws_cloudfront_origin_access_control.this.id
+  }
+
+  # Default cache behavior
+  default_cache_behavior {
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "S3-${var.project}"
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+
+    # Use the AWS-managed CachingOptimized policy
+    cache_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+  }
+
+  # Custom error responses for SPA routing
+  custom_error_response {
+    error_code            = 403
+    response_code         = 200
+    response_page_path    = "/index.html"
+    error_caching_min_ttl = 10
+  }
+
+  custom_error_response {
+    error_code            = 404
+    response_code         = 200
+    response_page_path    = "/index.html"
+    error_caching_min_ttl = 10
+  }
+
+  # SSL certificate from ACM (must be in us-east-1)
+  viewer_certificate {
+    acm_certificate_arn      = var.acm_certificate_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-cdn"
+  })
+}
+```
+
+Let me walk through the decisions that matter.
+
+### Price Class
+
+```hcl
+price_class = "PriceClass_100"
+```
+
+CloudFront has three price classes that control which edge locations serve your content:
+
+| Price Class | Edge Locations | Cost |
+|------------|----------------|------|
+| `PriceClass_All` | All 450+ locations | Highest |
+| `PriceClass_200` | North America, Europe, Asia, Middle East, Africa | Medium |
+| `PriceClass_100` | North America and Europe only | Lowest |
+
+`PriceClass_100` is the right starting point for most startups. It covers the regions where your first users probably are. When your analytics show meaningful traffic from Asia or South America, upgrade to `PriceClass_200`. The change is a single line in Terraform and requires zero downtime.
+
+### Viewer Protocol Policy
+
+```hcl
+viewer_protocol_policy = "redirect-to-https"
+```
+
+Three options exist: `allow-all`, `https-only`, and `redirect-to-https`. Always use `redirect-to-https`. It means an HTTP request to `http://yourdomain.com` gets a 301 redirect to `https://yourdomain.com`. The user ends up on HTTPS regardless of what they typed. `https-only` returns a 403 for HTTP requests, which breaks bookmarks and links that use `http://`.
+
+### Compression
+
+```hcl
+compress = true
+```
+
+This single line enables automatic Gzip and Brotli compression for text-based content types (HTML, CSS, JS, JSON, SVG). A typical React bundle drops from 500KB to 150KB. There is no reason to leave this off.
+
+### Cache Policy
+
+```hcl
+cache_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+```
+
+That UUID is the AWS-managed `CachingOptimized` policy. It sets a default TTL of 86400 seconds (24 hours) and enables automatic compression. You can create custom cache policies later, but the managed policy is correct for static sites. Using a managed policy also means AWS handles updates when best practices change.
+
+:::tip
+To find AWS-managed cache policy IDs, run `aws cloudfront list-cache-policies --type managed`. The output includes the ID, name, and configuration for each policy.
+:::
+
+---
+
+## Custom Error Pages: SPA Routing
+
+This is where agents consistently fail.
+
+A single-page application (SPA) handles routing on the client side. When a user navigates to `/about`, the browser's URL bar shows `/about`, but the server never received a request for `/about`. JavaScript rewrote the URL. This works fine when users navigate within the app.
+
+The problem: when a user bookmarks `/about` and visits it directly, or refreshes the page on `/about`, the browser sends a request for `/about` to CloudFront. CloudFront looks for an object called `/about` in S3. S3 does not have a file at that path. S3 returns a 403 (because the bucket is private, not-found errors return 403 instead of 404). CloudFront serves the S3 error page, which is an XML document that says "Access Denied."
+
+<Alert type="caution" title="Agent Trap">
+
+Agents generate CloudFront distributions with `default_root_object = "index.html"` but forget to configure custom error responses. The `default_root_object` only applies to the root URL (`/`). It does not apply to any other path. When a user navigates directly to `/about` or `/dashboard/settings`, they get a 403 XML error page.
+
+**The fix:** Custom error responses that return `/index.html` with a 200 status code for both 403 and 404 errors. This is the SPA routing pattern. CloudFront intercepts the error, returns `index.html` instead, and the client-side router handles the path.
+
+</Alert>
+
+The relevant Terraform block:
+
+```hcl title="infra/modules/cdn/main.tf"
+custom_error_response {
+  error_code            = 403
+  response_code         = 200
+  response_page_path    = "/index.html"
+  error_caching_min_ttl = 10
+}
+
+custom_error_response {
+  error_code            = 404
+  response_code         = 200
+  response_page_path    = "/index.html"
+  error_caching_min_ttl = 10
+}
+```
+
+Two things to note:
+
+1. **Both 403 and 404.** With OAC, S3 returns 403 for missing objects (not 404), because the bucket is not public. Handle both error codes to be safe.
+
+2. **`error_caching_min_ttl = 10`.** This controls how long CloudFront caches the error response. Setting it to 10 seconds (instead of the default 300) means if you deploy new content, the error page cache clears quickly. For production, you might increase this to 60 seconds.
+
+:::note
+If you are deploying a multi-page static site (like Astro or Hugo output) rather than an SPA, you do not want this custom error response. A multi-page site has actual HTML files at each path (`/about/index.html`, `/blog/index.html`). Returning `index.html` for 404 errors would mask genuinely missing pages. For multi-page sites, create a custom `404.html` page and set `response_page_path = "/404.html"` with `response_code = 404`.
+:::
+
+---
+
+## SSL Termination
+
+In [Part 14](/blog/aws-for-startups/14-route53-acm-dns), you created an ACM certificate in `us-east-1`. Here is where it connects.
+
+```hcl title="infra/modules/cdn/main.tf"
+viewer_certificate {
+  acm_certificate_arn      = var.acm_certificate_arn
+  ssl_support_method       = "sni-only"
+  minimum_protocol_version = "TLSv1.2_2021"
+}
+```
+
+**`ssl_support_method = "sni-only"`** uses Server Name Indication, which is supported by every modern browser. The alternative, `vip`, gives you a dedicated IP address for your distribution and costs $600/month. You do not need it.
+
+**`minimum_protocol_version = "TLSv1.2_2021"`** disables TLS 1.0 and 1.1. These are deprecated protocols with known vulnerabilities. If your users have browsers old enough to require TLS 1.0, they have bigger security problems than your site.
+
+---
+
+## S3 Bucket Policy for OAC
+
+Your S3 bucket from [Part 13](/blog/aws-for-startups/13-s3-static-hosting) needs an updated bucket policy. Replace the public read policy with one that only allows CloudFront:
+
+```hcl title="infra/modules/cdn/s3_policy.tf"
+data "aws_iam_policy_document" "s3_cloudfront" {
+  statement {
+    sid    = "AllowCloudFrontServicePrincipal"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudfront.amazonaws.com"]
+    }
+
+    actions   = ["s3:GetObject"]
+    resources = ["${var.s3_bucket_arn}/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceArn"
+      values   = [aws_cloudfront_distribution.this.arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "website" {
+  bucket = var.s3_bucket_id
+  policy = data.aws_iam_policy_document.s3_cloudfront.json
+}
+```
+
+The condition block is critical. It restricts access to your specific CloudFront distribution ARN. Without it, any CloudFront distribution could read your bucket. The `cloudfront.amazonaws.com` service principal combined with the `SourceArn` condition is the OAC pattern.
+
+After applying this policy, remove the old public bucket policy from Part 13. Your bucket is now private. The only way to access your content is through CloudFront.
+
+---
+
+## Variables and Outputs
+
+```hcl title="infra/modules/cdn/variables.tf"
+variable "project" {
+  type        = string
+  description = "Project name for resource naming"
+}
+
+variable "environment" {
+  type        = string
+  description = "Environment name (dev, staging, prod)"
+}
+
+variable "domain_name" {
+  type        = string
+  description = "Custom domain name for the distribution"
+}
+
+variable "s3_bucket_id" {
+  type        = string
+  description = "S3 bucket ID (name)"
+}
+
+variable "s3_bucket_arn" {
+  type        = string
+  description = "S3 bucket ARN"
+}
+
+variable "s3_bucket_regional_domain_name" {
+  type        = string
+  description = "S3 bucket regional domain name (not website endpoint)"
+}
+
+variable "acm_certificate_arn" {
+  type        = string
+  description = "ACM certificate ARN (must be in us-east-1)"
+}
+
+variable "common_tags" {
+  type        = map(string)
+  description = "Common tags for all resources"
+  default     = {}
+}
+```
+
+```hcl title="infra/modules/cdn/outputs.tf"
+output "distribution_id" {
+  value       = aws_cloudfront_distribution.this.id
+  description = "CloudFront distribution ID (for cache invalidation)"
+}
+
+output "distribution_domain_name" {
+  value       = aws_cloudfront_distribution.this.domain_name
+  description = "CloudFront distribution domain name"
+}
+
+output "distribution_arn" {
+  value       = aws_cloudfront_distribution.this.arn
+  description = "CloudFront distribution ARN"
+}
+```
+
+The `distribution_id` output matters most for day-to-day operations. You need it every time you invalidate the cache after a deployment.
+
+---
+
+## Route53 Record Update
+
+With CloudFront deployed, update your Route53 alias record from [Part 14](/blog/aws-for-startups/14-route53-acm-dns) to point at the CloudFront distribution instead of the S3 website endpoint:
+
+```hcl title="infra/environments/prod/main.tf"
+resource "aws_route53_record" "website" {
+  zone_id = var.route53_zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  alias {
+    name                   = module.cdn.distribution_domain_name
+    zone_id                = "Z2FDTNDATAQYW2"
+    evaluate_target_health = false
+  }
+}
+```
+
+The `zone_id = "Z2FDTNDATAQYW2"` is not a typo and not a variable. It is the hardcoded hosted zone ID for all CloudFront distributions. Every CloudFront distribution uses this same zone ID for Route53 alias records. AWS publishes it in their documentation, and it does not change.
+
+---
+
+## Cache Invalidation
+
+After deploying new content, CloudFront continues serving the cached version until the TTL expires. For immediate updates, invalidate the cache:
+
+```bash terminal
+aws cloudfront create-invalidation \
+  --distribution-id E1ABCDEF123456 \
+  --paths "/*"
+```
+
+Replace `E1ABCDEF123456` with your distribution ID from the Terraform output. The `/*` pattern invalidates everything. Invalidation takes 1-2 minutes to propagate to all edge locations.
+
+CloudFront gives you 1,000 free invalidation paths per month. A `/*` wildcard counts as one path. Individual file paths (`/index.html`, `/assets/style.css`) each count as one path. For static site deployments, always use `/*` to invalidate everything. It is simpler and uses the same single path credit.
+
+:::tip
+Add cache invalidation to your deployment script. In [Part 17](/blog/aws-for-startups/17-frontend-react-astro), we will integrate this into the CI/CD pipeline so every deployment automatically invalidates the cache.
+:::
+
+---
+
+## Verify the Deployment
+
+After `terraform apply` completes, CloudFront takes 5-15 minutes to fully deploy the distribution. Check the status:
+
+```bash terminal
+aws cloudfront get-distribution --id E1ABCDEF123456 \
+  --query 'Distribution.Status'
+```
+
+<TerminalOutput title="Distribution status check">
+
+```
+"Deployed"
+```
+
+</TerminalOutput>
+
+Once the status shows `Deployed`, verify:
+
+```bash terminal
+curl -I https://yourdomain.com
+```
+
+<TerminalOutput title="Response headers from CloudFront">
+
+```
+HTTP/2 200
+content-type: text/html
+content-length: 3847
+x-cache: Hit from cloudfront
+x-amz-cf-pop: BOM78-P2
+via: 1.1 abc123.cloudfront.net (CloudFront)
+```
+
+</TerminalOutput>
+
+Three headers confirm CloudFront is working:
+
+- **`x-cache: Hit from cloudfront`** means the content was served from the edge cache (a "Miss" means CloudFront fetched from S3)
+- **`x-amz-cf-pop: BOM78-P2`** identifies the edge location. `BOM` is Mumbai's airport code. Your request was served from an edge near you.
+- **`via: 1.1 ... (CloudFront)`** confirms the response passed through CloudFront
+
+---
+
+## Module File Structure
+
+After this part, your CDN module looks like this:
+
+<FileTree>
+infra/
+  modules/
+    cdn/
+      main.tf
+      s3_policy.tf
+      variables.tf
+      outputs.tf
+  environments/
+    prod/
+      main.tf
+</FileTree>
+
+---
+
+## The Fine Line
+
+<Alert type="warning" title="The Fine Line">
+
+| | |
+|---|---|
+| ❌ **Under** | No CDN. Serving directly from S3 in one region. Users in Mumbai wait 800ms. Users in Tokyo wait 400ms. You are paying the same S3 costs but delivering a worse experience. |
+| ✅ **Right** | CloudFront with OAC, `CachingOptimized` policy, Gzip/Brotli compression, custom error pages for SPA routing, ACM certificate for SSL termination at the edge. Under $1/month for static sites under 1TB. |
+| ❌ **Over** | Lambda@Edge for A/B testing, WAF rules, geo-restrictions, CloudFront Functions for header manipulation, and a custom cache policy per content type. All of these have legitimate uses. None of them are needed before you have traffic. |
+| 🤖 **Agent Trap** | Agent uses deprecated Origin Access Identity (OAI) instead of Origin Access Control (OAC). OAI was deprecated in 2022 but dominates the agent's training data. The tell: look for `aws_cloudfront_origin_access_identity` in the generated Terraform. If it exists, replace it with `aws_cloudfront_origin_access_control`. |
+
+</Alert>
+
+---
+
+## What's Coming
+
+Next in **Part 16: User Uploads to S3**, you build the other half of S3: writes. Presigned URLs let browsers upload files directly to S3 without routing through your API. Content type validation, size limits, lifecycle policies for cleanup, and the CORS configuration that makes browser-to-S3 uploads work.
+
+---
+
+## Validation Checklist
+
+<ValidationChecklist items={[
+  {
+    category: "CloudFront",
+    tasks: [
+      { text: "CloudFront distribution deployed and status is 'Deployed'", syncKey: "part-15-distribution-deployed" },
+      { text: "Origin Access Control configured (not OAI)", syncKey: "part-15-oac-configured" },
+      { text: "Cache behavior uses CachingOptimized policy with compression enabled", syncKey: "part-15-cache-behavior" },
+      { text: "Custom error responses configured for 403 and 404 (SPA routing)", syncKey: "part-15-error-pages" },
+      { text: "ACM certificate attached with TLSv1.2_2021 minimum", syncKey: "part-15-ssl-attached" }
+    ]
+  },
+  {
+    category: "S3 Integration",
+    tasks: [
+      { text: "S3 bucket policy updated to allow only CloudFront via OAC", syncKey: "part-15-bucket-policy" },
+      { text: "Old public bucket policy removed", syncKey: "part-15-public-removed" },
+      { text: "Route53 alias record points to CloudFront distribution", syncKey: "part-15-route53-updated" }
+    ]
+  },
+  {
+    category: "Performance",
+    tasks: [
+      { text: "curl -I shows x-cache header from CloudFront", syncKey: "part-15-x-cache" },
+      { text: "Content served with compression (check content-encoding header)", syncKey: "part-15-compression" },
+      { text: "HTTPS working with custom domain", syncKey: "part-15-https-working" }
+    ]
+  }
+]} />
+
+---
+
+## Key Takeaways
+
+1. CloudFront is the difference between 800ms and 50ms for global users, and for static sites under 1TB/month, it costs less than a dollar.
+2. Always use Origin Access Control (OAC), not the deprecated Origin Access Identity (OAI), because agents generate the old pattern by default and you need to catch it.
+3. Custom error pages are not optional for SPAs: without them, direct URL navigation returns an XML error page, and your users see "Access Denied" instead of your app.
+
+---
+
+*Have questions? Found an error? [Open an issue](https://github.com/hionnode/akasha-lekha/issues) or reach out on [LinkedIn](https://linkedin.com/in/chinmay-pandey).*
