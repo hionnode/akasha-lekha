@@ -8,6 +8,7 @@ tags: ["aws", "devops", "startup", "elasticache", "database", "terraform"]
 series: "aws-for-startups"
 seriesPart: 38
 draft: true
+featured: false
 ---
 
 import Alert from '../../../components/shared/Alert.astro';
@@ -228,6 +229,10 @@ Key decisions:
 **transit_encryption_enabled = true:** Encrypts data between the application and Redis. Required when using an auth_token. Adds negligible latency (sub-millisecond for in-VPC traffic).
 
 **auth_token:** The Redis AUTH password. Store this in Secrets Manager alongside your database credentials (using the pattern from [Part 37](/blog/aws-for-startups/37-secrets-manager)).
+
+:::note
+**Secrets Manager integration.** For consistency with [Part 37](/blog/aws-for-startups/37-secrets-manager), store the Redis auth token in AWS Secrets Manager rather than passing it as a plain Terraform variable. Use `aws_secretsmanager_secret_version` data source to retrieve it at apply time.
+:::
 
 **snapshot_retention_limit:** 0 in dev (no snapshots, Redis is a cache). 3 in production (3-day retention for disaster recovery). If you are using Redis only as a cache (not as a primary data store), snapshots are optional in production too. But sessions stored in Redis have value, and a 3-day snapshot window costs nearly nothing.
 

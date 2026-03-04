@@ -8,6 +8,7 @@ tags: ["aws", "devops", "startup", "rds", "database", "terraform"]
 series: "aws-for-startups"
 seriesPart: 35
 draft: true
+featured: false
 ---
 
 import Alert from '../../../components/shared/Alert.astro';
@@ -267,6 +268,10 @@ resource "aws_db_instance" "main" {
 }
 ```
 
+:::warning
+**Plan drift alert.** Using `timestamp()` in `final_snapshot_identifier` means every `terraform plan` shows a change, even when nothing else changed. For daily workflows, use a static suffix like `"shipfast-db-final"`. If you want a timestamped name, pass it as a variable at destroy time: `terraform destroy -var="final_snapshot_suffix=$(date +%Y%m%d)"`.
+:::
+
 Key decisions in this configuration:
 
 **storage_type = "gp3"**: GP3 is the default and correct choice. It provides 3,000 IOPS and 125 MiB/s throughput baseline at no extra cost. GP2 scales IOPS with volume size, which tempts agents to over-provision storage just to get more IOPS. With GP3, IOPS and throughput are independent of storage size.
@@ -456,7 +461,7 @@ postgresql://{username}:{password}@{endpoint}/{db_name}?sslmode=require
 Always use `sslmode=require` (or `sslmode=verify-full` if you configure custom CA certificates). RDS supports SSL by default. Enforcing it in the connection string ensures data in transit is encrypted, even if someone misconfigures the parameter group.
 
 :::note
-**Coming in Part 37:** We will move the database password into AWS Secrets Manager with automatic rotation. For now, the password lives in terraform.tfvars (which is gitignored) and passed as a variable. This is temporary. Hardcoded credentials, even in gitignored files, are a liability.
+**Coming in Part 37:** We will move the database password into AWS Secrets Manager with automatic rotation. For now, the password lives in `secret.auto.tfvars` (which is gitignored per [Part 4](/blog/aws-for-startups/04-terraform-fundamentals)) and passed as a variable. This is temporary. Hardcoded credentials, even in gitignored files, are a liability.
 :::
 
 ---
@@ -576,7 +581,7 @@ Next in **Part 36: Database Operations**, we set up the monitoring and maintenan
 2. Start with db.t3.micro in dev and db.t3.small in production. Agents over-provision by 2-4x because their training data skews toward enterprise workloads.
 3. Multi-AZ is for production high availability. In dev and staging, it doubles cost for zero benefit, and agents enable it everywhere by default.
 4. Encryption at rest and SSL in transit are free (with the default KMS key) and have no performance impact. There is no reason to skip them.
-5. Your database password is still in terraform.tfvars. That changes in Part 37 when Secrets Manager takes over credential management.
+5. Your database password is still in `secret.auto.tfvars`. That changes in Part 37 when Secrets Manager takes over credential management.
 
 ---
 

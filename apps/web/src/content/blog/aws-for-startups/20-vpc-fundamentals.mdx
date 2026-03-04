@@ -5,7 +5,7 @@ excerpt: "The network your backend lives in. Production VPC with public and priv
 date: "2026-03-24"
 author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "vpc", "networking", "terraform"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 20
 featured: false
 draft: true
@@ -363,6 +363,10 @@ resource "aws_nat_gateway" "main" {
 
   depends_on = [aws_internet_gateway.main]
 }
+
+:::tip
+**Save $32/month in dev.** NAT Gateways cost $32.40/month per AZ. For development environments, consider making NAT Gateway creation conditional with a `var.enable_nat_gateway` variable set to `false` in dev and `true` in production. Your private subnets won't have internet access without it, but that's often fine for dev workloads that only need VPC-internal connectivity.
+:::
 
 # Public Route Table
 resource "aws_route_table" "public" {

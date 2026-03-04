@@ -5,7 +5,7 @@ excerpt: "Your first real AWS deployment. S3 static hosting with Terraform, agen
 date: "2026-02-24"
 author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "s3", "terraform", "frontend"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 13
 featured: false
 draft: true
@@ -565,6 +565,10 @@ infra/
   provider.tf
   versions.tf
 </FileTree>
+
+:::note
+**Directory rename.** In Part 4, we used `terraform/` as the root directory. From this part onward, we use `infra/` to better reflect that the directory manages all infrastructure, not just Terraform files. If you are following along, rename your directory: `mv terraform infra`.
+:::
 
 This is the module pattern from [Part 4](/blog/aws-for-startups/04-terraform-fundamentals) in action. The module defines the S3 website resources. The environment file invokes the module with environment-specific values. When you create a staging or production environment, you create a new `environments/staging/s3-website.tf` file pointing to the same module with different variables.
 

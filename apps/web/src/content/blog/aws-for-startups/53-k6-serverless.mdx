@@ -8,6 +8,7 @@ tags: ["aws", "devops", "startup", "lambda", "serverless", "testing"]
 series: "aws-for-startups"
 seriesPart: 53
 draft: true
+featured: false
 ---
 
 import Alert from '../../../components/shared/Alert.astro';
@@ -17,7 +18,7 @@ import ComparisonHeader from '../../../components/blog/guide/ComparisonHeader.as
 import ComparisonRow from '../../../components/blog/guide/ComparisonRow.astro';
 import TerminalOutput from '../../../components/blog/code/TerminalOutput.astro';
 
-In [Part 44](/blog/aws-for-startups/44-k6-containers), you load-tested your ECS Fargate services and established performance baselines. You know your containers handle 500 requests/second with p95 latency under 50ms. Now you have Lambda functions behind API Gateway. How do they compare? More importantly, at what traffic level does Lambda become more expensive than Fargate? The answer decides where each workload belongs.
+In [Part 44](/blog/aws-for-startups/44-k6-containers), you load-tested your ECS Fargate services and established performance baselines. You know your containers handle 420 requests/second with p95 latency at 185ms. Now you have Lambda functions behind API Gateway. How do they compare? More importantly, at what traffic level does Lambda become more expensive than Fargate? The answer decides where each workload belongs.
 
 **Time:** About 50 minutes.
 

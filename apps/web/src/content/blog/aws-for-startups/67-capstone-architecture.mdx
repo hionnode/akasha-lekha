@@ -3,7 +3,7 @@ title: "Capstone Architecture: Designing the Whole System"
 description: "Design a multi-tenant SaaS application using every AWS service and pattern from the series. Architecture decisions, trade-offs, and the complete AGENT-INSTRUCTIONS.md."
 excerpt: "Designing the whole system. A multi-tenant SaaS application using every service and pattern from 66 parts, with the complete AGENT-INSTRUCTIONS.md guiding every decision."
 date: "2026-10-02"
-author: "Chinmay"
+author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "terraform"]
 series: "aws-for-startups"
 seriesPart: 67
@@ -203,7 +203,9 @@ Redis serves two roles ([Part 38](/blog/aws-for-startups/38-elasticache-redis)):
 
 1. **Dashboard cache:** Computed DORA metrics are expensive to calculate (joins across millions of event rows). Results are cached in Redis with a 5-minute TTL. Cache invalidation happens when new events are processed.
 
-2. **WebSocket connection store:** Active WebSocket connection IDs, mapped to tenant and user, for real-time dashboard updates.
+2. **Session cache:** Temporary session data and rate limiting counters for the API layer.
+
+WebSocket connection IDs are stored in DynamoDB ([Part 56](/blog/aws-for-startups/56-websockets)), not Redis, because connection management requires persistent storage that survives cache eviction.
 
 Instance sizing: `cache.t4g.micro` (2 vCPU, 0.5 GB RAM). Dashboard metrics for 1,000 tenants fit in ~200 MB. Scale to `cache.t4g.small` when cache hit ratio drops below 80%.
 
@@ -381,7 +383,7 @@ This is the file that started as a single header line in [Part 1](/blog/aws-for-
 - Agent execution roles must be separate from human developer roles
 
 ## Terraform Conventions
-- Provider: AWS, region us-east-1 unless explicitly stated
+- Provider: AWS, region as configured in `environments/*.tfvars`
 - State: S3 backend in {project}-{env}-tfstate bucket with DynamoDB locking
 - Naming: {project}-{env}-{resource}
 - Tags required on ALL resources: Environment, Project, Owner, ManagedBy=terraform
@@ -633,7 +635,7 @@ Next in **Part 68: Capstone Deployment, From Zero to Production**, you hand this
     category: "Data Layer",
     tasks: [
       { text: "RDS PostgreSQL with row-level security for multi-tenancy", syncKey: "part-67-rds" },
-      { text: "ElastiCache Redis for caching and WebSocket connections", syncKey: "part-67-redis" },
+      { text: "ElastiCache Redis for caching, DynamoDB for WebSocket connections", syncKey: "part-67-redis" },
       { text: "S3 buckets defined with lifecycle policies", syncKey: "part-67-s3" }
     ]
   },

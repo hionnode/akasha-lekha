@@ -5,7 +5,7 @@ excerpt: "What everyone skips and regrets later. Set up your AWS account the rig
 date: "2026-01-08"
 author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "security", "iam", "cloudtrail"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 1
 featured: false
 draft: false
@@ -283,6 +283,10 @@ By default, only root can view billing. Fix this now so your IAM admin can manag
 
 </GuideStep>
 
+:::note
+In [Part 4](/blog/aws-for-startups/04-terraform-fundamentals), we'll refine these thresholds to 50%, 80%, 100%, 150% when we codify budgets in Terraform.
+:::
+
 :::warning
 AWS Budgets notify you. They do not stop spending. If you need hard spending limits, AWS Organizations with Service Control Policies can help. We cover that in [Part 2](/blog/aws-for-startups/02-iam-intro-for-starters).
 :::
@@ -293,7 +297,7 @@ AWS Free Tier is generous but has sharp edges:
 
 | Service | Free Tier Limit | Common Gotcha |
 |---------|-----------------|---------------|
-| EC2 | 750 hrs/month t2.micro | Two instances doubles the hours |
+| EC2 | 750 hrs/month t2.micro or t3.micro (varies by account age) | Two instances doubles the hours |
 | RDS | 750 hrs/month db.t3.micro | Multi-AZ doubles the hours |
 | S3 | 5 GB storage | Logs accumulate fast |
 | Data Transfer | 100 GB/month outbound | Images and video add up |
@@ -444,8 +448,8 @@ A printable PDF covering root lockdown, MFA setup, CloudTrail, billing alerts, t
   {
     category: "Foundation",
     tasks: [
-      "Tagging strategy documented (Environment, Project, Owner, ManagedBy)",
-      "Primary region selected",
+      { text: "Tagging strategy documented (Environment, Project, Owner, ManagedBy)", syncKey: "part-01-tagging-strategy" },
+      { text: "Primary region selected", syncKey: "part-01-primary-region" },
       { text: "AGENT-INSTRUCTIONS.md created in repo root", syncKey: "part-01-agent-instructions" }
     ]
   }

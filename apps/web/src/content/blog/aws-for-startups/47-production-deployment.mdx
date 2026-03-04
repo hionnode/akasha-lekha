@@ -8,6 +8,7 @@ tags: ["aws", "devops", "startup", "ci-cd", "ai-agents"]
 series: "aws-for-startups"
 seriesPart: 47
 draft: true
+featured: false
 ---
 
 import Alert from '../../../components/shared/Alert.astro';
@@ -169,16 +170,14 @@ jobs:
           context: services/api-bun
           file: services/api-bun/Dockerfile
           push: true
-          tags: |
-            ${{ env.ECR_REGISTRY }}/shipfast-api:${{ github.sha }}
-            ${{ env.ECR_REGISTRY }}/shipfast-api:latest
+          tags: ${{ env.ECR_REGISTRY }}/shipfast-api:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 ```
 
 `cancel-in-progress: false` on the concurrency group is different from CI. In CI, canceling stale runs saves time. In production deployments, canceling a running deployment can leave your service in an inconsistent state. Let the current deployment finish, then start the next one.
 
-The image gets two tags: the git SHA (immutable, traceable) and `latest` (convenience for local development). Production always deploys by SHA, never by `latest`.
+The image gets one tag: the git SHA. This is immutable and traceable. Every deployed image maps to exactly one commit. No `latest` tag — the ECR repository uses `IMMUTABLE` tag mutability ([Part 40](/blog/aws-for-startups/40-ecr-lifecycle)), so pushing `latest` a second time would fail with `ImageTagAlreadyExistsException`. Production deploys by SHA, always.
 
 ---
 
@@ -929,11 +928,11 @@ Next in **Part 48: Lambda Fundamentals**, we step into serverless. Lambda functi
 
 ## Key Takeaways
 
-1. Human approval for production deployment is non-negotiable: agents assist, surface data, and generate summaries, but humans decide when code reaches production.
-2. The deployment summary (explain step) is the most underrated part of the pipeline: 60 seconds of reading replaces 10 minutes of manual investigation and catches risk categories that automated checks miss entirely.
-3. Post-deploy monitoring for 15 minutes catches issues that staging cannot: memory leaks, connection pool exhaustion, and configuration mismatches between environments.
-4. Rollback is always a human decision because the tradeoff between "broken feature" and "data loss from reverting a migration" requires judgment that no automated threshold can capture.
-5. Recalibration checkpoints turn "I think the agent is getting better" into "the data shows the agent's CI pass rate improved from 78% to 91% after rephrasing three AGENT-INSTRUCTIONS.md rules," and that specificity is the difference between opinion and engineering.
+1. Human approval for production deployment is non-negotiable: agents surface data and generate summaries, but humans decide when code ships.
+2. A 60-second deployment summary replaces 10 minutes of manual investigation and catches risks automated checks miss.
+3. Post-deploy monitoring for 15 minutes catches issues staging cannot: memory leaks, connection pool exhaustion, and environment mismatches.
+4. Rollback is always a human decision because the tradeoff between a broken feature and data loss requires judgment no threshold captures.
+5. Recalibration checkpoints turn "I think the agent is improving" into measurable data, and that specificity separates opinion from engineering.
 
 ---
 

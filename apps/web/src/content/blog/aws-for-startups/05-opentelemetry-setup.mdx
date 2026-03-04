@@ -1,12 +1,13 @@
 ---
 title: "OpenTelemetry Setup: Observability That Grows With You"
 description: "Deploy OpenTelemetry infrastructure with Terraform. Choose SigNoz for simplicity or Grafana stack for flexibility. Your apps will send telemetry here for the rest of the series."
-excerpt: "Set up the OTel Collector once, choose your backend — SigNoz or Grafana stack. Your observability foundation for the entire series."
+excerpt: "Set up the OTel Collector once, choose your backend. SigNoz or Grafana stack. Your observability foundation for the entire series."
 date: "2026-01-22"
 author: "works-on-my.cloud"
 tags: ["aws", "opentelemetry", "observability", "signoz", "grafana", "terraform", "devops"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 5
+featured: false
 ---
 
 import GuideStep from '../../../components/blog/guide/GuideStep.astro';
@@ -18,7 +19,23 @@ import PanelSwitcher from '../../../components/blog/code/PanelSwitcher.astro';
 import Panel from '../../../components/blog/code/Panel.astro';
 import FileTree from '../../../components/blog/code/FileTree.astro';
 
-*Set up the OTel Collector once, choose your backend*
+Your API returns a 500 error. You check the logs. There are no logs because nobody set up logging. You add `console.log` statements, redeploy, and reproduce the error. The log says "undefined." You add more logs, redeploy again. Forty-five minutes later, you discover a missing environment variable that a structured trace would have shown in 30 seconds.
+
+**Time:** About 35 minutes.
+
+**Outcome:** An OpenTelemetry Collector running on a free-tier EC2 instance, a SigNoz observability backend with traces, metrics, and logs, and a verification dashboard that proves telemetry flows end-to-end. Every service you build from Part 6 onward connects here automatically.
+
+:::info
+**Why observability before applications?** We deploy monitoring infrastructure first so every service we build from Part 6 onward ships with telemetry from day one. Retrofitting observability into existing services is harder and means you miss the early data that reveals architectural issues before they become production incidents.
+:::
+
+## What We're Building
+
+- OpenTelemetry Collector on a free-tier EC2 instance
+- SigNoz backend for traces, metrics, and logs
+- Terraform modules for the observability stack
+- AWS Overview Dashboard for cost and resource visibility
+- Verification pipeline to confirm telemetry flows end-to-end
 
 ---
 
@@ -56,15 +73,15 @@ Without observability, you're flying blind. When something breaks at 2 AM, you'r
 
 OpenTelemetry (OTel) is the industry standard for instrumentation. It's:
 
-- **Vendor-neutral** — Switch backends without changing application code
-- **Future-proof** — CNCF graduated project, widely adopted
-- **Comprehensive** — One SDK for metrics, traces, and logs
+- **Vendor-neutral.** Switch backends without changing application code.
+- **Future-proof.** CNCF graduated project, widely adopted.
+- **Comprehensive.** One SDK for metrics, traces, and logs.
 
-By the end of this part, you'll have observability infrastructure ready. The dashboards will be empty — that's intentional. They'll fill up as we deploy applications throughout the series.
+By the end of this part, you'll have observability infrastructure ready. The dashboards will be empty, and that's intentional. They'll fill up as we deploy applications throughout the series.
 
 <Alert type="note" title="Magic First">
 
-We're not diving deep into OTel theory here. We'll deploy it, verify it works, and move on. You'll develop intuition by using it. In Part 60, we'll master the concepts — by then, you'll have context from 55 parts of experience.
+We're not diving deep into OTel theory here. We'll deploy it, verify it works, and move on. You'll develop intuition by using it. In Part 60, we'll master the concepts. By then, you'll have context from 55 parts of experience.
 
 </Alert>
 
@@ -111,8 +128,8 @@ Here's what we're building:
 
 **Collector modes:**
 
-- **Agent** — Runs alongside each application (sidecar in ECS/K8s)
-- **Gateway** — Centralized collector that multiple apps send to
+- **Agent.** Runs alongside each application (sidecar in ECS/K8s).
+- **Gateway.** Centralized collector that multiple apps send to.
 
 We'll use both patterns throughout the series.
 
@@ -131,17 +148,18 @@ You have two solid options. Pick based on your team's needs.
 | **Native OTel** | Yes | Yes (via Tempo, Mimir) |
 | **Best for** | Teams wanting simplicity | Teams with Grafana experience |
 
-<Alert type="tip" title="The Fine Line">
+<Alert type="warning" title="The Fine Line">
 
-| Under | Right | Over |
-|-------|-------|------|
-| No observability | Either SigNoz or Grafana stack | Both, plus Datadog, plus custom |
-| CloudWatch only | OTel + dedicated backend | Enterprise APM for 3-person team |
-| Check logs when broken | Dashboards + alerts | 500 metrics for simple CRUD app |
+| | |
+|---|---|
+| ❌ **Under** | No observability. `console.log` is the debugging strategy. You find out about errors when users complain on Twitter. Metrics are "how does the site feel when I click around." |
+| ✅ **Right** | OpenTelemetry Collector with SigNoz. Structured traces from every service. Basic dashboards for latency, error rate, and throughput. Alerts for the metrics that matter. Deployed before your first application so telemetry is never an afterthought. |
+| ❌ **Over** | Datadog with every integration enabled ($500/month for a 3-person team). Custom metrics for every function call. 50 dashboards that nobody checks. APM, RUM, synthetic monitoring, and log analytics before you have users. |
+| 🤖 **Agent Trap** | Agent configures the OTel Collector to export to three backends simultaneously "for redundancy" and enables every receiver, processor, and exporter in the documentation. The collector consumes more resources than the application it monitors, and the configuration file is 400 lines that nobody understands. |
 
 </Alert>
 
-**Our recommendation:** Start with SigNoz for simplicity. You can always migrate to Grafana later — that's the beauty of OTel.
+**Our recommendation:** Start with SigNoz for simplicity. You can always migrate to Grafana later. That's the beauty of OTel.
 
 ---
 
@@ -175,7 +193,7 @@ mkdir -p docker/observability/otel-collector
 
 ### OTel Collector Configuration
 
-The collector config is shared between backends — only the exporter changes.
+The collector config is shared between backends. Only the exporter changes.
 
 <details>
 <summary><strong>Base OTel Collector Config (docker/observability/otel-collector/config.yaml)</strong></summary>
@@ -328,7 +346,7 @@ cd docker/observability
 docker compose -f docker-compose.signoz.yml up -d
 ```
 
-Open http://localhost:3301 — you'll see an empty dashboard.
+Open http://localhost:3301. You'll see an empty dashboard.
 
   </Panel>
 
@@ -642,7 +660,7 @@ mkdir -p grafana/provisioning/datasources tempo loki prometheus
 docker compose -f docker-compose.grafana.yml up -d
 ```
 
-Open http://localhost:3000 (admin/admin) — you'll see empty dashboards.
+Open http://localhost:3000 (admin/admin). You'll see empty dashboards.
 
   </Panel>
 </PanelSwitcher>
@@ -659,17 +677,17 @@ Before we deploy applications, let's create a dashboard that shows what we've bu
 |------|-------------------|
 | 1 | CloudTrail, Budget alerts |
 | 2 | IAM users, groups, roles, policies |
-| 3 | (Local setup — no AWS resources) |
+| 3 | (Local setup, no AWS resources) |
 | 4 | S3 state bucket, Terraform-managed versions of Part 1-2 |
 | 5 | OTel Collector, Observability backend |
 
 This dashboard provides:
 
-1. **Validation** — Data is flowing, setup works
-2. **Cost awareness** — Reinforce billing protection from Part 1
-3. **Resource inventory** — See what Terraform created
-4. **Security posture** — IAM overview, CloudTrail activity
-5. **Foundation for growth** — Expands as you deploy more
+1. **Validation.** Data is flowing, setup works.
+2. **Cost awareness.** Reinforce billing protection from Part 1.
+3. **Resource inventory.** See what Terraform created.
+4. **Security posture.** IAM overview, CloudTrail activity.
+5. **Foundation for growth.** Expands as you deploy more.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -1675,17 +1693,15 @@ Verify your observability setup is complete:
 
 ## Key Takeaways
 
-1. **OpenTelemetry is the standard.** Instrument once, switch backends freely. Your apps don't care if you use SigNoz, Grafana, or Datadog.
+1. Deploy observability before your first application so you never have to retrofit telemetry into a running service under pressure.
+2. OpenTelemetry is vendor-neutral, which means switching from SigNoz to Datadog or Grafana Cloud requires changing one exporter config, not re-instrumenting every service.
+3. The OTel Collector runs on a t3.micro (free tier) and handles telemetry from dozens of services before you need to think about scaling it.
+4. Structured traces beat `console.log` the same way version control beats saving files as `final_v2_REAL.js`.
+5. The AWS Overview Dashboard validates your setup works and gives immediate value: cost visibility, resource inventory, and security posture from day one.
 
-2. **The collector is your friend.** It buffers, batches, and routes telemetry. Deploy it as a sidecar or gateway based on your architecture.
+## What's Coming
 
-3. **Start simple.** SigNoz is easier to start with. You can always migrate to Grafana later — that's the whole point of OTel.
-
-4. **Empty dashboards are okay.** They'll fill up as we deploy applications. By Part 60, you'll have intuition from using observability daily.
-
-5. **The AWS Overview Dashboard** validates your setup works and gives immediate value — cost visibility, resource inventory, security posture.
-
-Your observability foundation is ready. Every application we deploy from now on will send telemetry here. Next up: [Part 6 — Git & GitHub: Professional Workflow](/blog/aws-for-startups/06-git-github-workflow), where we set up the developer workflow that ties everything together.
+Next in **Part 6: Git & GitHub Agents**, we set up the developer workflow that ties everything together. The observability foundation you built today means every commit, deploy, and rollback generates telemetry you can trace.
 
 ---
 

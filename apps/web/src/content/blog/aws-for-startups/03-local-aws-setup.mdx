@@ -1,12 +1,13 @@
 ---
 title: "Your Local AWS Setup: Stop Hardcoding Access Keys Forever"
 description: "Configure your local AWS development environment the right way. Learn AWS CLI v2, IAM Identity Center (SSO), named profiles, and aws-vault for credential security that scales."
-excerpt: "Stop hardcoding access keys forever. Configure your local development environment the right way — AWS CLI, IAM Identity Center, and credential security that scales with your team."
+excerpt: "Stop hardcoding access keys forever. Configure your local development environment the right way: AWS CLI, IAM Identity Center, and credential security that scales with your team."
 date: "2026-01-21"
 author: "works-on-my.cloud"
 tags: ["aws", "cli", "security", "devops", "startup"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 3
+featured: false
 ---
 
 import GuideStep from '../../../components/blog/guide/GuideStep.astro';
@@ -21,7 +22,19 @@ import FileTree from '../../../components/blog/code/FileTree.astro';
 import EnvVars from '../../../components/blog/guide/EnvVars.astro';
 import EnvVar from '../../../components/blog/guide/EnvVar.astro';
 
-*Stop hardcoding access keys forever*
+You grep your machine for `AKIA` and find three matches: one in `.bashrc`, one in a `.env` file you forgot about, and one in your shell history that is also synced to iCloud. You rotate the key. A week later, your agent creates a new project and drops a fresh access key into `~/.aws/credentials` because that is what the AWS docs say to do.
+
+**Time:** About 30 minutes.
+
+**Outcome:** AWS CLI v2 configured with IAM Identity Center (SSO), named profiles for dev/staging/prod, session credentials that expire automatically, and aws-vault for an extra layer of protection. Zero long-lived access keys on your machine.
+
+## What We're Building
+
+- AWS CLI v2 with IAM Identity Center (SSO) authentication
+- Named profiles for dev, staging, and production environments
+- aws-vault for encrypted credential storage
+- Automatic session expiration (no permanent keys)
+- Shell integration with profile switching
 
 ---
 
@@ -59,7 +72,7 @@ If you see output, you have AWS access keys sitting in plain text on your machin
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-This isn't hypothetical. GitHub's secret scanning blocks thousands of AWS keys daily—but only catches what gets pushed to public repos. Private repos, Slack messages, local files? You're on your own.
+This isn't hypothetical. GitHub's secret scanning blocks thousands of AWS keys daily, but only catches what gets pushed to public repos. Private repos, Slack messages, local files? You're on your own.
 
 **What we're building today:**
 
@@ -75,7 +88,7 @@ By the end, you'll have a setup that's both more secure *and* more convenient th
 
 ## Installing the AWS CLI v2
 
-The AWS CLI is your primary interface to AWS outside the console. Version 2 is required—it has SSO support that v1 lacks.
+The AWS CLI is your primary interface to AWS outside the console. Version 2 is required because it has SSO support that v1 lacks.
 
 <PanelSwitcher defaultActive="macos">
   <Panel label="macOS" value="macos">
@@ -133,7 +146,7 @@ aws-cli/2.15.0 Python/3.11.6 Darwin/23.0.0 source/arm64
 ```
 </TerminalOutput>
 
-The version should start with `2.`. If you see `1.x`, you have the old CLI—uninstall it and install v2.
+The version should start with `2.`. If you see `1.x`, you have the old CLI. Uninstall it and install v2.
 
 <Alert type="important">
 
@@ -182,7 +195,7 @@ Before diving into setup, understand your options:
 
 **The recommendation is clear: use IAM Identity Center if you can.** It provides short-term credentials that rotate automatically, integrates with your browser for authentication, and scales from solo developers to enterprise teams.
 
-If you're on a solo AWS account without Organizations, aws-vault is your next best option—it wraps access keys with encryption and STS to provide similar security benefits.
+If you're on a solo AWS account without Organizations, aws-vault is your next best option. It wraps access keys with encryption and STS to provide similar security benefits.
 
 ---
 
@@ -232,7 +245,7 @@ IAM Identity Center requires:
 - **AWS Organizations** enabled (even for a single account)
 - **Identity Center** enabled in your management account
 
-If you set up your account following Part 1 of this series, you're ready. If not, you'll need to enable Organizations first.
+If you set up your account following Part 1 of this series, you still need to enable Organizations. Part 1 does not cover that step. Follow the guide step below to enable it before proceeding.
 
 <GuideStep title="Enable AWS Organizations" syncKey="enable-orgs">
   1. Sign in to AWS Console as your admin user
@@ -279,6 +292,10 @@ If you set up your account following Part 1 of this series, you're ready. If not
   5. Select the **AdministratorAccess** permission set
   6. Click **Submit**
 </GuideStep>
+
+:::warning
+**Clean up the Part 1 IAM user.** Now that SSO handles authentication, deactivate (or delete) the IAM user you created in [Part 1](/blog/aws-for-startups/01-your-first-60-minutes-in-aws). Having unused credentials is a security risk. In the IAM console, disable the access keys and remove console access for that user.
+:::
 
 ### Configure the AWS CLI for SSO
 
@@ -414,15 +431,16 @@ region = us-east-1
 output = json
 ```
 
-One `aws sso login` authenticates you to the SSO session—all profiles sharing that session work immediately.
+One `aws sso login` authenticates you to the SSO session. All profiles sharing that session work immediately.
 
-<Alert type="tip" title="The Fine Line: Identity Center">
+<Alert type="warning" title="The Fine Line">
 
-| ❌ Under-engineering | ✅ Right-sized | ❌ Over-engineering |
-|---------------------|----------------|---------------------|
-| Skip SSO, use access keys | Identity Center for all human access | Custom SAML IdP for a 2-person team |
-| Share one SSO user | One user per person | Separate SSO instance per environment |
-| No permission sets | Permission sets matching job functions | 50 granular permission sets before you need them |
+| | |
+|---|---|
+| ❌ **Under** | One set of access keys in `~/.aws/credentials`. Same keys for dev and production. Keys never rotated. The agent uses whatever credentials it finds, which happen to have admin access to production. |
+| ✅ **Right** | IAM Identity Center with named profiles. Session credentials that expire in 1-12 hours. aws-vault for encrypted storage. Separate profiles per environment so `--profile prod` is a deliberate choice. |
+| ❌ **Over** | Hardware security keys required for every CLI session. Custom credential broker with audit logging for a solo developer. Separate laptops for production access. |
+| 🤖 **Agent Trap** | Agent runs `aws configure` and stores a permanent access key in plaintext because it is the fastest path to a working CLI. The key has admin permissions "for development." Six months later, nobody remembers the key exists, it has never been rotated, and it has full access to production. |
 
 </Alert>
 
@@ -488,7 +506,7 @@ aws s3 ls  # Uses prod-admin
 
 **Method 3: Default profile**
 
-If `[default]` is configured, commands without `--profile` use it. But explicit is better than implicit—use `AWS_PROFILE` or `--profile`.
+If `[default]` is configured, commands without `--profile` use it. But explicit is better than implicit, so use `AWS_PROFILE` or `--profile`.
 
 ### Profile Naming Conventions
 
@@ -499,10 +517,10 @@ Use a consistent naming scheme:
 ```
 
 Examples:
-- `prod-admin` — Production account, admin access
-- `prod-readonly` — Production account, read-only
-- `dev-admin` — Development account, admin access
-- `staging-deploy` — Staging account, deployment permissions
+- `prod-admin`: Production account, admin access
+- `prod-readonly`: Production account, read-only
+- `dev-admin`: Development account, admin access
+- `staging-deploy`: Staging account, deployment permissions
 
 This makes it obvious what you're targeting before you run a command.
 
@@ -607,7 +625,7 @@ First, create access keys for your IAM user (from Part 1):
   4. Select **Command Line Interface (CLI)**
   5. Check the confirmation box
   6. Click **Create access key**
-  7. **Copy both keys immediately** — you won't see the secret key again
+  7. **Copy both keys immediately.** You won't see the secret key again
 </GuideStep>
 
 Now add them to aws-vault (NOT to `~/.aws/credentials`):
@@ -694,7 +712,7 @@ Enter MFA code for arn:aws:iam::123456789012:mfa/your-username: 123456
 
 ## Assuming Roles Locally
 
-Sometimes you need to assume a different role—for deployment, cross-account access, or elevated permissions. Both SSO and aws-vault support this.
+Sometimes you need to assume a different role for deployment, cross-account access, or elevated permissions. Both SSO and aws-vault support this.
 
 ### Role Assumption with SSO Profiles
 
@@ -989,17 +1007,14 @@ aws configure list-profiles
 
 ## Key Takeaways
 
-1. **IAM Identity Center is the modern standard.** Short-term credentials, automatic rotation, browser-based auth. Use it if you have AWS Organizations (even with one account).
+1. IAM Identity Center replaces long-lived access keys with session credentials that expire automatically, which eliminates the entire category of "leaked permanent key" incidents.
+2. Named profiles force you to choose an environment explicitly, which means deploying to production requires typing `--profile prod` instead of accidentally using your default credentials.
+3. aws-vault encrypts credentials at rest so a stolen laptop does not mean stolen AWS access.
+4. The `AKIA` grep test should return zero results on your machine. If it does not, you have permanent credentials that need to be replaced with SSO sessions.
 
-2. **aws-vault is your fallback.** If you must use access keys, never store them in plain text. aws-vault encrypts them and issues short-term credentials via STS.
+## What's Coming
 
-3. **Named profiles prevent disasters.** Explicit `--profile` flags or `AWS_PROFILE` make it obvious which account you're targeting. No more "I thought I was in dev."
-
-4. **Clean up old credentials.** Environment variables, `~/.aws/credentials`, `.env` files—audit them all. Mixed authentication methods cause unpredictable behavior.
-
-5. **The credential chain has an order.** Environment variables win. Know the order, debug with `env | grep AWS` and `aws sts get-caller-identity`.
-
-Your local environment is now secure. No more access keys in Slack, no more plain text credentials, no more "which account am I in?" Next up: [Part 4 — Terraform Fundamentals](/blog/aws-for-startups/04-terraform-fundamentals), where we codify everything we've done manually.
+Next in **Part 4: Terraform Fundamentals**, we codify everything in infrastructure-as-code. The SSO profiles you configured today become the authentication method Terraform uses to manage your AWS resources.
 
 ---
 

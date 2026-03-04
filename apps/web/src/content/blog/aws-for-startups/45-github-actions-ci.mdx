@@ -8,6 +8,7 @@ tags: ["aws", "devops", "startup", "ci-cd"]
 series: "aws-for-startups"
 seriesPart: 45
 draft: true
+featured: false
 ---
 
 import Alert from '../../../components/shared/Alert.astro';
@@ -124,7 +125,7 @@ env:
   NODE_VERSION: "20"
   BUN_VERSION: "1.1"
   PYTHON_VERSION: "3.12"
-  GO_VERSION: "1.22"
+  GO_VERSION: "1.23"
 ```
 
 The `concurrency` block is critical. When you push a new commit to a PR that already has CI running, it cancels the in-progress run and starts a new one. Without this, you get queued runs burning minutes on outdated code.

@@ -1,12 +1,13 @@
 ---
-title: "IAM — The Key to Everything: Least Privilege Without Losing Your Mind"
+title: "IAM: The Key to Everything"
 description: "Master AWS IAM for startups. Learn users, groups, roles, and policies with practical templates for developers, Lambda, CI/CD, and Terraform."
-excerpt: "Least privilege without losing your mind. Build a working IAM setup for your startup—not enterprise complexity, not 'just use AdministratorAccess.' The practical middle ground."
+excerpt: "Least privilege without losing your mind. Build a working IAM setup for your startup, not enterprise complexity, not 'just use AdministratorAccess.' The practical middle ground."
 date: "2026-01-11"
 author: "works-on-my.cloud"
 tags: ["aws", "iam", "security", "devops", "startup"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 2
+featured: false
 ---
 
 import GuideStep from '../../../components/blog/guide/GuideStep.astro';
@@ -20,7 +21,20 @@ import PanelSwitcher from '../../../components/blog/code/PanelSwitcher.astro';
 import FileTree from '../../../components/blog/code/FileTree.astro';
 
 
-*Least privilege without losing your mind*
+Your agent spins up three Lambda functions, an API Gateway, and an S3 bucket. Each resource gets `AdministratorAccess` because "it works." Two weeks later, a leaked `.env` file gives an attacker full access to every service in your account. Not because the key was powerful, but because every role was.
+
+**Time:** About 45 minutes.
+
+**Outcome:** A complete IAM setup with developer groups, least-privilege service roles for Lambda, ECS, and CI/CD, OIDC federation for GitHub Actions, and a Terraform role. No `AdministratorAccess` anywhere.
+
+## What We're Building
+
+- Developer group with scoped permissions (no IAM access, no production writes)
+- Lambda execution role with least-privilege policy
+- GitHub Actions OIDC federation (no access keys)
+- Terraform automation role with MFA requirement
+- Tag-based permission boundaries for environment isolation
+- Naming convention that enables wildcard scoping
 
 ---
 
@@ -29,9 +43,9 @@ import FileTree from '../../../components/blog/code/FileTree.astro';
 
 Every AWS service has two layers.
 
-**Data plane** handles the actual work — bytes flowing into S3, Lambda functions executing, DynamoDB returning query results. This is where your application lives. Data planes are fast, scalable, and occasionally have brief hiccups during regional issues.
+**Data plane** handles the actual work: bytes flowing into S3, Lambda functions executing, DynamoDB returning query results. This is where your application lives. Data planes are fast, scalable, and occasionally have brief hiccups during regional issues.
 
-**Control plane** manages the infrastructure — creating buckets, configuring functions, setting permissions, deleting resources. When you click "Create" in the console or run `terraform apply`, you're talking to the control plane.
+**Control plane** manages the infrastructure: creating buckets, configuring functions, setting permissions, deleting resources. When you click "Create" in the console or run `terraform apply`, you're talking to the control plane.
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         HOW AWS SERVICES WORK                               │
@@ -62,7 +76,7 @@ Every AWS service has two layers.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Here's what most people don't realize: **IAM is embedded in the control plane of every AWS service.** It's not a standalone service you occasionally configure — it's the authorization layer that every single API call passes through.
+Here's what most people don't realize: **IAM is embedded in the control plane of every AWS service.** It's not a standalone service you occasionally configure. It's the authorization layer that every single API call passes through.
 
 When you call `s3:CreateBucket`, IAM evaluates your permissions before S3 even sees the request. When your CI/CD pipeline deploys a Lambda function, IAM validates the credentials first. When one service calls another, IAM checks the role's permissions.
 
@@ -97,13 +111,13 @@ Every. Single. API call.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-This is why IAM is architected to never go down. AWS has built IAM as the most resilient component in their infrastructure — globally replicated, aggressively cached, designed to survive failures that would cripple other services. If IAM fails, nothing in AWS works. Not because services break, but because nothing can prove it's allowed to do anything.
+This is why IAM is architected to never go down. AWS has built IAM as the most resilient component in their infrastructure: globally replicated, aggressively cached, designed to survive failures that would cripple other services. If IAM fails, nothing in AWS works. Not because services break, but because nothing can prove it's allowed to do anything.
 
 **The implication:** IAM isn't something you learn "eventually." It's the foundation that determines whether your code runs, your deployments succeed, and your infrastructure stays secure.
 
 ---
 
-Now that you understand IAM's critical role in AWS, let's clarify what IAM actually does—because many people confuse two related but distinct concepts.
+Now that you understand IAM's critical role in AWS, let's clarify what IAM actually does, because many people confuse two related but distinct concepts.
 
 ---
 
@@ -221,7 +235,7 @@ When you write a resource-based policy (like an S3 bucket policy), you specify p
 
 <Alert type="important">
 
-**Identity-based policies don't have a Principal field** because the principal is implicit—whoever the policy is attached to. Only resource-based policies and trust policies specify principals explicitly.
+**Identity-based policies don't have a Principal field** because the principal is implicit (whoever the policy is attached to). Only resource-based policies and trust policies specify principals explicitly.
 
 </Alert>
 
@@ -277,7 +291,7 @@ A policy connects these pieces. That's it. Everything else is details.
 
 ---
 
-## Users, Groups, Roles — The Only Rule You Need
+## Users, Groups, Roles: The Only Rule You Need
 
 Here's the rule: **Humans get users. Everything else gets roles.**
 
@@ -309,7 +323,7 @@ aws iam create-user --user-name alice
 
 ### Groups
 
-Groups are collections of users. Attach policies to groups, then add users to groups. Never attach policies directly to users — it doesn't scale.
+Groups are collections of users. Attach policies to groups, then add users to groups. Never attach policies directly to users. It doesn't scale.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -357,25 +371,26 @@ Why roles over users for services? No credentials to leak. When Lambda assumes a
 
 <Alert type="important">
 
-**Critical:** Services should NEVER use IAM user access keys. Always use roles. If you find yourself creating access keys for a Lambda function, EC2 instance, or container, stop—you're doing it wrong.
+**Critical:** Services should NEVER use IAM user access keys. Always use roles. If you find yourself creating access keys for a Lambda function, EC2 instance, or container, stop. You're doing it wrong.
 
 </Alert>
 
 ---
 
-<Alert type="tip" title="The Fine Line: Users, Groups, Roles">
+<Alert type="warning" title="The Fine Line">
 
-| ❌ Under-engineering | ✅ Right | ❌ Over-engineering |
-|---------------------|----------|---------------------|
-| Everyone shares one IAM user | Users for humans, roles for services | Complex role chaining before you need it |
-| Policies attached directly to users | Permissions managed through groups | Separate role per developer |
-| Access keys for everything | OIDC federation for CI/CD | Custom IdP integration for 3-person team |
+| | |
+|---|---|
+| ❌ **Under** | Everyone shares one IAM user with `AdministratorAccess`. Access keys for everything. Policies attached directly to users. No conditions, no reviews. An agent creates a Lambda role with `*:*` because it is the shortest path to a passing test. |
+| ✅ **Right** | Users for humans, roles for services. Permissions through groups. AWS managed policies plus narrow custom policies. OIDC for CI/CD. Tag-based conditions for environment scoping. Access Analyzer for quarterly review. |
+| ❌ **Over** | Hand-crafting every policy from scratch. 50-line condition blocks on every statement. Weekly permission audits for a 5-person team. Separate IAM role per developer. Custom IdP integration before you have 10 users. |
+| 🤖 **Agent Trap** | Agent attaches `AdministratorAccess` to every role because it eliminates permission errors during development. Tests pass, deployment works, and every service in your account can read every secret, delete every database, and modify every IAM policy. The agent optimized for "no errors" instead of "least privilege." |
 
 </Alert>
 
 ---
 
-The most important concept in that table—roles for everything except humans—deserves deeper explanation. Let's see how roles actually work under the hood.
+The most important concept in that table, roles for everything except humans, deserves deeper explanation. Let's see how roles actually work under the hood.
 
 ---
 
@@ -545,7 +560,7 @@ When you see a well-architected AWS environment, you'll find access keys almost 
 
 ---
 
-You've seen how roles get assumed and receive temporary credentials. Now let's look at what happens when those credentials are used—how IAM decides whether to allow or deny any given request.
+You've seen how roles get assumed and receive temporary credentials. Now let's look at what happens when those credentials are used, and how IAM decides whether to allow or deny any given request.
 
 ---
 
@@ -700,7 +715,7 @@ Permissions can be granted from two directions:
 }
 ```
 
-No `Principal` — this attaches to the Lambda's role. The role itself is the principal.
+No `Principal` here. This attaches to the Lambda's role. The role itself is the principal.
 
 **Approach 2: Resource-based policy on S3 bucket**
 ```json
@@ -712,9 +727,9 @@ No `Principal` — this attaches to the Lambda's role. The role itself is the pr
 }
 ```
 
-`Principal` specified — this attaches to the bucket, explicitly granting access to the Lambda role.
+`Principal` specified. This attaches to the bucket, explicitly granting access to the Lambda role.
 
-For same-account access, either works. Most teams use identity-based policies because they're easier to manage — all permissions for a role are in one place.
+For same-account access, either works. Most teams use identity-based policies because they're easier to manage: all permissions for a role are in one place.
 
 ---
 
@@ -779,7 +794,7 @@ arn:aws:iam::123456789012:user/alice                # IAM user (no region — IA
 
 <Alert type="note">
 
-**The startup answer:** Start with AWS managed policies. Create custom managed policies when you need more specific permissions. Avoid inline policies — they're harder to audit and don't scale.
+**The startup answer:** Start with AWS managed policies. Create custom managed policies when you need more specific permissions. Avoid inline policies. They're harder to audit and don't scale.
 
 </Alert>
 
@@ -839,10 +854,10 @@ Before attaching a policy, test it. The [IAM Policy Simulator](https://policysim
 
 Let's build a real IAM structure. We'll create:
 
-1. A **Developer group** — for engineers who build features
-2. A **Lambda service role** — for a function that reads S3 and writes DynamoDB
-3. A **GitHub Actions role** — for CI/CD deployments
-4. A **Terraform role** — for infrastructure automation (we'll use this in Part 4)
+1. A **Developer group** for engineers who build features
+2. A **Lambda service role** for a function that reads S3 and writes DynamoDB
+3. A **GitHub Actions role** for CI/CD deployments
+4. A **Terraform role** for infrastructure automation (we'll use this in Part 4)
 
 ### Naming and Tagging Strategies
 
@@ -1298,7 +1313,7 @@ Let's create a role for a Lambda that:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Trust policy** (`lambda-trust-policy.json`) — defines who can assume this role:
+**Trust policy** (`lambda-trust-policy.json`), which defines who can assume this role:
 
 ```json
 {
@@ -1400,10 +1415,10 @@ aws lambda create-function \
 
 **Why this works:**
 
-- Scoped to exact resources — not `s3:*` on `*`
+- Scoped to exact resources, not `s3:*` on `*`
 - Includes DynamoDB indexes (common oversight)
 - CloudWatch logs scoped to this function's log group
-- Trust policy only allows Lambda service — humans can't assume this role
+- Trust policy only allows Lambda service, so humans can't assume this role
 
 <CodeSwitcher
   tabs={[
@@ -1534,7 +1549,7 @@ data "aws_caller_identity" "current" {}`
 
 ### Template 3: GitHub Actions CI/CD Role
 
-CI/CD pipelines should never use access keys. Use [OIDC federation](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services) — GitHub proves its identity to AWS, AWS issues temporary credentials. No secrets to rotate or leak.
+CI/CD pipelines should never use access keys. Use [OIDC federation](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services). GitHub proves its identity to AWS, AWS issues temporary credentials. No secrets to rotate or leak.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -2335,13 +2350,13 @@ The theory is "grant minimum permissions needed." The reality is you don't alway
 
 **Practical approach:**
 
-1. **Start with AWS managed policies** — `ReadOnlyAccess`, `PowerUserAccess`, job-function policies. They're battle-tested.
+1. **Start with AWS managed policies.** `ReadOnlyAccess`, `PowerUserAccess`, job-function policies. They're battle-tested.
 
-2. **Use Access Analyzer** — After workloads run for 30+ days, [IAM Access Analyzer](https://docs.aws.amazon.com/IAM/latest/UserGuide/what-is-access-analyzer.html) can generate policies based on actual usage.
+2. **Use Access Analyzer.** After workloads run for 30+ days, [IAM Access Analyzer](https://docs.aws.amazon.com/IAM/latest/UserGuide/what-is-access-analyzer.html) can generate policies based on actual usage.
 
-3. **Narrow over time** — Replace broad managed policies with specific custom policies as you understand usage patterns.
+3. **Narrow over time.** Replace broad managed policies with specific custom policies as you understand usage patterns.
 
-4. **Use conditions** — Even broad action permissions become safe with the right conditions:
+4. **Use conditions.** Even broad action permissions become safe with the right conditions:
 
 ```json
 {
@@ -2360,15 +2375,6 @@ This allows all EC2 actions but only on resources tagged `Environment: dev`.
 
 ---
 
-<Alert type="tip" title="The Fine Line: Least Privilege">
-
-| ❌ Under-engineering | ✅ Right | ❌ Over-engineering |
-|---------------------|----------|---------------------|
-| `AdministratorAccess` for everyone | AWS managed policies + narrow custom policies | Hand-crafting every policy from scratch |
-| No conditions | Conditions for environment/team scoping | 50-line condition blocks |
-| Never reviewing permissions | Access Analyzer + quarterly reviews | Weekly permission audits for 5-person team |
-
-</Alert>
 
 ---
 
@@ -2480,11 +2486,11 @@ Once your team grows past 5-10 people, individual IAM users become a management 
 
 [AWS Organizations](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_introduction.html) lets you manage multiple AWS accounts as a unit. Benefits:
 
-- **Consolidated billing** — One bill, cost allocation by account
-- **Service Control Policies (SCPs)** — Guardrails that apply to entire accounts
-- **Account factory** — Spin up new accounts with consistent baselines
+- **Consolidated billing.** One bill, cost allocation by account.
+- **Service Control Policies (SCPs).** Guardrails that apply to entire accounts.
+- **Account factory.** Spin up new accounts with consistent baselines.
 
-Set up Organizations early — it's free and makes everything easier later.
+Set up Organizations early. It's free and makes everything easier later.
 
 ### IAM Identity Center (SSO)
 
@@ -2499,14 +2505,6 @@ We'll go deeper on these in a future post on multi-account architecture.
 
 ---
 
-<Alert type="tip" title="The Fine Line: Organizations & Identity Center">
-
-| ❌ Under-engineering | ✅ Right | ❌ Over-engineering |
-|---------------------|----------|---------------------|
-| Single account forever, 20 IAM users | Organizations now (free), Identity Center when team grows | Full multi-account landing zone before product-market fit |
-| No SCPs | Basic SCPs (deny root, require encryption) | 50 custom SCPs for 3-person team |
-
-</Alert>
 
 ---
 
@@ -2578,17 +2576,15 @@ We'll go deeper on these in a future post on multi-account architecture.
 
 ## Key Takeaways
 
-1. **Humans get users. Everything else gets roles.** Internalize this rule and you'll avoid 80% of IAM mistakes.
+1. Humans get users, everything else gets roles. Internalize this rule and you avoid 80% of IAM mistakes.
+2. Attach policies to groups, not users. When the team grows from 3 to 30, you change group membership, not 30 individual policy attachments.
+3. OIDC federation for CI/CD means no long-lived credentials to rotate, leak, or forget about in a `.env` file.
+4. Start with AWS managed policies and narrow them with Access Analyzer after 90 days of real usage data, not before.
+5. Conditions (tags, MFA, IP restrictions) let you grant broad permissions safely, which is how you get developer velocity without security theater.
 
-2. **Groups are for permissions, not users.** Attach policies to groups, add users to groups. This scales.
+## What's Coming
 
-3. **Start broad, narrow over time.** AWS managed policies → custom managed policies → Access Analyzer refinement.
-
-4. **OIDC > Access keys.** CI/CD should never use long-lived credentials. GitHub Actions, GitLab, and others support OIDC.
-
-5. **Conditions are your friend.** Tag-based permissions, MFA requirements, and IP restrictions make broad permissions safe.
-
-You now have a production-ready IAM foundation. Next up: [Part 3 — Your Local AWS Setup](/guides/aws/part-3-local-setup).
+Next in **Part 3: Your Local AWS Setup**, we configure the AWS CLI with IAM Identity Center so you never hardcode access keys again. The IAM roles you built today become the identities your local environment assumes.
 
 ---
 

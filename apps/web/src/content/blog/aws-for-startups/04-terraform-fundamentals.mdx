@@ -5,8 +5,9 @@ excerpt: "Stop clicking through the AWS console. Set up your Terraform project f
 date: "2026-01-21"
 author: "works-on-my.cloud"
 tags: ["aws", "terraform", "iac", "devops", "startup"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 4
+featured: false
 ---
 
 import GuideStep from '../../../components/blog/guide/GuideStep.astro';
@@ -18,51 +19,19 @@ import PanelSwitcher from '../../../components/blog/code/PanelSwitcher.astro';
 import Panel from '../../../components/blog/code/Panel.astro';
 import FileTree from '../../../components/blog/code/FileTree.astro';
 
-*Stop clicking through the AWS console*
+You click "Create bucket" in the AWS console. Fifteen minutes later you click it again with slightly different settings. By Friday, you have four buckets, two with public access you did not intend, and no record of which settings you chose for which. Your agent creates resources even faster: a VPC, three subnets, a security group with port 22 open to 0.0.0.0/0, all in a region you did not ask for. Nothing is documented because the console does not document.
 
----
+**Time:** About 40 minutes.
 
-## Why This Matters
+**Outcome:** A Terraform project with remote S3 state, DynamoDB locking, a reusable module structure, and your first deployed resource. Plus a `.gitignore` and state management strategy that prevents the two most common Terraform disasters.
 
-You've spent the last three parts setting up your AWS account through the console. You clicked through IAM, CloudTrail, billing alerts, and budget configurations. It works. But here's the problem:
+## What We're Building
 
-**Can you do it again?**
-
-What happens when you need a staging environment? A second AWS account? When a new team member asks "how is our infrastructure configured?" Do you screenshot the console? Write a wiki page that's outdated by Tuesday?
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│              THE "I'LL DOCUMENT IT LATER" REALITY               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   Console Setup                                                  │
-│        │                                                         │
-│        ▼                                                         │
-│   "I'll document this"                                          │
-│        │                                                         │
-│        ▼                                                         │
-│   (3 months pass)                                               │
-│        │                                                         │
-│        ▼                                                         │
-│   "How did we configure X?"                                     │
-│        │                                                         │
-│        ▼                                                         │
-│   Click through 47 console pages                                │
-│        │                                                         │
-│        ▼                                                         │
-│   Still not sure what's connected to what                       │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Infrastructure as Code (IaC)** solves this. Your infrastructure becomes:
-
-- **Reproducible** — Run `terraform apply` and get the exact same setup
-- **Reviewable** — Pull requests for infrastructure changes
-- **Auditable** — Git history shows who changed what and when
-- **Self-documenting** — The code *is* the documentation
-
-By the end of this part, you'll have a Terraform project that codifies everything we've built so far—and a foundation for everything we'll build next.
+- Remote state backend with S3 and DynamoDB locking
+- Terraform project structure with environment separation
+- Budget alerts codified as infrastructure
+- `.gitignore` with a clear secrets strategy
+- First `terraform apply` with real AWS resources
 
 ---
 
@@ -108,14 +77,14 @@ resource "aws_s3_bucket" "logs" {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-<Alert type="tip" title="The Fine Line">
+<Alert type="warning" title="The Fine Line">
 
-| Under | Right | Over |
-|-------|-------|------|
-| Everything in console | Terraform for persistent infrastructure | Terraform for one-off experiments |
-| Copy-paste configs everywhere | Modules for repeated patterns | Over-abstracting before you need it |
-| No state locking | S3 backend with native locking | Terraform Cloud for 2-person team |
-| No code review | PRs for infrastructure changes | 5 approvers for a tag change |
+| | |
+|---|---|
+| ❌ **Under** | All infrastructure created manually in the console. No record of what exists or why. State stored locally in `terraform.tfstate` on one developer's laptop. Team members cannot collaborate. |
+| ✅ **Right** | Remote state in S3 with DynamoDB locking. Environment separation via workspaces or directory structure. Non-sensitive config in committed `terraform.tfvars`, secrets in gitignored `secret.auto.tfvars`. Modules for reusable patterns. |
+| ❌ **Over** | Custom Terraform wrapper scripts. Atlantis or Spacelift before you have a second developer. Terragrunt for a single-environment project. Policy-as-code (Sentinel/OPA) for a 3-person team. |
+| 🤖 **Agent Trap** | Agent generates a 200-line Terraform file with every resource inline, no modules, no variables, and hardcoded values for region, account ID, and bucket names. It works on `terraform apply` but is unmaintainable, unreusable, and breaks the moment you need a second environment. |
 
 </Alert>
 
@@ -307,9 +276,9 @@ touch terraform/environments/prod/{main.tf,backend.tf,providers.tf,variables.tf,
 ```
 
 **Why this structure?**
-- `bootstrap/` — One-time setup (state bucket). Run once, rarely touched.
-- `modules/` — Reusable components. Write once, use everywhere.
-- `environments/` — Environment-specific configs. Each environment is isolated.
+- `bootstrap/`: One-time setup (state bucket). Run once, rarely touched.
+- `modules/`: Reusable components. Write once, use everywhere.
+- `environments/`: Environment-specific configs. Each environment is isolated.
 
 </details>
 
@@ -330,9 +299,8 @@ touch terraform/environments/prod/{main.tf,backend.tf,providers.tf,variables.tf,
 crash.log
 crash.*.log
 
-# Exclude all .tfvars files, which are likely to contain sensitive data
-*.tfvars
-*.tfvars.json
+# Exclude secret tfvars files
+secret.auto.tfvars
 
 # But keep example tfvars
 !*.tfvars.example
@@ -353,15 +321,19 @@ terraform.rc
 
 </details>
 
+:::tip
+**tfvars strategy:** We commit `terraform.tfvars` for non-sensitive environment config (instance sizes, feature flags, region settings). Only `secret.auto.tfvars` is gitignored, for values like database passwords. This way your environment configuration is version-controlled and reviewable in PRs, while secrets stay out of the repo.
+:::
+
 ---
 
-## Step 1: Bootstrap — State Bucket
+## Step 1: Bootstrap the State Bucket
 
 Terraform tracks what it has created in a **state file**. By default, this is stored locally (`terraform.tfstate`), but that's problematic:
 
 - Lose your laptop? Lose your state.
 - Team members can't collaborate.
-- No locking — two people can corrupt state simultaneously.
+- No locking, so two people can corrupt state simultaneously.
 
 We'll store state in S3 with native locking (Terraform 1.10+).
 
@@ -497,11 +469,11 @@ state_bucket_region = "us-east-1"
 ```
 </TerminalOutput>
 
-**Save these outputs** — you'll need the bucket name for the backend configuration.
+**Save these outputs.** You'll need the bucket name for the backend configuration.
 
 <Alert type="note">
 
-The bootstrap directory uses local state (stored in `terraform/bootstrap/terraform.tfstate`). This is intentional — we can't store bootstrap state in a bucket that doesn't exist yet. Keep this file safe or commit it to a private repo.
+The bootstrap directory uses local state (stored in `terraform/bootstrap/terraform.tfstate`). This is intentional: we can't store bootstrap state in a bucket that doesn't exist yet. Keep this file safe or commit it to a private repo.
 
 </Alert>
 
@@ -535,8 +507,8 @@ terraform {
 ```
 
 **Key points:**
-- `key` — Path within the bucket. Use a clear naming convention.
-- `use_lockfile = true` — Enables native S3 locking. No DynamoDB needed!
+- `key`: Path within the bucket. Use a clear naming convention.
+- `use_lockfile = true`: Enables native S3 locking. No DynamoDB needed!
 - Each environment gets its own state file (`dev/`, `prod/`, etc.)
 
 </details>
@@ -707,7 +679,7 @@ Terraform has been successfully initialized!
 
 ---
 
-## Step 4: Codify Part 1 — CloudTrail & Budgets
+## Step 4: Codify Part 1, CloudTrail and Budgets
 
 Now let's recreate what we did manually in Part 1.
 
@@ -919,7 +891,7 @@ Plan: 7 to add, 0 to change, 0 to destroy.
 
 ---
 
-## Step 5: Codify Part 2 — IAM
+## Step 5: Codify Part 2, IAM
 
 Now let's codify the IAM setup from Part 2.
 
@@ -1764,17 +1736,15 @@ Verify your Terraform setup is complete:
 
 ## Key Takeaways
 
-1. **Terraform is declarative.** Describe what you want, not how to get there. Run `terraform plan` to see what will change before committing.
+1. Remote state in S3 with DynamoDB locking is non-negotiable from day one, because recovering from a corrupted local state file means reimporting every resource by hand.
+2. Commit `terraform.tfvars` for non-sensitive environment config and gitignore `secret.auto.tfvars` for secrets, so your environment settings are reviewable in PRs.
+3. Run `terraform plan` before every `apply` and read the output, because the plan is the only moment you can catch an agent's mistake before it becomes infrastructure.
+4. `import` blocks bring existing console-created resources under Terraform management without recreating them, which is how you migrate from clicking to coding.
+5. Start with flat files and extract modules only when you copy-paste the same resource block a third time.
 
-2. **State is sacred.** Store it in S3 with versioning. Native locking (Terraform 1.10+) means no DynamoDB needed. Never edit state manually.
+## What's Coming
 
-3. **Modules reduce copy-paste.** When you write the same pattern three times, make it a module. Start simple, extract when needed.
-
-4. **Default tags save headaches.** Configure them in the provider once, and every resource gets tagged automatically.
-
-5. **Import existing resources.** Don't recreate what you already have. Use `import` blocks to bring manual resources under Terraform management.
-
-Your infrastructure is now code. You can recreate everything with `terraform apply`, review changes in PRs, and track history in Git. Next up: [Part 5 — SigNoz Setup](/blog/aws-for-startups/05-signoz-setup), where we'll deploy observability infrastructure with Terraform.
+Next in **Part 5: OpenTelemetry Setup**, we deploy observability infrastructure with Terraform. The patterns you learned today (modules, remote state, environment config) carry forward into every Terraform file for the rest of the series.
 
 ---
 

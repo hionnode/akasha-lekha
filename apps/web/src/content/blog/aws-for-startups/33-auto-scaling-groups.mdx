@@ -5,7 +5,7 @@ excerpt: "Servers that scale themselves. Auto Scaling Groups with launch templat
 date: "2026-05-12"
 author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "ec2", "terraform", "backend"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 33
 featured: false
 draft: true
@@ -289,13 +289,13 @@ The connection between your ALB and ASG creates automatic health recovery:
 
 :::steps
 1. ALB health check hits `/health` on each registered instance every 30 seconds
-2. If an instance fails 3 consecutive health checks, the ALB marks it `unhealthy`
+2. If an instance fails 2 consecutive health checks, the ALB marks it `unhealthy`
 3. The ASG (with `health_check_type = "ELB"`) sees the unhealthy status
 4. The ASG terminates the unhealthy instance
 5. The ASG launches a replacement using the launch template
 6. The new instance runs user data, starts the application
 7. The ALB detects the new instance, begins health checks
-8. After 3 consecutive successful health checks, the ALB marks it `healthy`
+8. After 2 consecutive successful health checks, the ALB marks it `healthy`
 9. Traffic flows to the new instance
 :::
 

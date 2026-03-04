@@ -8,6 +8,7 @@ tags: ["aws", "devops", "startup", "rds", "database"]
 series: "aws-for-startups"
 seriesPart: 36
 draft: true
+featured: false
 ---
 
 import Alert from '../../../components/shared/Alert.astro';
@@ -110,6 +111,10 @@ Always specify `--db-subnet-group-name`, `--vpc-security-group-ids`, and `--db-p
 ### Testing Your Restore (Do This Now)
 
 Do not wait for an emergency. Run the restore procedure on your dev instance today:
+
+:::note
+**macOS vs Linux `date`.** The `date` command differs between macOS (BSD) and Linux (GNU). macOS uses `-v+1d` for "tomorrow," GNU uses `-d "+1 day"`. If you are on macOS, install GNU coreutils via `brew install coreutils` and use `gdate`, or adjust the flags. We use GNU syntax throughout this series since CI runners and EC2 instances run Linux.
+:::
 
 ```bash terminal
 # Step 1: Create a restore from 1 hour ago

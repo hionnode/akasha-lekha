@@ -3,7 +3,7 @@ title: "Capstone Deployment: From Zero to Production"
 description: "Deploy the complete multi-tenant SaaS application using the full Generate, Verify, Explain pipeline. Terraform from zero to production in one part."
 excerpt: "From zero to production. The full pipeline deploys the capstone application: Terraform, containers, serverless, databases, all in one coordinated deployment."
 date: "2026-10-06"
-author: "Chinmay"
+author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "terraform", "ai-agents"]
 series: "aws-for-startups"
 seriesPart: 68
@@ -218,6 +218,8 @@ resource "aws_db_instance" "main" {
   username = var.master_username
   password = data.aws_secretsmanager_secret_version.db_password.secret_string
 
+  # See note below about manage_master_user_password
+
   multi_az               = var.environment == "prod" ? true : false
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [var.db_security_group_id]
@@ -236,6 +238,10 @@ resource "aws_db_instance" "main" {
   })
 }
 ```
+
+:::note
+**Use RDS-managed passwords.** For consistency with [Part 37](/blog/aws-for-startups/37-secrets-manager), use `manage_master_user_password = true` instead of managing the password manually. See Part 37 for the recommended approach.
+:::
 
 **ElastiCache Redis** in the same data subnets:
 
@@ -587,6 +593,10 @@ resource "aws_cloudfront_distribution" "main" {
   })
 }
 ```
+
+:::warning
+**Deprecated configuration.** The `forwarded_values` block is deprecated in favor of cache policies (`cache_policy_id`). For new distributions, use `aws_cloudfront_cache_policy` resources or the managed `CachingOptimized` policy (ID: `658327ea-f89d-4fab-a63d-7e88639e58f6`). See [Part 15](/blog/aws-for-startups/15-cloudfront-cdn) for the cache policy approach.
+:::
 
 The `/api/*` path routes to the ALB origin with no caching (TTL 0). Everything else serves from S3. The custom error response handles client-side routing for the React SPA.
 

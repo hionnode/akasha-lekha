@@ -5,7 +5,7 @@ excerpt: "Global performance without the complexity. CloudFront CDN in front of 
 date: "2026-03-04"
 author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "cloudfront", "s3", "terraform", "frontend"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 15
 featured: false
 draft: true
@@ -186,6 +186,10 @@ resource "aws_cloudfront_distribution" "this" {
     error_caching_min_ttl = 10
   }
 
+:::note
+**Static site vs SPA:** This error response configuration returns `/index.html` for 403/404 errors, which is the pattern for single-page applications (React, Vue, etc.). If you're serving a static site as built in Part 13, you may want to remove this block and let CloudFront return the actual error codes. We include the SPA configuration here because Parts 17-18 deploy frontend frameworks that need client-side routing.
+:::
+
   # SSL certificate from ACM (must be in us-east-1)
   viewer_certificate {
     acm_certificate_arn      = var.acm_certificate_arn
@@ -320,6 +324,10 @@ viewer_certificate {
 ## S3 Bucket Policy for OAC
 
 Your S3 bucket from [Part 13](/blog/aws-for-startups/13-s3-static-hosting) needs an updated bucket policy. Replace the public read policy with one that only allows CloudFront:
+
+:::warning
+**Migrating from Public to Private:** In Part 13, we set up the S3 bucket with public access for direct website hosting. Now that CloudFront handles content delivery, we need to lock the bucket down: remove the public bucket policy, re-enable the Block Public Access settings, and add an OAC policy that only allows CloudFront to read from the bucket.
+:::
 
 ```hcl title="infra/modules/cdn/s3_policy.tf"
 data "aws_iam_policy_document" "s3_cloudfront" {

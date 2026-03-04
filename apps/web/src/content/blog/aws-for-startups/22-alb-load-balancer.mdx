@@ -5,7 +5,7 @@ excerpt: "The front door to your backend. ALB with HTTPS, health checks, and tar
 date: "2026-04-01"
 author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "alb", "networking", "terraform"]
-series: "AWS From Zero to Production"
+series: "aws-for-startups"
 seriesPart: 22
 featured: false
 draft: true
@@ -168,6 +168,10 @@ The HTTP listener exists solely to redirect to HTTPS. Every request to port 80 g
 
 :::note
 The `acm_certificate_arn` comes from the ACM certificate you created in [Part 14](/blog/aws-for-startups/14-route53-acm-dns). If you have not completed Part 14, you can skip HTTPS for now and use an HTTP-only listener on port 80. But do not deploy to production without HTTPS.
+:::
+
+:::warning
+**ACM certificate region matters.** The certificate from [Part 14](/blog/aws-for-startups/14-route53-acm-dns) was created in `us-east-1` (required for CloudFront). ALB certificates must be in the same region as the ALB. If your ALB is in a different region (like `ap-south-1`), you need a second ACM certificate in that region.
 :::
 
 ### Target Group

@@ -3,11 +3,12 @@ title: "WebSockets: Real-Time Without Managing Connections"
 description: "Implement WebSocket APIs with API Gateway. Connection management, message routing, and the serverless approach to real-time communication."
 excerpt: "Real-time without managing connections. API Gateway WebSocket APIs for serverless bidirectional communication."
 date: "2026-08-10"
-author: "Chinmay"
+author: "works-on-my.cloud"
 tags: ["aws", "devops", "startup", "api-gateway", "serverless"]
 series: "aws-for-startups"
 seriesPart: 56
 draft: true
+featured: false
 ---
 
 import Alert from '../../../components/shared/Alert.astro';
@@ -424,6 +425,10 @@ export async function sendToUser(
 ```
 
 To send to a specific user, you need a Global Secondary Index on `userId`:
+
+:::note
+**Replacing the earlier definition.** This DynamoDB table configuration supersedes the basic version shown above. In your actual Terraform code, use only this final version.
+:::
 
 ```hcl title="infra/modules/websocket/dynamodb.tf"
 resource "aws_dynamodb_table" "connections" {
