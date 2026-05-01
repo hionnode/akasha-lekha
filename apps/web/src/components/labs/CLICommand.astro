@@ -11,8 +11,6 @@ const { command, description, class: className } = Astro.props;
 ---
 
 <div class:list={['cli-command', className]}>
-  {description && (
-    <p class="mb-2 text-sm text-fg-secondary">{description}</p>
-  )}
-  <CLICommandCopy client:load command={command} />
+  {description && <p class="mb-2 text-sm text-fg-secondary">{description}</p>}
+  <CLICommandCopy client:visible command={command} />
 </div>
