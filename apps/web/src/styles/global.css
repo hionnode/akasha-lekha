@@ -28,24 +28,24 @@
   --color-hover: #2f3549;
 }
 
-/* CSS Custom Properties for easier use */
+/* Short aliases for use in plain CSS — values come from @theme above. */
 :root {
-  --bg-primary: #1a1b26;
-  --bg-secondary: #16161e;
-  --bg-tertiary: #24283b;
-  --fg-primary: #c0caf5;
-  --fg-secondary: #a9b1d6;
-  --fg-muted: #565f89;
-  --accent-blue: #7aa2f7;
-  --accent-cyan: #7dcfff;
-  --accent-green: #9ece6a;
-  --accent-yellow: #e0af68;
-  --accent-orange: #ff9e64;
-  --accent-red: #f7768e;
-  --accent-purple: #bb9af7;
-  --accent-magenta: #c0a7e0;
-  --border: #292e42;
-  --hover: #2f3549;
+  --bg-primary: var(--color-bg-primary);
+  --bg-secondary: var(--color-bg-secondary);
+  --bg-tertiary: var(--color-bg-tertiary);
+  --fg-primary: var(--color-fg-primary);
+  --fg-secondary: var(--color-fg-secondary);
+  --fg-muted: var(--color-fg-muted);
+  --accent-blue: var(--color-accent-blue);
+  --accent-cyan: var(--color-accent-cyan);
+  --accent-green: var(--color-accent-green);
+  --accent-yellow: var(--color-accent-yellow);
+  --accent-orange: var(--color-accent-orange);
+  --accent-red: var(--color-accent-red);
+  --accent-purple: var(--color-accent-purple);
+  --accent-magenta: var(--color-accent-magenta);
+  --border: var(--color-border);
+  --hover: var(--color-hover);
 }
 
 /* Base Styles */
