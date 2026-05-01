@@ -41,41 +41,18 @@ const { cmd, description, copyable = true } = Astro.props;
 </div>
 
 <script>
+  import { attachCopyButtons } from '../../../utils/clipboard';
+
   function initCommandReference() {
-    const buttons = document.querySelectorAll('.command-copy');
-
-    buttons.forEach((button) => {
-      button.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const cmd = (button as HTMLElement).getAttribute('data-command');
-        if (!cmd) return;
-
-        try {
-          await navigator.clipboard.writeText(cmd);
-          const originalHTML = button.innerHTML;
-          button.innerHTML =
-            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-          button.classList.add('copied');
-
-          setTimeout(() => {
-            button.innerHTML = originalHTML;
-            button.classList.remove('copied');
-          }, 2000);
-        } catch (err) {
-          console.error('Failed to copy:', err);
-        }
-      });
-    });
+    attachCopyButtons('.command-copy', (button) => button.getAttribute('data-command'));
   }
 
-  // Initialize on page load
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initCommandReference);
   } else {
     initCommandReference();
   }
 
-  // Re-initialize on navigation (Astro View Transitions)
   document.addEventListener('astro:page-load', initCommandReference);
 </script>
 

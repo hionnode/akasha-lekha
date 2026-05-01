@@ -39,39 +39,14 @@ const outputId = `terminal-${Math.random().toString(36).substr(2, 9)}`;
 </div>
 
 <script>
+  import { attachCopyButtons } from '../../../utils/clipboard';
+
   function initTerminalOutput() {
-    const outputs = document.querySelectorAll('.terminal-output');
-
-    outputs.forEach((output) => {
-      const outputId = output.getAttribute('data-output-id');
-      if (!outputId) return;
-
-      const content = output.querySelector(`.terminal-content[data-output-id="${outputId}"]`);
-      const copyButton = output.querySelector(
-        `.terminal-copy-button[data-output-id="${outputId}"]`
-      );
-
-      // Copy functionality
-      if (copyButton && content) {
-        copyButton.addEventListener('click', async () => {
-          const text = content.textContent || '';
-
-          try {
-            await navigator.clipboard.writeText(text);
-            const originalHTML = copyButton.innerHTML;
-            copyButton.innerHTML =
-              '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-            copyButton.classList.add('copied');
-
-            setTimeout(() => {
-              copyButton.innerHTML = originalHTML;
-              copyButton.classList.remove('copied');
-            }, 2000);
-          } catch (err) {
-            console.error('Failed to copy:', err);
-          }
-        });
-      }
+    attachCopyButtons('.terminal-copy-button', (button) => {
+      const outputId = button.getAttribute('data-output-id');
+      if (!outputId) return null;
+      const content = document.querySelector(`.terminal-content[data-output-id="${outputId}"]`);
+      return content?.textContent ?? '';
     });
   }
 

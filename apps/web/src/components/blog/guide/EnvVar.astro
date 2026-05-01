@@ -45,40 +45,18 @@ const { name, required = false, description, default: defaultValue, type = 'stri
 </div>
 
 <script>
+  import { attachCopyButtons } from '../../../utils/clipboard';
+
   function initEnvVars() {
-    const buttons = document.querySelectorAll('.env-var-copy');
-
-    buttons.forEach((button) => {
-      button.addEventListener('click', async () => {
-        const varName = (button as HTMLElement).getAttribute('data-var-name');
-        if (!varName) return;
-
-        try {
-          await navigator.clipboard.writeText(varName);
-          const originalHTML = button.innerHTML;
-          button.innerHTML =
-            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-          button.classList.add('copied');
-
-          setTimeout(() => {
-            button.innerHTML = originalHTML;
-            button.classList.remove('copied');
-          }, 2000);
-        } catch (err) {
-          console.error('Failed to copy:', err);
-        }
-      });
-    });
+    attachCopyButtons('.env-var-copy', (button) => button.getAttribute('data-var-name'));
   }
 
-  // Initialize on page load
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initEnvVars);
   } else {
     initEnvVars();
   }
 
-  // Re-initialize on navigation (Astro View Transitions)
   document.addEventListener('astro:page-load', initEnvVars);
 </script>
 
