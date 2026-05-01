@@ -1,10 +1,12 @@
 ---
+import type { ModuleStatus } from '../../../content/labs/schemas';
+
 interface Module {
   id: string;
   title: string;
   icon?: string;
   exerciseCount: number;
-  status: 'available' | 'coming-soon' | 'beta';
+  status: ModuleStatus;
 }
 
 interface Props {
@@ -21,11 +23,12 @@ const {
   class: className,
 } = Astro.props;
 
-// Sort modules by status (available first) then by order
-const sortedModules = [...modules].sort((a, b) => {
-  const statusOrder = { available: 0, beta: 1, 'coming-soon': 2 };
-  return (statusOrder[a.status] || 2) - (statusOrder[b.status] || 2);
-});
+const statusOrder: Record<ModuleStatus, number> = {
+  available: 0,
+  beta: 1,
+  'coming-soon': 2,
+};
+const sortedModules = [...modules].sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
 ---
 
 <aside class:list={['labs-sidebar', className]}>

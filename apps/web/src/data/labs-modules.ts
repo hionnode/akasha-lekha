@@ -2,6 +2,7 @@
  * Static module definitions for labs.
  * These are the learning modules displayed on the labs landing and sidebar.
  */
+import type { ModuleStatus } from '../content/labs/schemas';
 
 export interface LabModule {
   id: string;
@@ -12,7 +13,7 @@ export interface LabModule {
   prerequisites: string[];
   estimatedTime: string;
   exerciseCount: number;
-  status: 'available' | 'coming-soon' | 'beta';
+  status: ModuleStatus;
 }
 
 export const labModules: LabModule[] = [

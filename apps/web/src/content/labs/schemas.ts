@@ -75,3 +75,5 @@ export const labsExerciseSchema = z.object({
 // TypeScript types inferred from schemas
 export type LabsModule = z.infer<typeof labsModuleSchema>;
 export type LabsExercise = z.infer<typeof labsExerciseSchema>;
+export type ModuleStatus = LabsModule['status'];
+export type ExerciseDifficulty = LabsExercise['difficulty'];
