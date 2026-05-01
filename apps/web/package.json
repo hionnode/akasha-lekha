@@ -48,7 +48,6 @@
     "@types/mdast": "^4.0.4",
     "@types/unist": "^3.0.3",
     "@vitest/ui": "^4.0.18",
-    "happy-dom": "^20.3.9",
     "jsdom": "^27.4.0",
     "vite-plugin-solid": "^2.11.10",
     "vitest": "^4.0.18",
