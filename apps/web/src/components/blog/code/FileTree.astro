@@ -107,13 +107,10 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
       }
     });
 
-    console.log('[FileTree] Parsed tree structure:', JSON.stringify(root, null, 2));
     return root;
   }
 
   function getFileIcon(_filename: string): string {
-    // Return file icon SVG - we'll use the same icon for all files for simplicity
-    // Can be enhanced later with file type specific icons
     return fileIcon;
   }
 
@@ -205,16 +202,12 @@ const { collapsible = true, defaultExpanded = true, class: className = '' } = As
       const collapsible = tree.getAttribute('data-collapsible') === 'true';
       const defaultExpanded = tree.getAttribute('data-default-expanded') === 'true';
 
-      // Parse text content if it's plain text
       const textContent = tree.textContent?.trim() || '';
       if (textContent && !tree.querySelector('.tree-node')) {
-        console.log('[FileTree] Parsing text content:', textContent);
         const nodes = parseTreeText(textContent);
-        console.log('[FileTree] Parsed nodes:', nodes);
         // Clear the original text content to prevent double rendering
         tree.textContent = '';
         nodes.forEach((node: TreeNode) => {
-          console.log('[FileTree] Rendering node:', node);
           renderTree(node, tree as HTMLElement, collapsible, defaultExpanded);
         });
       }

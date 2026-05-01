@@ -80,28 +80,20 @@
 
 <script>
   function initTOCMinimap() {
-    console.log('[TOC] Initializing TOC Minimap...');
-
     const tocNav = document.getElementById('toc-minimap-nav');
     const tocContainer = document.getElementById('toc-minimap');
     const article = document.getElementById('article-content');
     const progressBar = document.getElementById('toc-progress-bar');
 
-    console.log('[TOC] Elements found:', { tocNav, article, headingsFound: !!article });
-
     if (!article || !tocNav) {
-      console.warn('[TOC] Missing required elements');
       return;
     }
 
     // Find all h2, h3, and h4 headings
     const headings = article.querySelectorAll('.prose h2, .prose h3, .prose h4');
-    console.log('[TOC] Found headings:', headings.length);
 
     if (headings.length === 0) {
-      // Hide TOC if no headings
       if (tocContainer) tocContainer.style.display = 'none';
-      console.log('[TOC] No headings found, hiding TOC');
       return;
     }
 
@@ -134,9 +126,7 @@
         heading.id = id;
       }
 
-      // Skip empty headings
       if (!text) {
-        console.log('[TOC] Skipping empty heading at index', index);
         return;
       }
 
@@ -149,21 +139,15 @@
       link.textContent = text;
 
       fragment.appendChild(link);
-
-      console.log('[TOC] Added link:', { level, text: text.substring(0, 30) + '...' });
     });
 
-    // Append all links at once
     tocNav.appendChild(fragment);
-    console.log('[TOC] TOC populated with', tocNav.children.length, 'links');
 
-    // Setup interaction
     setupMinimapInteraction(headings, progressBar);
   }
 
   function setupMinimapInteraction(headings: NodeListOf<Element>, progressBar: HTMLElement | null) {
     const tocLinks = document.querySelectorAll('a[data-toc-minimap-item]');
-    console.log('[TOC] Setting up interaction for', tocLinks.length, 'links');
 
     // Smooth scroll on click
     tocLinks.forEach((link) => {
@@ -253,24 +237,15 @@
     updateProgress();
   }
 
-  // Initialize with multiple strategies
-  console.log('[TOC] Registering initialization handlers...');
-
-  // Strategy 1: DOMContentLoaded
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
-      console.log('[TOC] DOMContentLoaded - initializing');
       setTimeout(initTOCMinimap, 100);
     });
   } else {
-    // Strategy 2: Already loaded
-    console.log('[TOC] Document already loaded - initializing');
     setTimeout(initTOCMinimap, 100);
   }
 
-  // Strategy 3: Astro page load event
   document.addEventListener('astro:page-load', () => {
-    console.log('[TOC] Astro page load - initializing');
     setTimeout(initTOCMinimap, 100);
   });
 </script>
