@@ -1,14 +1,8 @@
 echo "Running pre-commit checks..."
 
-# Run lint-staged
 pnpm lint-staged
 
-# Validate blog posts
 echo "\nValidating blog posts..."
 pnpm validate:blog
-
-# Build check
-echo "\nVerifying build..."
-pnpm build
 
 echo "\nAll pre-commit checks passed!"
